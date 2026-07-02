@@ -22,6 +22,12 @@ parser = argparse.ArgumentParser(
     description="HOSVD subspace projection + RF classification on pooled tensors"
 )
 parser.add_argument(
+    "--model",
+    type=str,
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    help="HuggingFace model ID (used for file naming, must match generation)",
+)
+parser.add_argument(
     "--dataset",
     type=str,
     required=True,
@@ -40,19 +46,21 @@ args = parser.parse_args()
 # CONSTANTS
 # ==============================================================================
 
+MODEL_KEY = args.model.split("/")[-1].replace("-", "").replace(".", "_").lower()
+
 R_L = 5          # target layer rank
 R_D = 64         # target hidden-dim rank
 RANDOM_SEED = 42
 
 SUFFIX = "debug" if args.debug else "full"
-INPUT_PATH = f"llama3_{args.dataset}_pooled_{SUFFIX}.pt"
+INPUT_PATH = f"../data/{MODEL_KEY}_{args.dataset}_pooled_{SUFFIX}.pt"
 
 # ==============================================================================
 # 1. LOAD DATA
 # ==============================================================================
 
 print("=" * 60)
-print(f"  HOSVD AUROC  |  {args.dataset.upper()}  |  {'DEBUG' if args.debug else 'FULL'}")
+print(f"  HOSVD AUROC  |  {args.dataset.upper()}  |  {MODEL_KEY}  |  {'DEBUG' if args.debug else 'FULL'}")
 print("=" * 60)
 
 print(f"\nLoading pooled tensor: {INPUT_PATH}")

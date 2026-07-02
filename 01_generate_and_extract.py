@@ -60,7 +60,13 @@ class StopOnNewline(StoppingCriteria):
 # ==============================================================================
 
 parser = argparse.ArgumentParser(
-    description="LLaMA-3.1-8B generation + hallucination grading + extraction"
+    description="LLaMA generation + hallucination grading + extraction"
+)
+parser.add_argument(
+    "--model",
+    type=str,
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    help="HuggingFace model ID (used for loading and file naming)",
 )
 parser.add_argument(
     "--dataset",
@@ -81,14 +87,17 @@ args = parser.parse_args()
 # CONSTANTS
 # ==============================================================================
 
-MODEL_ID = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_ID  = args.model
+MODEL_KEY = MODEL_ID.split("/")[-1].replace("-", "").replace(".", "_").lower()
+# e.g. "meta-llama/Llama-3.2-3B-Instruct" -> "llama_3_2_3b_instruct"
+
 MAX_NEW_TOKENS = 50
 DEBUG_MAX_SAMPLES = 50
-DEBUG_FRAC = 0.05
-RANDOM_SEED = 42
+DEBUG_FRAC     = 0.05
+RANDOM_SEED    = 42
 
 SUFFIX = "debug" if args.debug else "full"
-OUTPUT_PATH = f"llama3_{args.dataset}_pooled_{SUFFIX}.pt"
+OUTPUT_PATH = f"../data/{MODEL_KEY}_{args.dataset}_pooled_{SUFFIX}.pt"
 
 torch.manual_seed(RANDOM_SEED)
 
