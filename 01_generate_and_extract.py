@@ -161,8 +161,8 @@ def load_dataset_sharded(name: str, debug: bool,
 def _load_metrics(debug: bool):
     import evaluate
     rouge = evaluate.load("rouge")
-    bleurt_device = "cpu" if debug else None
-    bleurt = evaluate.load("bleurt", config_name="BLEURT-20", device=bleurt_device)
+    # Always keep BLEURT on CPU — prevents TensorFlow from grabbing GPU VRAM
+    bleurt = evaluate.load("bleurt", config_name="BLEURT-20", device="cpu")
     return rouge, bleurt
 
 
