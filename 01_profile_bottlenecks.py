@@ -23,6 +23,19 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 
 # ==============================================================================
+# STRICT GPU ENFORCEMENT  (CUDA is mandatory — abort if fallback to CPU)
+# ==============================================================================
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "CRITICAL ERROR: CUDA is not available. "
+        "PyTorch is defaulting to CPU. Aborting run."
+    )
+device = torch.device("cuda")
+print(f"Using device: {torch.cuda.get_device_name(0)}")
+
+
+# ==============================================================================
 # SYSTEM PROMPT & FEW-SHOT (forces concise, single-line answers)
 # ==============================================================================
 
@@ -343,10 +356,12 @@ def main():
     print("\n[3/4] Loading model ...")
     model, tokenizer, num_layers, hidden_dim = load_model(args.debug)
 
-    # -- 4. Generation loop (profiling: 100 samples max) ------------------
+    # -- 4. Batched generation loop (profiling: 100 samples max) ----------
     PROFILE_SAMPLES = 100
+    BATCH_SIZE = 4
     n_profile = min(len(pairs), PROFILE_SAMPLES)
-    print(f"\n[4/4] Processing {n_profile} samples (PROFILING MODE) ...\n")
+    print(f"\n[4/4] Processing {n_profile} samples "
+          f"(PROFILING MODE, batch size {BATCH_SIZE}) ...\n")
 
     # Cumulative timers
     t_gen    = 0.0
@@ -354,29 +369,111 @@ def main():
     t_faizul = 0.0
     t_hosvd  = 0.0
 
-    for idx, (prompt, reference) in enumerate(pairs[:n_profile]):
-        faizul_vec, H_pooled, is_hall, t_new, timings = process_one_sample(
-            prompt, reference, model, tokenizer,
-            num_layers, hidden_dim, rouge, bleurt)
+    # Add newline token to eos so each batch item stops independently
+    newline_id = tokenizer.encode("\n", add_special_tokens=False)[-1]
+    eos_ids = list(set([tokenizer.eos_token_id, newline_id]))
 
-        t_gen    += timings["gen"]
-        t_bleurt += timings["bleurt"]
-        t_faizul += timings["faizul"]
-        t_hosvd  += timings["hosvd"]
+    profile_pairs = pairs[:n_profile]
+    global_idx = 0
 
-        if (idx + 1) % 10 == 0 or idx == 0:
+    for batch_start in range(0, n_profile, BATCH_SIZE):
+        batch_pairs = profile_pairs[batch_start:batch_start + BATCH_SIZE]
+        b_prompts   = [p for p, r in batch_pairs]
+        b_refs      = [r for p, r in batch_pairs]
+        B = len(batch_pairs)
+
+        # Build batch chat templates
+        batch_texts = []
+        for prompt in b_prompts:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": FEWSHOT_USER},
+                {"role": "assistant", "content": FEWSHOT_ASSISTANT},
+                {"role": "user", "content": prompt},
+            ]
+            batch_texts.append(tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True))
+
+        inputs = tokenizer(batch_texts, return_tensors="pt", padding=True).to(device)
+        prompt_lens = inputs.attention_mask.sum(dim=1)
+
+        # BLOCK A: Batched generation + hidden state extraction per item
+        t0 = time.time()
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=MAX_NEW_TOKENS,
+                eos_token_id=eos_ids,
+                output_hidden_states=True, return_dict_in_generate=True,
+                do_sample=True, temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id)
+
+        gen_duration = time.time() - t0
+
+        # Process each batch item individually
+        for b in range(B):
+            prompt_len = prompt_lens[b].item()
+            gen_ids = outputs.sequences[b, prompt_len:]
+            gen_ids = gen_ids[gen_ids != tokenizer.eos_token_id]
+            generation = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            num_generated = len(gen_ids)
+
+            # BLOCK B: BLEURT + ROUGE
+            t0 = time.time()
+            is_hall = judge_hallucination(generation, b_refs[b], rouge, bleurt)
+            t_bleurt += time.time() - t0
+
+            if num_generated == 0:
+                t_faizul += 0
+                t_hosvd += 0
+                global_idx += 1
+                continue
+
+            # Extract hidden states for this batch item
+            hidden_states = outputs.hidden_states
+            layer_list = []
+            for l in range(num_layers):
+                tokens = []
+                for step in range(1, len(hidden_states)):
+                    if step - 1 >= num_generated:
+                        break
+                    h = hidden_states[step][l + 1][b]
+                    tokens.append(h.unsqueeze(0).cpu())
+                layer_list.append(torch.cat(tokens, dim=0) if tokens
+                                  else torch.zeros(0, hidden_dim))
+            H_raw = torch.stack(layer_list, dim=0)
+
+            # BLOCK C: Faizul SVD
+            t0 = time.time()
+            H_delta = H_raw[1:] - H_raw[:-1]
+            f_h    = compute_faizul_features(H_raw)
+            f_h_d  = compute_faizul_features(H_delta)
+            t_faizul += time.time() - t0
+
+            # BLOCK D: HOSVD pooling
+            t0 = time.time()
+            _ = H_raw.float().mean(dim=1)
+            t_hosvd += time.time() - t0
+
+            global_idx += 1
+
+        t_gen += gen_duration
+
+        del outputs, inputs, H_raw, H_delta
+        torch.cuda.empty_cache()
+
+        if global_idx % 10 == 0 or global_idx <= BATCH_SIZE:
             vram = torch.cuda.memory_allocated() / 1e9
-            print(f"  [{idx+1:4d}/{n_profile}]  "
-                  f"gen: {timings['gen']:.2f}s  bleurt: {timings['bleurt']:.2f}s  "
-                  f"faizul: {timings['faizul']:.2f}s  hosvd: {timings['hosvd']:.3f}s  "
+            print(f"  [{global_idx:4d}/{n_profile}]  "
+                  f"batch gen: {gen_duration:.2f}s  "
+                  f"avg gen/item: {gen_duration/B:.2f}s  "
                   f"VRAM: {vram:.2f} GB", flush=True)
 
     # -- Diagnostic report ------------------------------------------------
     t_total = t_gen + t_bleurt + t_faizul + t_hosvd
-    m = n_profile
+    m = global_idx
 
     print(f"\n{'=' * 60}")
-    print(f"  PROFILING REPORT  ({m} samples)")
+    print(f"  PROFILING REPORT  ({m} samples, batch size {BATCH_SIZE})")
     print(f"{'=' * 60}")
     print(f"  {'Block':30s}  {'Cumul.':>8s}  {'Avg/sample':>10s}  {'%':>6s}")
     print(f"  {'─' * 30}  {'─' * 8}  {'─' * 10}  {'─' * 6}")
