@@ -1,16 +1,12 @@
 """
-01_generate_and_extract.py — Beam-Search Generation & Dual Extraction
-=======================================================================
-HARP-compatible evaluation protocol:
-  1. Beam search (10 beams) per prompt
-  2. Contrastive BLEURT/ROUGE judge vs correct + incorrect answers
-  3. Known/unknown classification (any beam correct → known)
-  4. Extract mean-pooled hidden states for ALL beams
-  5. Save to data/{model_folder}/{dataset}_pooled.pt
+01_generate_and_extract.py — HARP-Compatible Generation & Extraction
+=====================================================================
+Beam search (10 beams) per prompt.  Contrastive BLEURT/ROUGE judge.
+No system prompt — exact prompt templates matching HARP's protocol.
 
 Usage:
   python 01_generate_and_extract.py
-  python 01_generate_and_extract.py --model meta-llama/Llama-3.2-3B-Instruct --dataset triviaqa
+  python 01_generate_and_extract.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --dataset triviaqa
 """
 
 # -- MUST be before ANY other imports: prevents TensorFlow seizing all VRAM --
@@ -19,37 +15,29 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import argparse
 import gc
-import json
 import sys
-import time
 
 import torch
 import yaml
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# ==============================================================================
-# CONFIG LOADER
-# ==============================================================================
-
-def load_config(path="config.yaml"):
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-cfg = load_config()
 
 # ==============================================================================
-# CLI ARGS (filter which model/dataset to run)
+# CONFIG
 # ==============================================================================
+
+with open("config.yaml") as f:
+    cfg = yaml.safe_load(f)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", type=str, default=None, help="Filter: model ID")
-parser.add_argument("--dataset", type=str, default=None, help="Filter: dataset name")
-parser.add_argument("--debug", action="store_true", help="4-bit, 5% slice")
+parser.add_argument("--model", type=str, default=None)
+parser.add_argument("--dataset", type=str, default=None)
+parser.add_argument("--debug", action="store_true")
 args = parser.parse_args()
 
 # ==============================================================================
-# STRICT GPU ENFORCEMENT
+# GPU ENFORCEMENT
 # ==============================================================================
 
 if not torch.cuda.is_available():
@@ -57,42 +45,74 @@ if not torch.cuda.is_available():
 device = torch.device("cuda")
 print(f"GPU: {torch.cuda.get_device_name(0)}")
 
+
 # ==============================================================================
-# DATASET LOADER (correct + incorrect answers for contrastive judging)
+# DATASET LOADER
 # ==============================================================================
 
-def load_dataset_with_labels(ds_cfg: dict, debug: bool):
-    """Return list of dicts: {prompt, correct_answers, incorrect_answers}."""
+def load_dataset(ds_cfg: dict, debug: bool):
+    """Return list of dicts: {prompt_text, correct_answers, incorrect_answers}.
+
+    prompt_text is the fully formatted string ready for tokenization.
+    """
     from datasets import load_dataset
 
     name = ds_cfg["name"]
     path = ds_cfg["hf_path"]
     config = ds_cfg["hf_config"]
+    template = ds_cfg["prompt_template"]
 
     ds = load_dataset(path, config, split="validation")
 
+    samples = []
+
     if name == "truthfulqa":
-        prompts    = ds["question"]
-        correct   = [[a] for a in ds["best_answer"]]
-        incorrect = [ia for ia in ds["incorrect_answers"]]
+        for ex in ds:
+            samples.append({
+                "prompt_text": template.format(question=ex["question"]),
+                "correct_answers": [str(ex["best_answer"])],
+                "incorrect_answers": [str(a) for a in ex["incorrect_answers"]],
+            })
+
     elif name == "triviaqa":
-        prompts    = ds["question"]
-        correct   = [[a["value"]] for a in ds["answer"]]
-        incorrect = [[] for _ in prompts]  # TriviaQA has no incorrect list
-    elif name == "tydiqa":
-        prompts    = ds["question"]
-        correct   = [[a["text"][0]] if len(a["text"]) > 0 else [""] for a in ds["answers"]]
-        incorrect = [[] for _ in prompts]
+        # Deduplicate by question_id (HARP)
+        seen = set()
+        for ex in ds:
+            qid = ex["question_id"]
+            if qid in seen:
+                continue
+            seen.add(qid)
+            value = ex["answer"]["value"]
+            samples.append({
+                "prompt_text": template.format(question=ex["question"]),
+                "correct_answers": [str(value)],
+                "incorrect_answers": [],
+            })
+
+    elif name == "nq_open":
+        for ex in ds:
+            samples.append({
+                "prompt_text": template.format(question=ex["question"]),
+                "correct_answers": [str(a) for a in ex["answer"]],
+                "incorrect_answers": [],
+            })
+
+    elif name == "tydiqa_gp":
+        # English only (HARP)
+        for ex in ds:
+            if ex.get("language", "english") != "english":
+                continue
+            ctx = ex["context"][0] if isinstance(ex["context"], list) else ex["context"]
+            ans_texts = ex["answers"]["text"]
+            samples.append({
+                "prompt_text": template.format(
+                    context=str(ctx), question=ex["question"]),
+                "correct_answers": [str(a) for a in ans_texts if a],
+                "incorrect_answers": [],
+            })
+
     else:
         raise ValueError(f"Unknown dataset: {name}")
-
-    samples = []
-    for i in range(len(prompts)):
-        samples.append({
-            "prompt": str(prompts[i]),
-            "correct_answers": [str(c) for c in correct[i]],
-            "incorrect_answers": [str(ic) for ic in incorrect[i]],
-        })
 
     if debug:
         import random
@@ -101,7 +121,7 @@ def load_dataset_with_labels(ds_cfg: dict, debug: bool):
         samples = samples[:min(50, len(samples))]
 
     ratio = cfg["output"]["dataset_ratio"]
-    if ratio < 1.0:
+    if ratio < 1.0 and not debug:
         import random
         random.seed(42)
         random.shuffle(samples)
@@ -111,7 +131,7 @@ def load_dataset_with_labels(ds_cfg: dict, debug: bool):
 
 
 # ==============================================================================
-# RUBRIC (HARP contrastive: BLEURT vs correct AND incorrect answers)
+# RUBRIC (HARP contrastive)
 # ==============================================================================
 
 def _load_metrics():
@@ -121,41 +141,32 @@ def _load_metrics():
     return rouge, bleurt
 
 
-def judge_contrastive(generated: str, correct_answers: list[str],
-                      incorrect_answers: list[str], rouge, bleurt) -> bool:
-    """Return True if the answer is correct (non-hallucinated).
-
-    HARP rubric:
-      (max_correct_bleurt - max_incorrect_bleurt > advantage)
-      AND (max_correct_bleurt > bleurt_threshold OR max_correct_rouge > rouge_threshold)
-    """
+def judge_contrastive(generated: str, correct: list[str], incorrect: list[str],
+                      rouge, bleurt) -> bool:
     jc = cfg["judge"]
 
-    # BLEURT vs all correct and incorrect answers
-    all_refs = correct_answers + incorrect_answers
+    all_refs = correct + incorrect
     if not all_refs:
         return False
     candidates = [generated] * len(all_refs)
     bleurt_scores = bleurt.compute(predictions=candidates, references=all_refs)["scores"]
-    n_correct = len(correct_answers)
-    max_correct_bleurt = max(bleurt_scores[:n_correct], default=0.0)
-    max_incorrect_bleurt = max(bleurt_scores[n_correct:], default=0.0)
+    n_corr = len(correct)
+    max_correct_bleurt = max(bleurt_scores[:n_corr], default=0.0)
+    max_incorrect_bleurt = max(bleurt_scores[n_corr:], default=0.0)
 
-    # ROUGE-L vs correct answers only
     max_correct_rouge = 0.0
-    for ref in correct_answers:
+    for ref in correct:
         r = rouge.compute(predictions=[generated], references=[ref])
         max_correct_rouge = max(max_correct_rouge, r["rougeL"])
 
     advantage_ok = (max_correct_bleurt - max_incorrect_bleurt) > jc["correct_advantage"]
     threshold_ok = (max_correct_bleurt > jc["sen_sim_threshold"]
                     or max_correct_rouge > jc["rouge_threshold"])
-
     return advantage_ok and threshold_ok
 
 
 # ==============================================================================
-# MODEL LOADER
+# MODEL LOADING
 # ==============================================================================
 
 def load_model(model_id: str, debug: bool):
@@ -184,27 +195,16 @@ def load_model(model_id: str, debug: bool):
 
 
 # ==============================================================================
-# PER-PROMPT PROCESSING (beam search → judge → extract)
+# BEAM SEARCH + JUDGE + EXTRACT  (per prompt)
 # ==============================================================================
-
-SYSTEM_PROMPT = (
-    "You are a strict, factual Q&A bot. Answer using the fewest words possible."
-)
 
 EOS_STOP_STRINGS = [".", "!", "?", ".\n", "!\n", "?\n", "\n", "\n\n"]
 
 
 def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
                    rouge, bleurt) -> list[dict]:
-    """Beam-search generate, judge, and extract for one prompt.
-
-    Returns list of dicts with keys: pooled_tensor (L,D), is_hallucination (bool),
-    is_correct (bool), generation (str).
-    """
     gen_cfg = cfg["generation"]
-    prompt = sample["prompt"]
-    correct_answers = sample["correct_answers"]
-    incorrect_answers = sample["incorrect_answers"]
+    prompt_text = sample["prompt_text"]
 
     # Build stop token IDs
     eos_ids = {tokenizer.eos_token_id}
@@ -213,14 +213,9 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
         eos_ids.update(tokenizer.encode("Yes" + s, add_special_tokens=False)[1:])
     eos_ids = list(eos_ids)
 
-    # Chat template
-    messages = [{"role": "user", "content": prompt}]
-    chat_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(chat_text, return_tensors="pt").to(device)
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
     prompt_len = inputs.input_ids.shape[1]
 
-    # Beam search generation
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -240,7 +235,7 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
 
     hidden_states = outputs.hidden_states
     num_generated = len(hidden_states) - 1
-    generated_ids = outputs.sequences[:, prompt_len:]  # (num_beams, T)
+    generated_ids = outputs.sequences[:, prompt_len:]
 
     results = []
     for b in range(generated_ids.shape[0]):
@@ -257,11 +252,10 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
             })
             continue
 
-        # Judge
         is_correct = judge_contrastive(
-            generation, correct_answers, incorrect_answers, rouge, bleurt)
+            generation, sample["correct_answers"],
+            sample["incorrect_answers"], rouge, bleurt)
 
-        # Extract hidden states for this beam
         if num_generated == 0:
             H_pooled = torch.zeros(L, D)
         else:
@@ -269,16 +263,16 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
             for l in range(L):
                 tokens = []
                 for step in range(1, len(hidden_states)):
-                    if step - 1 >= gen_ids.shape[0]:
+                    if step - 1 >= len(gen_ids):
                         break
-                    h = hidden_states[step][l + 1][b]   # (1, D)
+                    h = hidden_states[step][l + 1][b]
                     tokens.append(h.cpu())
                 if tokens:
-                    layer_tensors.append(torch.cat(tokens, dim=0))  # (T, D)
+                    layer_tensors.append(torch.cat(tokens, dim=0))
                 else:
                     layer_tensors.append(torch.zeros(0, D))
-            H_raw = torch.stack(layer_tensors, dim=0)    # (L, T, D)
-            H_pooled = H_raw.float().mean(dim=1)          # (L, D)
+            H_raw = torch.stack(layer_tensors, dim=0)
+            H_pooled = H_raw.float().mean(dim=1)
 
         results.append({
             "pooled_tensor": H_pooled,
@@ -298,10 +292,9 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
 
 def main():
     print("=" * 60)
-    print("  HARP-COMPATIBLE GENERATION & EXTRACTION")
+    print("  HARP-COMPATIBLE BEAM SEARCH & EXTRACTION")
     print("=" * 60)
 
-    # Filter models/datasets
     models_to_run = cfg["models"]
     if args.model:
         models_to_run = [m for m in models_to_run if m["id"] == args.model]
@@ -326,9 +319,9 @@ def main():
 
         for ds_cfg in datasets_to_run:
             ds_name = ds_cfg["name"]
-            print(f"\n  --- Dataset: {ds_name} ---")
+            print(f"\n  --- {ds_name} ---")
 
-            samples = load_dataset_with_labels(ds_cfg, args.debug)
+            samples = load_dataset(ds_cfg, args.debug)
             n_prompts = len(samples)
             print(f"  Prompts: {n_prompts}")
 
@@ -342,7 +335,6 @@ def main():
                 beam_results = process_prompt(
                     sample, model, tokenizer, L, D, rouge, bleurt)
 
-                # Check if ANY beam is correct → known
                 any_correct = any(r["is_correct"] for r in beam_results)
                 all_is_known.append(any_correct)
                 if any_correct:
@@ -361,7 +353,6 @@ def main():
                         f"known: {n_known}  unknown: {n_unknown}  "
                         f"VRAM: {vram:.1f} GB")
 
-            # Save
             out_dir = os.path.join(cfg["output"]["data_dir"], folder)
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, f"{ds_name}_pooled.pt")
@@ -381,10 +372,9 @@ def main():
             }
             torch.save(data, out_path)
             print(f"  Saved: {out_path}")
-            print(f"  Beams total: {len(all_emb)}  "
+            print(f"  Beams: {len(all_emb)}  "
                   f"(known prompts: {n_known}, unknown: {n_unknown})")
 
-        # Free model before loading next
         del model, tokenizer
         torch.cuda.empty_cache()
 
