@@ -162,8 +162,17 @@ def load_dataset_sharded(name: str, debug: bool,
 def _load_metrics(debug: bool):
     import evaluate
     rouge = evaluate.load("rouge")
-    # Always keep BLEURT on CPU — prevents TensorFlow from grabbing GPU VRAM
-    bleurt = evaluate.load("bleurt", config_name="BLEURT-20", device="cpu")
+
+    # TensorFlow grabs ALL GPU VRAM on initialisation regardless of device="cpu".
+    # Temporarily hide CUDA devices so BLEURT loads on CPU only.
+    orig_cuda = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
+    if orig_cuda is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = orig_cuda
+    else:
+        del os.environ["CUDA_VISIBLE_DEVICES"]
+
     return rouge, bleurt
 
 
