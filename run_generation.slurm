@@ -17,7 +17,7 @@ source /share/apps/anaconda3-2022.05/etc/profile.d/conda.sh
 conda activate hal-det
 echo "Virtual environment activated"
 
-cd /home/devansh/Hal-Det/hallucination-detection
+cd /home/devansh/Hallucination-Detection/hallucination-detection
 
 # Run all 4 datasets for LLaMA-3.1-8B
 echo "Starting: LLaMA-3.1-8B-Instruct"
