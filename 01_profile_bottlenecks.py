@@ -225,7 +225,8 @@ def load_model(debug: bool):
     else:
         print("  Mode: bfloat16 native (cluster)")
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, dtype=torch.bfloat16, device_map="auto",
+            MODEL_ID, dtype=torch.bfloat16,
+            device_map=device,              # explicit GPU — not "auto"
             trust_remote_code=True)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
