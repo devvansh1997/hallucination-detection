@@ -1,0 +1,255 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+
+\title{Population HOSVD Hallucination Detection\\
+       \large Progress Report: Infrastructure, Benchmarks, \& Dual Extraction}
+\author{Graduate Research -- Mechanistic Interpretability}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Recap: Pipeline Established (Last Week)}
+
+The seven-stage Population HOSVD pipeline was demonstrated on Phase~I
+(LLaMA-2~7B, $N=3979$, human-annotated labels) and Phase~II (Qwen~2.5--3B,
+$N=817$, BLEURT/ROUGE-L auto-labels).  The core result: a Random Forest on
+320-dimensional compressed core tensors achieves $\text{AUROC} = 0.958$ on
+LLaMA-2 and $\text{AUROC} = 0.740$ on Qwen, with strong OOD recall on a
+held-out hallucination-only validation set (see Section~\ref{sec:validation}).
+
+\section{Part 1: Generalised Infrastructure \& Distributed Execution}
+
+\subsection{Model-Agnostic Generation Pipeline}
+
+\texttt{01\_generate\_and\_extract.py} was rebuilt to accept \texttt{--model}
+(any HuggingFace LLaMA-family ID), \texttt{--dataset} (TruthfulQA / TriviaQA /
+TyDiQA), and \texttt{--debug} (4-bit quantisation for local RTX~5070 testing).
+
+\begin{itemize}
+  \item \textbf{Chat-template generation} with system prompt enforcing
+        single-line answers, stop-on-newline criteria preventing rambling.
+  \item \textbf{On-the-fly grading} via the Faizul rubric:
+        $\text{BLEURT-20} \ge 0.5 \lor \text{ROUGE-L} \ge 0.7$.
+  \item \textbf{Memory-safe extraction}: hidden states accumulated on CPU
+        token-by-token; mean-pooling before saving to minimise storage.
+  \item \textbf{File naming encodes model architecture}:
+        \texttt{\{model\_key\}\_\{dataset\}\_pooled\_\{mode\}.pt}.
+\end{itemize}
+
+\subsection{SLURM Job Array for Cluster Parallelism}
+
+To saturate the A100 80~GB cluster and reduce wall-clock time, a distributed
+8-way extraction architecture was built:
+
+\begin{itemize}
+  \item \texttt{01\_generate\_and\_extract.py} accepts \texttt{--num\_shards}
+        and \texttt{--shard\_idx}.  The dataset is shuffled (seed 42), halved
+        to 50\%, then sharded across array tasks.
+  \item \texttt{01b\_merge\_shards.py} concatenates per-shard files into
+        final aggregated \texttt{\_full.pt} tensors and deletes shard fragments.
+  \item \texttt{run\_distributed.slurm} launches an 8-way job array
+        (\texttt{\#SBATCH --array=0-7}), processing all three datasets
+        per task.
+\end{itemize}
+
+\noindent
+\textbf{Files created this week:}
+\texttt{01\_generate\_and\_extract.py},
+\texttt{01b\_merge\_shards.py},
+\texttt{02\_hosvd\_evaluate.py},
+\texttt{run\_distributed.slurm}.
+
+\section{Part 2: LLaMA-3.2--3B-Instruct -- Full Results}
+
+All experiments run on an A100 80~GB with bfloat16 precision over the
+entire validation splits.  $U_L$ and $U_D$ computed from training partition
+only; zero leakage.
+
+\subsection{In-Distribution AUROC (80/20 Split)}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Dataset} & \textbf{Samples} & \textbf{Truthful} & \textbf{Halluc.} & \textbf{Hall. Rate} & \textbf{AUROC} \\
+\midrule
+TruthfulQA  & 817    & 28    & 789   & 96.6\% & \textbf{0.880} \\
+TriviaQA    & 17,944 & 9,394 & 8,550 & 47.6\% & \textbf{0.945} \\
+TyDiQA      & 5,077 & 709   & 4,368 & 86.0\% & \textbf{0.830} \\
+\bottomrule
+\end{tabular}
+\caption{LLaMA-3.2--3B-Instruct, full HOSVD pipeline, 80/20 stratified split.}
+\end{table}
+
+\noindent
+\textbf{TriviaQA at $\text{AUROC}=0.945$} matches our Phase~I LLaMA-2 result
+($0.958$) on a different model architecture (28 layers vs.\ 32, 3072-dim vs.\
+4096-dim), different dataset, and \emph{automatically generated} labels
+(BLEURT/ROUGE-L) rather than human annotation.
+
+\noindent
+\textbf{TruthfulQA at $\text{AUROC}=0.880$} despite extreme imbalance: only
+28 of 817 samples ($3.4\%$) are truthful.
+
+\noindent
+\textbf{TyDiQA at $\text{AUROC}=0.830$} on a multilingual benchmark (9
+languages) with a monolingual model.  The model generates English answers for
+non-English questions, inflating the hallucination rate to $86\%$ and making
+classification harder.  Still well above chance ($0.500$).
+
+\subsection{Variance Explained by Factor Matrices}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset} & \textbf{$U_L$ (top-5)} & \textbf{$U_D$ (top-64)} & \textbf{Train} \\
+\midrule
+TruthfulQA  & 96.1\% & 64.7\% & 653 \\
+TriviaQA    & 96.5\% & 51.6\% & 14,355 \\
+TyDiQA      & 95.6\% & 60.3\% & 4,061 \\
+\bottomrule
+\end{tabular}
+\caption{Variance captured.  $U_L$ consistently $>95\%$; $U_D$ improves with
+         larger training sets.}
+\end{table}
+
+\subsection{Out-of-Distribution Recall: 420-Sample Hallucination-Only Validation}
+\label{sec:validation}
+
+The Phase~I pipeline was evaluated on a held-out validation set of 420
+samples, \emph{all of which are hallucinations}.  This is a strict OOD
+sensitivity test: AUROC is undefined (single class), so Recall (True
+Positive Rate) is the metric.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Feature Set} & \textbf{Dim} & \textbf{OOD Recall} \\
+\midrule
+HOSVD core only (plain)         & 320 & 0.707 \\
+HOSVD + Faizul enrichment       & 322 & 0.714 \\
+HOSVD + attention fusion        & 352 & 0.717 \\
+\bottomrule
+\end{tabular}
+\caption{Phase~I (LLaMA-2~7B) OOD recall on the 420-sample hallucination-only
+         validation set.  All factor matrices computed from training data only.}
+\end{table}
+
+\noindent
+\textbf{Interpretation.}  The HOSVD subspace method detects 71\% of unseen
+hallucinations without ever seeing a validation sample during training.
+Attention fusion provides no improvement (the compressed hidden states already
+capture attention-relevant information).  Adding Frobenius norm and spectral
+entropy as scalar features yields a marginal gain for Logistic Regression
+(0.714 vs.\ 0.707) but not Random Forest — the core entries already contain
+that information.
+
+\subsection{Debug-to-Full Scaling}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset} & \textbf{Debug (50 samples)} & \textbf{Full} & \textbf{Gain} \\
+\midrule
+TriviaQA    & 0.667 & 0.945 & $+0.278$ \\
+TruthfulQA  & NaN   & 0.880 & -- \\
+\bottomrule
+\end{tabular}
+\caption{Debug (4-bit, 50 samples, local RTX~5070) vs.\ full (bfloat16,
+         A100~80~GB).  The $359\times$ sample increase on TriviaQA drives
+         AUROC from 0.667 to 0.945.}
+\end{table}
+
+\section{Part 3: Combined Dual-Extraction Pipeline}
+
+To enable direct comparison between our HOSVD method and the Faizul baseline
+\emph{from the same forward pass}, the generation script was upgraded to
+extract both feature sets before the raw hidden states leave VRAM:
+
+\subsection{Dual Extraction Architecture}
+
+For each generated sequence, the raw 3D hidden-state tensor $H \in
+\mathbb{R}^{L \times T \times D}$ is captured.  Before deletion, two
+extraction paths run:
+
+\medskip
+\noindent
+\textbf{Path A -- Faizul 8-dim Thermodynamic Features:}
+\begin{enumerate}
+  \item Base tensor $H_{\text{base}} = H$; delta tensor $H_{\Delta} = H[1:] - H[:-1]$.
+  \item For each: Frobenius norm, layer-mode SVD $\to$ singular values $\to$
+        normalised $\to$ entropy, effective rank ($e^H$), top-3 concentration.
+  \item Concatenated: 8-dimensional vector per sample.
+\end{enumerate}
+
+\noindent
+\textbf{Path B -- HOSVD Mean-Pooled Tensors:}
+\begin{enumerate}
+  \item Mean-pool across token dimension: $H_{\text{pool}} = H.\texttt{mean(dim=1)}$.
+  \item Saved as $(L, D)$ matrix for downstream population HOSVD.
+\end{enumerate}
+
+\medskip
+\noindent
+Both feature sets are saved to separate shard files, merged post-hoc via
+\texttt{01b\_merge\_shards.py}, and will be evaluated head-to-head on
+LLaMA-3.1--8B (Faizul's reported baseline model).
+
+\subsection{Current Status}
+
+\begin{itemize}
+  \item \textbf{LLaMA-3.2--3B} -- HOSVD extraction complete for all 3 datasets.
+        Faizul extraction pending (requires re-extraction with dual pipeline).
+  \item \textbf{LLaMA-3.1--8B} -- 8-way SLURM job array submitted.
+        Dual extraction for TruthfulQA, TriviaQA, and TyDiQA simultaneously.
+\end{itemize}
+
+\section{Summary \& Next Steps}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Dataset} & \textbf{HOSVD AUROC} & \textbf{Faizul AUROC} & \textbf{Status} \\
+\midrule
+\multicolumn{5}{c}{\textit{Phase I -- Legacy}} \\
+LLaMA-2~7B  & Custom corpus      & 0.958 & 0.904 & Done (last week) \\
+Qwen~2.5--3B & TruthfulQA        & 0.740 & --    & Done (last week) \\
+\midrule
+\multicolumn{5}{c}{\textit{Phase II -- This Week}} \\
+LLaMA-3.2--3B & TruthfulQA       & 0.880 & --    & Done \\
+LLaMA-3.2--3B & TriviaQA         & 0.945 & --    & Done \\
+LLaMA-3.2--3B & TyDiQA           & 0.830 & --    & Done \\
+LLaMA-3.1--8B & \{3 datasets\}   & --    & --    & Extracting (SLURM) \\
+\bottomrule
+\end{tabular}
+\caption{Complete results matrix.  Faizul columns will be filled after the
+         dual-extraction pipeline completes on LLaMA-3.2--3B and
+         LLaMA-3.1--8B.}
+\end{table}
+
+\noindent
+\textbf{Next Steps:}
+\begin{enumerate}
+  \item Complete LLaMA-3.1--8B distributed dual extraction on the cluster.
+  \item Merge shards and run HOSVD + Faizul evaluation on LLaMA-3.1--8B.
+  \item Re-extract LLaMA-3.2--3B with dual pipeline for Faizul baseline
+        numbers.
+  \item Final Table~1: $\{3.2\text{-3B}, 3.1\text{-8B}\} \times
+        \{\text{TruthfulQA}, \text{TriviaQA}, \text{TyDiQA}\} \times
+        \{\text{HOSVD}, \text{Faizul}\}$ AUROC matrix.
+    \item Compare against Faizul's reported 0.844 baseline \emph{after} verifying
+          that our Tucker implementation matches the published method.
+\end{enumerate}
+
+\end{document}
