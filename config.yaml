@@ -1,0 +1,52 @@
+# ==============================================================================
+# HOSVD Hallucination Detection — Configuration
+# ==============================================================================
+# Models:  HuggingFace IDs to benchmark.
+# Datasets: QA benchmarks with correct/incorrect answer lists for contrastive
+#           judging (matching HARP's evaluation protocol).
+# Beam search: 10 beams per prompt; known = any beam correct.
+# ==============================================================================
+
+models:
+  - id: "meta-llama/Llama-3.2-3B-Instruct"
+    folder: "llama-3.2-3b-instruct"
+  - id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    folder: "llama-3.1-8b-instruct"
+
+datasets:
+  - name: "truthfulqa"
+    hf_path: "truthfulqa/truthful_qa"
+    hf_config: "generation"
+  - name: "triviaqa"
+    hf_path: "mandarjoshi/trivia_qa"
+    hf_config: "rc.nocontext"
+  - name: "tydiqa"
+    hf_path: "google-research-datasets/tydiqa"
+    hf_config: "secondary_task"
+
+# Judge parameters (HARP contrastive rubric)
+judge:
+  bleurt_model: "BLEURT-20"
+  sen_sim_threshold: 0.5
+  rouge_threshold: 1.0          # effectively disabled
+  correct_advantage: -1.0       # always true
+
+# Generation parameters
+generation:
+  max_new_tokens: 64
+  temperature: 0.5
+  top_k: 5
+  top_p: 0.99
+  num_beams: 10
+  num_return_sequences: 10
+  do_sample: true
+
+# HOSVD parameters
+hosvd:
+  layer_rank: 5
+  hidden_rank: 64
+
+# Output
+output:
+  data_dir: "../data"
+  dataset_ratio: 1.0            # 1.0 = full dataset, 0.5 = 50% slice
