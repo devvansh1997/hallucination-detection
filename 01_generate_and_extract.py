@@ -13,9 +13,16 @@ Usage:
 import os
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
+# Isolate ROUGE metrics cache per SLURM job (prevents race conditions
+# when concurrent jobs share the same evaluate cache directory).
+# HF_HOME is NOT touched — auth stays intact.
+_job_id = os.environ.get("SLURM_JOB_ID", "local")
+os.environ["HF_METRICS_CACHE"] = f"/tmp/rouge_cache_{_job_id}"
+
 import argparse
 import gc
 import sys
+import time
 
 import torch
 import yaml
