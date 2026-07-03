@@ -238,6 +238,7 @@ def load_model(debug: bool):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"   # required for batched decoder-only generation
 
     model.eval()
     num_layers = model.config.num_hidden_layers
@@ -456,7 +457,7 @@ def main():
                     if step - 1 >= num_generated:
                         break
                     h = hidden_states[step][l + 1][b]
-                    tokens.append(h.unsqueeze(0).cpu())
+                    tokens.append(h.cpu())
                 layer_list.append(torch.cat(tokens, dim=0) if tokens
                                   else torch.zeros(0, hidden_dim))
             H_raw = torch.stack(layer_list, dim=0)
