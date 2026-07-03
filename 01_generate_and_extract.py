@@ -22,6 +22,19 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 
 # ==============================================================================
+# STRICT GPU ENFORCEMENT  (CUDA is mandatory — abort if fallback to CPU)
+# ==============================================================================
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "CRITICAL ERROR: CUDA is not available. "
+        "PyTorch is defaulting to CPU. Aborting run."
+    )
+device = torch.device("cuda")
+print(f"Using device: {torch.cuda.get_device_name(0)}")
+
+
+# ==============================================================================
 # SYSTEM PROMPT & FEW-SHOT (forces concise, single-line answers)
 # ==============================================================================
 
@@ -350,36 +363,116 @@ def main():
     hosvd_tensors   = []           # list of (L, D) tensors
     labels          = []           # list of bool
 
-    # -- 4. Generation loop -----------------------------------------------
-    print(f"\n[4/4] Processing {len(pairs)} prompts ...")
+    # -- 4. Batched generation loop ---------------------------------------
+    BATCH_SIZE = 4
+    n_pairs = len(pairs)
+    print(f"\n[4/4] Processing {n_pairs} prompts (batch size {BATCH_SIZE}) ...")
     print(f"       Faizul -> {faizul_path}")
     print(f"       HOSVD  -> {hosvd_path}\n")
 
-    for idx, (prompt, reference) in enumerate(pairs):
-        faizul_vec, H_pooled, is_hall, t_new = process_one_sample(
-            prompt, reference, model, tokenizer,
-            num_layers, hidden_dim, rouge, bleurt)
+    # Add newline token to eos so each batch item stops independently
+    newline_id = tokenizer.encode("\n", add_special_tokens=False)[-1]
+    eos_ids = list(set([tokenizer.eos_token_id, newline_id]))
 
-        faizul_features.append(faizul_vec)
-        hosvd_tensors.append(H_pooled)
-        labels.append(is_hall)
+    global_idx = 0
 
-        if (idx + 1) % 10 == 0 or idx == 0:
-            n_hall = sum(labels)
-            rate = n_hall / len(labels) * 100
-            vram = torch.cuda.memory_allocated() / 1e9
-            print(f"  [{idx+1:4d}/{len(pairs)}]  "
-                  f"hall rate: {rate:5.1f}%  |  "
-                  f"VRAM: {vram:.2f} GB  |  "
-                  f"last T: {t_new}", flush=True)
+    for batch_start in range(0, n_pairs, BATCH_SIZE):
+        batch_pairs = pairs[batch_start:batch_start + BATCH_SIZE]
+        b_prompts   = [p for p, r in batch_pairs]
+        b_refs      = [r for p, r in batch_pairs]
+        B = len(batch_pairs)
 
-        # Checkpoint every 200 samples
-        if (idx + 1) % 200 == 0:
-            torch.save({"features": faizul_features, "labels": labels},
-                       faizul_path + ".ckpt")
-            torch.save({"all_emb": hosvd_tensors, "all_hallucination_flag": labels},
-                       hosvd_path + ".ckpt")
-            print(f"       [checkpoint saved at sample {idx+1}]", flush=True)
+        # -- Build and tokenize all chat templates -------------------------
+        batch_texts = []
+        for prompt in b_prompts:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": FEWSHOT_USER},
+                {"role": "assistant", "content": FEWSHOT_ASSISTANT},
+                {"role": "user", "content": prompt},
+            ]
+            batch_texts.append(tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True))
+
+        inputs = tokenizer(batch_texts, return_tensors="pt", padding=True).to(device)
+        # prompt_lens: number of non-pad tokens per batch item
+        prompt_lens = inputs.attention_mask.sum(dim=1)  # (B,)
+
+        # -- Batched generate ----------------------------------------------
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=MAX_NEW_TOKENS,
+                eos_token_id=eos_ids,
+                output_hidden_states=True, return_dict_in_generate=True,
+                do_sample=True, temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id)
+
+        # -- Process each batch item individually --------------------------
+        for b in range(B):
+            prompt_len = prompt_lens[b].item()
+            # Generated tokens for this batch item
+            gen_ids = outputs.sequences[b, prompt_len:]
+            # Remove padding (tokens after eos)
+            gen_ids = gen_ids[gen_ids != tokenizer.eos_token_id]
+            generation = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            num_generated = len(gen_ids)
+
+            # Grade
+            is_hall = judge_hallucination(generation, b_refs[b], rouge, bleurt)
+            labels.append(is_hall)
+
+            # Extract hidden states for this batch item
+            if num_generated == 0:
+                faizul_features.append([0.0]*8)
+                hosvd_tensors.append(torch.zeros(num_layers, hidden_dim))
+            else:
+                hidden_states = outputs.hidden_states  # tuple of steps
+                # Stack per-layer hidden states for item b
+                layer_list = []
+                for l in range(num_layers):
+                    tokens = []
+                    for step in range(1, len(hidden_states)):
+                        if step - 1 >= num_generated:
+                            break  # this item already finished
+                        h = hidden_states[step][l + 1][b]  # (1, D)
+                        tokens.append(h.unsqueeze(0).cpu())
+                    if tokens:
+                        layer_list.append(torch.cat(tokens, dim=0))  # (T, D)
+                    else:
+                        layer_list.append(torch.zeros(0, hidden_dim))
+                H_raw = torch.stack(layer_list, dim=0)  # (L, T, D)
+
+                # Faizul 8-dim
+                H_delta = H_raw[1:] - H_raw[:-1]
+                f_h    = compute_faizul_features(H_raw)
+                f_h_d  = compute_faizul_features(H_delta)
+                faizul_features.append(f_h + f_h_d)
+
+                # HOSVD pooled
+                hosvd_tensors.append(H_raw.float().mean(dim=1))
+
+            global_idx += 1
+
+            if global_idx % 10 == 0 or global_idx == 1:
+                n_hall = sum(labels)
+                rate = n_hall / len(labels) * 100
+                vram = torch.cuda.memory_allocated() / 1e9
+                print(f"  [{global_idx:4d}/{n_pairs}]  "
+                      f"hall rate: {rate:5.1f}%  |  "
+                      f"VRAM: {vram:.2f} GB  |  "
+                      f"last T: {num_generated}", flush=True)
+
+            # Checkpoint every 200
+            if global_idx % 200 == 0:
+                torch.save({"features": faizul_features, "labels": labels},
+                           faizul_path + ".ckpt")
+                torch.save({"all_emb": hosvd_tensors, "all_hallucination_flag": labels},
+                           hosvd_path + ".ckpt")
+                print(f"       [checkpoint saved at sample {global_idx}]", flush=True)
+
+        # Memory hygiene per batch
+        del outputs, inputs
+        torch.cuda.empty_cache()
 
     # -- Final save -------------------------------------------------------
     torch.save({"features": faizul_features, "labels": labels}, faizul_path)
