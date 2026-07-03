@@ -343,26 +343,37 @@ def process_one_sample(
 # ==============================================================================
 
 def main():
+    def _show_vram(tag=""):
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        used = (total_bytes - free_bytes) / 1e9
+        free = free_bytes / 1e9
+        print(f"  [VRAM] {tag:20s}  used={used:6.2f} GB  free={free:6.2f} GB", flush=True)
+
     print("=" * 60)
     print(f"  {MODEL_KEY}  |  {args.dataset.upper()}"
           f"  |  {'DEBUG' if args.debug else 'FULL'}"
           f"  |  shard {args.shard_idx}/{args.num_shards}")
     print("=" * 60)
 
+    _show_vram("startup")
+
     # -- 1. Load dataset --------------------------------------------------
     print("\n[1/4] Loading dataset ...")
     pairs = load_dataset_sharded(args.dataset, args.debug,
                                  args.num_shards, args.shard_idx)
     print(f"       Total prompts: {len(pairs)}")
+    _show_vram("after dataset load")
 
     # -- 2. Load metrics --------------------------------------------------
     print("\n[2/4] Loading ROUGE-L + BLEURT-20 ...")
     rouge, bleurt = _load_metrics(args.debug)
     print("       Metrics ready.")
+    _show_vram("after BLEURT load")
 
     # -- 3. Load model ----------------------------------------------------
     print("\n[3/4] Loading model ...")
     model, tokenizer, num_layers, hidden_dim = load_model(args.debug)
+    _show_vram("after model load")
 
     # -- 4. Batched generation loop (profiling: 100 samples max) ----------
     PROFILE_SAMPLES = 100
@@ -370,6 +381,7 @@ def main():
     n_profile = min(len(pairs), PROFILE_SAMPLES)
     print(f"\n[4/4] Processing {n_profile} samples "
           f"(PROFILING MODE, batch size {BATCH_SIZE}) ...\n")
+    _show_vram("before generation")
 
     # Cumulative timers
     t_gen    = 0.0
