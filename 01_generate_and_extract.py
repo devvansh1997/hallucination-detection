@@ -13,6 +13,11 @@ Usage:
 import os
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
+# Isolate HuggingFace caches per SLURM job to prevent race conditions
+# when multiple jobs run ROUGE simultaneously on the same node.
+_job_id = os.environ.get("SLURM_JOB_ID", "local")
+os.environ["HF_HOME"] = f"/tmp/hf_cache_{_job_id}"
+
 import argparse
 import gc
 import sys
