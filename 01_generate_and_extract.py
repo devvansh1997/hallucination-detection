@@ -203,6 +203,9 @@ EOS_STOP_STRINGS = [".", "!", "?", ".\n", "!\n", "?\n", "\n", "\n\n"]
 
 def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
                    rouge, bleurt) -> list[dict]:
+    """Generate 10 beams, but EARLY-STOP: halt BLEURT scoring & extraction
+    after the first correct (known) beam.  The generation itself runs all 10
+    beams in one pass; only post-processing is truncated."""
     gen_cfg = cfg["generation"]
     prompt_text = sample["prompt_text"]
 
@@ -236,9 +239,12 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
     hidden_states = outputs.hidden_states
     num_generated = len(hidden_states) - 1
     generated_ids = outputs.sequences[:, prompt_len:]
+    num_beams = generated_ids.shape[0]
 
     results = []
-    for b in range(generated_ids.shape[0]):
+    found_correct = False
+
+    for b in range(num_beams):
         gen_ids = generated_ids[b]
         gen_ids = gen_ids[gen_ids != tokenizer.eos_token_id]
         generation = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
@@ -252,10 +258,15 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
             })
             continue
 
+        # Judge
         is_correct = judge_contrastive(
             generation, sample["correct_answers"],
             sample["incorrect_answers"], rouge, bleurt)
 
+        if is_correct:
+            found_correct = True
+
+        # Extract hidden states
         if num_generated == 0:
             H_pooled = torch.zeros(L, D)
         else:
@@ -280,6 +291,10 @@ def process_prompt(sample: dict, model, tokenizer, L: int, D: int,
             "is_correct": is_correct,
             "generation": generation,
         })
+
+        # EARLY STOP: skip remaining beams once we find a correct answer
+        if found_correct:
+            break
 
     del outputs, hidden_states
     torch.cuda.empty_cache()
