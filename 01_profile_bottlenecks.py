@@ -224,10 +224,17 @@ def load_model(debug: bool):
             dtype=torch.bfloat16, trust_remote_code=True)
     else:
         print("  Mode: bfloat16 native (cluster)")
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, dtype=torch.bfloat16,
-            device_map=device,              # explicit GPU — not "auto"
-            trust_remote_code=True)
+        # For 8B+ models, fall back to 4-bit if VRAM is tight
+        load_kwargs = dict(dtype=torch.bfloat16, device_map=device,
+                           trust_remote_code=True)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(MODEL_ID, **load_kwargs)
+        except torch.cuda.OutOfMemoryError:
+            print("  OOM — falling back to 4-bit quantisation")
+            from transformers import BitsAndBytesConfig
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+            model = AutoModelForCausalLM.from_pretrained(MODEL_ID, **load_kwargs)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     if tokenizer.pad_token is None:
