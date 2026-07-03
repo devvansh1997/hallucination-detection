@@ -28,7 +28,7 @@ datasets:
 judge:
   bleurt_model: "BLEURT-20"
   sen_sim_threshold: 0.5
-  rouge_threshold: 1.0          # effectively disabled
+  rouge_threshold: 0.7          # ROUGE-L F1
   correct_advantage: -1.0       # always true
 
 # Generation parameters
