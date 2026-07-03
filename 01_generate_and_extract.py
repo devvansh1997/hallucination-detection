@@ -13,11 +13,6 @@ Usage:
 import os
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-# Isolate HuggingFace caches per SLURM job to prevent race conditions
-# when multiple jobs run ROUGE simultaneously on the same node.
-_job_id = os.environ.get("SLURM_JOB_ID", "local")
-os.environ["HF_HOME"] = f"/tmp/hf_cache_{_job_id}"
-
 import argparse
 import gc
 import sys
@@ -161,7 +156,15 @@ def judge_contrastive(generated: str, correct: list[str], incorrect: list[str],
 
     max_correct_rouge = 0.0
     for ref in correct:
-        r = rouge.compute(predictions=[generated], references=[ref])
+        for attempt in range(3):
+            try:
+                r = rouge.compute(predictions=[generated], references=[ref])
+                break
+            except FileNotFoundError:
+                if attempt < 2:
+                    time.sleep(0.1)
+                    continue
+                raise
         max_correct_rouge = max(max_correct_rouge, r["rougeL"])
 
     advantage_ok = (max_correct_bleurt - max_incorrect_bleurt) > jc["correct_advantage"]
