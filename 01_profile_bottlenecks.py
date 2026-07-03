@@ -1,19 +1,19 @@
 """
-01_generate_and_extract.py -- Distributed Dual-Extraction Pipeline
-===================================================================
-Generates responses, grades hallucination via BLEURT/ROUGE-L, and extracts
-BOTH Faizul's 8-dim thermodynamic features AND HOSVD mean-pooled tensors
-from the raw 3D hidden states before they leave VRAM.
-
-Supports SLURM job arrays via --num_shards / --shard_idx.
+01_profile_bottlenecks.py -- Profiling variant of the dual-extraction pipeline
+==============================================================================
+Processes 100 samples with per-block timing to identify bottlenecks.
+Stops automatically; no data is saved.
 
 Usage:
-  python 01_generate_and_extract.py --model meta-llama/Llama-3.2-3B-Instruct --dataset triviaqa --num_shards 8 --shard_idx 0
+  python 01_profile_bottlenecks.py --model meta-llama/Llama-3.2-3B-Instruct --dataset triviaqa
 """
+
+# -- MUST be before ANY other imports: prevents TensorFlow seizing all VRAM --
+import os
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import argparse
 import gc
-import os
 import sys
 import time
 
@@ -162,17 +162,7 @@ def load_dataset_sharded(name: str, debug: bool,
 def _load_metrics(debug: bool):
     import evaluate
     rouge = evaluate.load("rouge")
-
-    # TensorFlow grabs ALL GPU VRAM on initialisation regardless of device="cpu".
-    # Temporarily hide CUDA devices so BLEURT loads on CPU only.
-    orig_cuda = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
-    if orig_cuda is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = orig_cuda
-    else:
-        del os.environ["CUDA_VISIBLE_DEVICES"]
-
     return rouge, bleurt
 
 
