@@ -92,14 +92,14 @@ def evaluate_one(model_folder: str, dataset: str):
     data = torch.load(path, weights_only=False)
     X_all = torch.stack(data["all_emb"])          # (N_beams, L, D)
     y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
-    is_known = np.array(data["all_is_known"])     # per prompt, not per beam
+    is_known = np.array(data["all_is_known"])     # per prompt
 
     N_beams, L, D = X_all.shape
     n_prompts = len(is_known)
 
-    # Build per-prompt beam indices
-    beams_per_prompt = N_beams // n_prompts
-    prompt_indices = np.arange(n_prompts).repeat(beams_per_prompt)
+    # Per-beam → per-prompt mapping (handles variable beam counts from early-stopping)
+    prompt_idx = np.array(data.get("all_prompt_indices",
+                       list(range(n_prompts))))   # fallback for old-format files
 
     # HARP split: known prompts → 75/25, all unknown → valid
     known_prompt_idx = np.where(is_known)[0]
@@ -114,9 +114,9 @@ def evaluate_one(model_folder: str, dataset: str):
     valid_prompts.update(unknown_prompt_idx)
 
     # Map to beam indices
-    train_mask = np.array([prompt_indices[i] in train_prompts
+    train_mask = np.array([prompt_idx[i] in train_prompts
                            for i in range(N_beams)])
-    valid_mask = np.array([prompt_indices[i] in valid_prompts
+    valid_mask = np.array([prompt_idx[i] in valid_prompts
                            for i in range(N_beams)])
 
     X_train = X_all[train_mask]
@@ -124,7 +124,7 @@ def evaluate_one(model_folder: str, dataset: str):
     y_train = y_all[train_mask]
     y_valid = y_all[valid_mask]
 
-    print(f"  Total beams:  {N_beams}  ({n_prompts} prompts × {beams_per_prompt} beams)")
+    print(f"  Total beams:  {N_beams}  ({n_prompts} prompts)")
     print(f"  Known prompts:  {is_known.sum()}  ({is_known.sum()/n_prompts*100:.1f}%)")
     print(f"  Train beams:    {X_train.shape[0]}  (hall rate: {y_train.mean():.1%})")
     print(f"  Valid beams:    {X_valid.shape[0]}  (hall rate: {y_valid.mean():.1%})")

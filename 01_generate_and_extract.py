@@ -358,6 +358,7 @@ def main():
             all_emb = []
             all_flags = []
             all_is_known = []
+            all_prompt_idx = []  # per-beam → prompt index
             n_known = 0
             n_unknown = 0
 
@@ -375,6 +376,7 @@ def main():
                 for r in beam_results:
                     all_emb.append(r["pooled_tensor"])
                     all_flags.append(r["is_hallucination"])
+                    all_prompt_idx.append(idx)
 
                 if (idx + 1) % 100 == 0:
                     vram = torch.cuda.memory_allocated() / 1e9
@@ -391,6 +393,7 @@ def main():
                 "all_emb": all_emb,
                 "all_hallucination_flag": all_flags,
                 "all_is_known": all_is_known,
+                "all_prompt_indices": all_prompt_idx,
                 "metadata": {
                     "model": model_id,
                     "dataset": ds_name,
