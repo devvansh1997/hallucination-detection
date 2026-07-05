@@ -15,7 +15,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 # Isolate ROUGE metrics cache per SLURM job (prevents race conditions
 # when concurrent jobs share the same evaluate cache directory).
-# HF_HOME is NOT touched — auth stays intact.
+# HF_HOME is NOT touched -- auth stays intact.
 _job_id = os.environ.get("SLURM_JOB_ID", "local")
 os.environ["HF_METRICS_CACHE"] = f"/tmp/rouge_cache_{_job_id}"
 
@@ -58,83 +58,71 @@ print(f"GPU: {torch.cuda.get_device_name(0)}")
 # ==============================================================================
 
 def load_dataset(ds_cfg: dict, debug: bool):
-    """Return list of dicts: {prompt_text, correct_answers, incorrect_answers}.
+    """Return list of tuples: (absolute_hf_index, sample_dict).
+    Index survives shuffling/slicing — essential for prompt-level split eval."""
 
-    prompt_text is the fully formatted string ready for tokenization.
-    """
     from datasets import load_dataset
-
     name = ds_cfg["name"]
     path = ds_cfg["hf_path"]
     config = ds_cfg["hf_config"]
     template = ds_cfg["prompt_template"]
-
     ds = load_dataset(path, config, split="validation")
 
-    samples = []
+    samples = []  # list of (abs_idx, dict)
 
     if name == "truthfulqa":
-        for ex in ds:
-            samples.append({
+        for i, ex in enumerate(ds):
+            samples.append((i, {
                 "prompt_text": template.format(question=ex["question"]),
                 "correct_answers": [str(ex["best_answer"])],
                 "incorrect_answers": [str(a) for a in ex["incorrect_answers"]],
-            })
-
+            }))
     elif name == "triviaqa":
-        # Deduplicate by question_id (HARP)
         seen = set()
+        i = 0
         for ex in ds:
             qid = ex["question_id"]
             if qid in seen:
                 continue
             seen.add(qid)
-            value = ex["answer"]["value"]
-            samples.append({
+            samples.append((i, {
                 "prompt_text": template.format(question=ex["question"]),
-                "correct_answers": [str(value)],
+                "correct_answers": [str(ex["answer"]["value"])],
                 "incorrect_answers": [],
-            })
-
+            }))
+            i += 1
     elif name == "nq_open":
-        for ex in ds:
-            samples.append({
+        for i, ex in enumerate(ds):
+            samples.append((i, {
                 "prompt_text": template.format(question=ex["question"]),
                 "correct_answers": [str(a) for a in ex["answer"]],
                 "incorrect_answers": [],
-            })
-
+            }))
     elif name == "tydiqa_gp":
-        # English only (HARP)
-        for ex in ds:
+        for i, ex in enumerate(ds):
             if ex.get("language", "english") != "english":
                 continue
             ctx = ex["context"][0] if isinstance(ex["context"], list) else ex["context"]
-            ans_texts = ex["answers"]["text"]
-            samples.append({
-                "prompt_text": template.format(
-                    context=str(ctx), question=ex["question"]),
-                "correct_answers": [str(a) for a in ans_texts if a],
+            samples.append((i, {
+                "prompt_text": template.format(context=str(ctx), question=ex["question"]),
+                "correct_answers": [str(a) for a in ex["answers"]["text"] if a],
                 "incorrect_answers": [],
-            })
-
+            }))
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
     if debug:
-        import random
-        random.seed(42)
+        import random; random.seed(42)
         random.shuffle(samples)
         samples = samples[:min(50, len(samples))]
 
     ratio = cfg["output"]["dataset_ratio"]
     if ratio < 1.0 and not debug:
-        import random
-        random.seed(42)
+        import random; random.seed(42)
         random.shuffle(samples)
         samples = samples[:int(len(samples) * ratio)]
 
-    return samples
+    return [s for s in samples]  # list of (abs_idx, dict)
 
 
 # ==============================================================================
@@ -358,11 +346,11 @@ def main():
             all_emb = []
             all_flags = []
             all_is_known = []
-            all_prompt_idx = []  # per-beam → prompt index
+            all_prompt_indices = []
             n_known = 0
             n_unknown = 0
 
-            for idx, sample in enumerate(tqdm(samples, desc=f"  {ds_name}")):
+            for abs_idx, sample in tqdm(samples, desc=f"  {ds_name}"):
                 beam_results = process_prompt(
                     sample, model, tokenizer, L, D, rouge, bleurt)
 
@@ -376,12 +364,12 @@ def main():
                 for r in beam_results:
                     all_emb.append(r["pooled_tensor"])
                     all_flags.append(r["is_hallucination"])
-                    all_prompt_idx.append(idx)
+                    all_prompt_indices.append(abs_idx)
 
-                if (idx + 1) % 100 == 0:
+                if (len(all_is_known)) % 100 == 0:
                     vram = torch.cuda.memory_allocated() / 1e9
                     tqdm.write(
-                        f"    [{idx+1:5d}/{n_prompts}]  "
+                        f"    [{len(all_is_known):5d}/{n_prompts}]  "
                         f"known: {n_known}  unknown: {n_unknown}  "
                         f"VRAM: {vram:.1f} GB")
 
@@ -393,7 +381,7 @@ def main():
                 "all_emb": all_emb,
                 "all_hallucination_flag": all_flags,
                 "all_is_known": all_is_known,
-                "all_prompt_indices": all_prompt_idx,
+                "prompt_indices": all_prompt_indices,
                 "metadata": {
                     "model": model_id,
                     "dataset": ds_name,

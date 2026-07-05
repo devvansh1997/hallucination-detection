@@ -97,9 +97,10 @@ def evaluate_one(model_folder: str, dataset: str):
     N_beams, L, D = X_all.shape
     n_prompts = len(is_known)
 
-    # Per-beam → per-prompt mapping (handles variable beam counts from early-stopping)
-    prompt_idx = np.array(data.get("all_prompt_indices",
-                       list(range(n_prompts))))   # fallback for old-format files
+    # Per-beam -> per-prompt mapping (handles variable beam counts)
+    prompt_idx = np.array(data.get("prompt_indices",
+                                   data.get("all_prompt_indices",
+                                   list(range(n_prompts)))))
 
     # HARP split: known prompts → 75/25, all unknown → valid
     known_prompt_idx = np.where(is_known)[0]
