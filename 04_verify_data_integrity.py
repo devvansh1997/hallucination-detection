@@ -4,11 +4,20 @@
 Scans data/*/ for all .pt files, checks shapes, labels, numerical sanity.
 """
 
+import argparse
 import os
 import glob
 
 import torch
 import numpy as np
+from tqdm import tqdm
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default=None,
+                    help="e.g. llama-3.1-8b-instruct")
+parser.add_argument("--dataset", type=str, default=None,
+                    help="e.g. triviaqa")
+args = parser.parse_args()
 
 DATA_DIR = "../data"
 
@@ -16,7 +25,17 @@ print("=" * 72)
 print("  DATA INTEGRITY AUDIT")
 print("=" * 72)
 
-files = sorted(glob.glob(os.path.join(DATA_DIR, "*", "*_pooled.pt")))
+if args.model and args.dataset:
+    fpath = os.path.join(DATA_DIR, args.model, f"{args.dataset}_pooled.pt")
+    if not os.path.exists(fpath):
+        print(f"  File not found: {fpath}")
+        exit(1)
+    files = [fpath]
+elif args.model:
+    files = sorted(glob.glob(os.path.join(DATA_DIR, args.model, "*_pooled.pt")))
+else:
+    files = sorted(glob.glob(os.path.join(DATA_DIR, "*", "*_pooled.pt")))
+
 if not files:
     print("  No pooled files found.")
     exit(1)
@@ -41,12 +60,12 @@ for fpath in files:
     n_hall = sum(flags)
     rate = n_hall / N * 100 if N > 0 else 0
     has_is_known = "all_is_known" in data
-    has_prompt_idx = "all_prompt_indices" in data
+    has_prompt_idx = "prompt_indices" in data
     n_known = sum(data.get("all_is_known", [])) if has_is_known else "N/A"
 
     # Numerical sanity
     n_nan, n_inf, n_zero = 0, 0, 0
-    for i, t in enumerate(emb):
+    for t in tqdm(emb, desc=f"    scanning", leave=False):
         if torch.isnan(t).any():
             n_nan += 1
         if torch.isinf(t).any():
@@ -72,7 +91,7 @@ for fpath in files:
     if not flag_ok:
         issues.append(f"{rel}: label length mismatch {len(flags)} vs {N}")
     if not has_prompt_idx:
-        issues.append(f"{rel}: MISSING all_prompt_indices (needed for known/unknown eval)")
+        issues.append(f"{rel}: MISSING prompt_indices (needed for known/unknown eval)")
 
     print()
 
@@ -82,10 +101,10 @@ print("  CROSS-CHECKS")
 print("  " + "=" * 72)
 for fpath in files:
     data = torch.load(fpath, weights_only=False)
-    if "all_is_known" in data and "all_prompt_indices" in data:
+    if "all_is_known" in data and "prompt_indices" in data:
         n_beams = len(data["all_emb"])
         n_prompts = len(data["all_is_known"])
-        n_unique = len(set(data["all_prompt_indices"]))
+        n_unique = len(set(data["prompt_indices"]))
         rel = os.path.relpath(fpath, DATA_DIR)
         beams_per = n_beams / n_prompts if n_prompts > 0 else 0
         ok = (n_unique == n_prompts)

@@ -15,10 +15,11 @@ import torch
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, required=True)
+parser.add_argument("--dataset", type=str, default="truthfulqa")
 args = parser.parse_args()
 
 DATA_DIR = "../data"
-path = os.path.join(DATA_DIR, args.model, "truthfulqa_pooled.pt")
+path = os.path.join(DATA_DIR, args.model, f"{args.dataset}_pooled.pt")
 
 print(f"Loading: {path}")
 data = torch.load(path, weights_only=False)

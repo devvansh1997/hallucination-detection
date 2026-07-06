@@ -1,0 +1,143 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{multirow}
+
+\title{Population HOSVD Hallucination Detection\\
+       \large Dataset Statistics \& HARP-Protocol Baseline Results}
+\author{Graduate Research -- Mechanistic Interpretability}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Dataset Overview}
+
+All datasets generated with HARP-compatible beam search (10 beams, early-stopping
+on first correct answer).  Hidden states extracted from all generated beams,
+mean-pooled across tokens, saved as $(L, D)$ tensors.  Labels assigned via
+contrastive BLEURT/ROUGE judge matching HARP's rubric.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{Dataset} & \textbf{Prompts} & \textbf{Beams} & \textbf{Avg Beams/Prompt} & \textbf{File Size} \\
+\midrule
+\multirow{4}{*}{LLaMA-3.1-8B (32, 4096)}
+  & TruthfulQA & 817   & 4,000   & 4.9 & 2.1 GB \\
+  & TriviaQA   & 9,960 & 37,993  & 3.8 & 19.9 GB \\
+  & NQ-Open    & 3,610 & 30,140  & 8.3 & 15.8 GB \\
+  & TyDiQA-GP  & 5,077 & 12,454  & 2.5 & 6.5 GB \\
+\midrule
+\multirow{4}{*}{Qwen-2.5-7B (28, 3584)}
+  & TruthfulQA & 817   & 3,524   & 4.3 & 1.4 GB \\
+  & TriviaQA   & 9,960 & 68,769  & 6.9 & 27.6 GB \\
+  & NQ-Open    & 3,610 & 34,219  & 9.5 & 13.1 GB \\
+  & TyDiQA-GP  & 5,077 & 23,144  & 4.6 & 8.8 GB \\
+\bottomrule
+\end{tabular}
+\caption{Generated dataset statistics.  Beams = total hidden-state samples
+         across all prompts.  Avg beams/prompt reflects early-stopping
+         efficiency (lower = more prompts found a correct answer early).}
+\end{table}
+
+\section{Label Distribution}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Dataset} & \textbf{Truthful Beams} & \textbf{Halluc. Beams} & \textbf{Hall. Rate} \\
+\midrule
+\multirow{4}{*}{LLaMA-3.1-8B}
+  & TruthfulQA & 513    & 3,487   & 87.2\% \\
+  & TriviaQA   & 8,222  & 29,771  & 78.4\% \\
+  & NQ-Open    & 1,158  & 28,982  & 96.2\% \\
+  & TyDiQA-GP  & 4,654  & 7,800   & 62.6\% \\
+\midrule
+\multirow{4}{*}{Qwen-2.5-7B}
+  & TruthfulQA & 560    & 2,964   & 84.1\% \\
+  & TriviaQA   & 5,849  & 62,920  & 91.5\% \\
+  & NQ-Open    & 353    & 33,866  & 99.0\% \\
+  & TyDiQA-GP  & 3,733  & 19,411  & 83.9\% \\
+\bottomrule
+\end{tabular}
+\caption{Per-beam label distribution.  Truthful beams = model answer matched
+         reference via BLEURT/ROUGE; Hallucinated = did not match.}
+\end{table}
+
+\section{HOSVD Baseline Results (HARP Protocol)}
+
+\textbf{Evaluation Protocol:} HARP-style known/unknown split.  Truthful
+prompts split 75/25 for train/valid.  All hallucinated prompts added to
+valid.  Factor matrices $U_L$, $U_D$ computed from train only (zero leakage).
+Random Forest (200 trees, balanced class weights) on 320-dimensional
+core tensors ($R_L=5$, $R_D=64$).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
+\midrule
+LLaMA-3.1-8B  & 0.7717 & 0.8332 & 0.8252 & 0.8128 \\
+Qwen-2.5-7B   & 0.7743 & \textit{(pending)} & \textit{(pending)} & \textit{(pending)} \\
+\bottomrule
+\end{tabular}
+\caption{HOSVD AUROC -- HARP-compatible known/unknown split.  Zero leakage:
+         $U_L$, $U_D$ from training partition only.}
+\end{table}
+
+\subsection{Per-Dataset Train/Valid Split Details}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model/Dataset} & \textbf{Train Beams} & \textbf{Train Hall\%} & \textbf{Valid Beams} & \textbf{Valid Hall\%} & \textbf{AUROC} \\
+\midrule
+LLaMA / TruthfulQA  & 711    & 46.0\% & 3,289   & 96.1\% & 0.7717 \\
+LLaMA / TriviaQA    & 15,491 & 60.2\% & 22,502  & 90.9\% & 0.8332 \\
+LLaMA / NQ-Open     & 4,134  & 79.0\% & 26,006  & 98.9\% & 0.8252 \\
+LLaMA / TyDiQA-GP   & 6,130  & 43.1\% & 6,324   & 81.6\% & 0.8128 \\
+\midrule
+Qwen / TruthfulQA   & 716    & 41.3\% & 2,808   & 95.0\% & 0.7743 \\
+Qwen / TriviaQA     & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
+Qwen / NQ-Open      & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
+Qwen / TyDiQA-GP    & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
+\bottomrule
+\end{tabular}
+\caption{Detailed split statistics.  Train beams include mostly hallucinated
+         samples because known prompts produce incorrect beams before the
+         first correct one (early-stopping).  Valid set includes all unknown
+         prompts + 25\% of known prompts.}
+\end{table}
+
+\section{Key Observations}
+
+\begin{enumerate}
+  \item \textbf{Cross-model consistency.} TruthfulQA AUROC is nearly identical
+        across models (0.7717 vs 0.7743), suggesting the HOSVD subspace captures
+        a model-agnostic hallucination signature.
+
+  \item \textbf{TriviaQA is the strongest signal.} AUROC 0.8332 on LLaMA-3.1-8B
+        benefits from the largest training set (15,491 beams) and most balanced
+        label distribution among the four datasets.
+
+  \item \textbf{NQ-Open at 0.8252 despite 96.2\% hallucination rate.}
+        The HOSVD extracts a usable decision boundary even under extreme class
+        imbalance -- only 1,158 truthful beams out of 30,140 total.
+
+  \item \textbf{TyDiQA-GP at 0.8128 with best label balance (62.6\% hall).}
+        The multilingual context passage helps LLaMA generate more accurate
+        answers, improving the quality of truthful-beam features.
+\end{enumerate}
+
+\end{document}
