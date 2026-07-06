@@ -1,0 +1,11 @@
+torch
+transformers>=4.48.2
+datasets
+evaluate
+rouge_score
+tensorflow
+pyyaml
+tqdm
+scikit-learn
+numpy
+bitsandbytes
