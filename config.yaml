@@ -1,11 +1,11 @@
 # ==============================================================================
-# HOSVD Hallucination Detection — Configuration
+# HOSVD Hallucination Detection -- Configuration
 # ==============================================================================
 # Matches HARP's evaluation protocol:
 #   - No system prompt (minimal prompt templates per dataset)
 #   - 10-beam search per prompt
 #   - Contrastive BLEURT/ROUGE judge vs correct + incorrect answers
-#   - Known/unknown split: 75% known → train, 25% known + all unknown → valid
+#   - Known/unknown split: 75% known -> train, 25% known + all unknown -> valid
 
 models:
   - id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
