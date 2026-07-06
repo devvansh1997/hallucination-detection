@@ -1,4 +1,5 @@
-torch
+# Install torch manually first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
 transformers>=4.48.2
 datasets
 evaluate
