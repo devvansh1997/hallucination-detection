@@ -51,18 +51,32 @@ args = parser.parse_args()
 # ==============================================================================
 
 def compute_ul_ud(X_train: torch.Tensor):
-    """X_train: (N, L, D). Returns U_L (L, R_L), U_D (D, R_D)."""
-    L, D = X_train.shape[1], X_train.shape[2]
+    """X_train: (N, L, D). Returns U_L (L, R_L), U_D (D, R_D).
+    Gram matrix trick with chunked matmul -- never materialises
+    the full (D, N*L) unfolded matrix at float32."""
+    N, L, D = X_train.shape
 
-    # Mode-1 (layer) unfolding
-    X_L = X_train.permute(1, 0, 2).reshape(L, -1).float()
-    U_L, _, _ = torch.linalg.svd(X_L, full_matrices=False)
-    U_L = U_L[:, :R_L]
+    # U_L via Gram: (L, N*D) matrix is small because L=28/32
+    X_f = X_train.permute(1, 0, 2).reshape(L, -1).float()
+    A_L = X_f @ X_f.T
+    _, U_L = torch.linalg.eigh(A_L.float())
+    U_L = torch.flip(U_L[:, -R_L:], dims=[1])
+    del X_f, A_L
 
-    # Mode-2 (hidden) unfolding
-    X_D = X_train.permute(2, 0, 1).reshape(D, -1).float()
-    U_D, _, _ = torch.linalg.svd(X_D, full_matrices=False)
-    U_D = U_D[:, :R_D]
+    # U_D via chunked Gram: A_D = sum(chunk @ chunk.T) over N*L axis
+    X_d = X_train.permute(2, 0, 1).reshape(D, -1)          # stays bf16 (half size)
+    cols = N * L
+    chunk_size = 50000                                       # ~0.7 GB per chunk
+    A_D = torch.zeros(D, D, dtype=torch.float32)
+    for start in range(0, cols, chunk_size):
+        end = min(start + chunk_size, cols)
+        chunk = X_d[:, start:end].float()                   # cast just this slice
+        A_D.addmm_(chunk, chunk.T)                           # accumulate Gram
+    del X_d
+
+    _, U_D = torch.linalg.eigh(A_D.float())
+    U_D = torch.flip(U_D[:, -R_D:], dims=[1])
+    del A_D
 
     return U_L, U_D
 
@@ -124,27 +138,35 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     valid_mask = np.array([prompt_idx[i] in valid_prompts
                            for i in range(N_beams)])
 
-    X_train = X_all[train_mask]
-    X_valid = X_all[valid_mask]
-    y_train = y_all[train_mask]
-    y_valid = y_all[valid_mask]
+    # Use indices NOT copies -- avoids duplicating the 27GB tensor in RAM
+    train_idx_arr = np.where(train_mask)[0]
+    valid_idx_arr = np.where(valid_mask)[0]
 
-    print(f" done.  train={X_train.shape[0]} beams (hall:{y_train.mean():.1%})  "
-          f"valid={X_valid.shape[0]} beams (hall:{y_valid.mean():.1%})")
+    X_train_n = len(train_idx_arr)
+    X_valid_n = len(valid_idx_arr)
+    y_train = y_all[train_idx_arr]
+    y_valid = y_all[valid_idx_arr]
 
-    if X_train.shape[0] < 100 or X_valid.shape[0] < 50:
+    print(f" done.  train={X_train_n} beams (hall:{y_train.mean():.1%})  "
+          f"valid={X_valid_n} beams (hall:{y_valid.mean():.1%})")
+
+    if X_train_n < 100 or X_valid_n < 50:
         print("  [WARN] Too few samples -- skipping")
         return None
 
-    # HOSVD
+    # HOSVD -- index into X_all directly, no copy
     print(f"  [3/5] Computing HOSVD (L={L}, D={D}) ...", flush=True, end="")
-    U_L, U_D = compute_ul_ud(X_train)
+    U_L, U_D = compute_ul_ud(X_all[train_idx_arr])
     print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
 
     print(f"  [4/5] Projecting ...", flush=True, end="")
-    X_train_feat = project(X_train, U_L, U_D)
-    X_valid_feat = project(X_valid, U_L, U_D)
+    X_train_feat = project(X_all[train_idx_arr], U_L, U_D)
+    X_valid_feat = project(X_all[valid_idx_arr], U_L, U_D)
     print(f" done.  {X_train_feat.shape[1]} dim ({R_L} x {R_D})")
+
+    # Free X_all now that we have features
+    del X_all
+    import gc; gc.collect()
 
     # RandomForest
     print(f"  [5/5] Training RandomForest (200 trees) ...", flush=True, end="")
