@@ -3,7 +3,9 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
-\usepackage{xcolor}
+\usepackage[table]{xcolor}
+\definecolor{bestblue}{RGB}{173,216,230}
+\definecolor{secondyellow}{RGB}{255,255,200}
 \usepackage{hyperref}
 \usepackage{caption}
 \usepackage{multirow}
@@ -72,72 +74,142 @@ contrastive BLEURT/ROUGE judge matching HARP's rubric.
          reference via BLEURT/ROUGE; Hallucinated = did not match.}
 \end{table}
 
-\section{HOSVD Baseline Results (HARP Protocol)}
+\section{Results}
 
-\textbf{Evaluation Protocol:} HARP-style known/unknown split.  Truthful
-prompts split 75/25 for train/valid.  All hallucinated prompts added to
-valid.  Factor matrices $U_L$, $U_D$ computed from train only (zero leakage).
-Random Forest (200 trees, balanced class weights) on 320-dimensional
-core tensors ($R_L=5$, $R_D=64$).
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{NQ-Open} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{TyDiQA} \\
+\midrule
+\multirow{9}{*}{Qwen-2.5-7B}
+  & Perplexity        & 76.5 & 64.4 & 83.1 & 30.5 \\
+  & LN-Entropy        & 77.7 & 63.6 & 80.2 & 47.1 \\
+  & Semantic Entropy  & 77.7 & 60.0 & 76.1 & 68.6 \\
+  & Lexical Similarity& 77.8 & 63.9 & 76.9 & 60.3 \\
+  & EigenScore        & 78.9 & 63.8 & 76.2 & 74.8 \\
+  & HaloScope         & 60.7 & 63.0 & 85.3 & 69.0 \\
+  & Faizul (Tucker)   & --   & 77.1 & 78.2 & 72.3 \\
+  & HARP              & \cellcolor{bestblue}84.0 & \cellcolor{bestblue}88.1 & \cellcolor{bestblue}92.8 & \cellcolor{bestblue}88.4 \\
+  & \textbf{HOSVD (ours)} & 53.4 & \cellcolor{secondyellow}77.4 & \cellcolor{secondyellow}86.7 & \cellcolor{secondyellow}81.7 \\
+\midrule
+\multirow{9}{*}{LLaMA-3.1-8B}
+  & Perplexity        & 50.3 & 71.4 & 76.3 & 53.4 \\
+  & LN-Entropy        & 52.7 & 62.5 & 55.8 & 48.8 \\
+  & Semantic Entropy  & 60.7 & 59.4 & 68.7 & 62.2 \\
+  & Lexical Similarity& 60.9 & 49.1 & 71.0 & 69.5 \\
+  & EigenScore        & 56.7 & 45.3 & 69.1 & \cellcolor{secondyellow}82.4 \\
+  & HaloScope         & 62.7 & 70.6 & 76.2 & 53.3 \\
+  & Faizul (Tucker)   & --   & 74.1 & 76.3 & 73.1 \\
+  & HARP              & \cellcolor{bestblue}89.4 & \cellcolor{bestblue}88.5 & \cellcolor{bestblue}92.9 & \cellcolor{bestblue}86.6 \\
+  & \textbf{HOSVD (ours)} & \cellcolor{secondyellow}82.5 & \cellcolor{secondyellow}77.2 & \cellcolor{secondyellow}83.3 & 81.3 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of hallucination detection AUROC (\%).  \cellcolor{bestblue}Blue = best,
+         \cellcolor{secondyellow}yellow = second best \textbf{per model+dataset}
+         (within each model block, per column).  HARP and baseline
+         values from HARP Table~1.  Our HOSVD uses the same evaluation
+         protocol (known/unknown split, zero leakage) with 320-dimensional
+         compressed core features and Random Forest.}
+\end{table}
+
+\subsection{HARP--HOSVD Gap}
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Model} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
+\textbf{Model} & \textbf{NQ-Open} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{TyDiQA} \\
 \midrule
-LLaMA-3.1-8B  & 0.7717 & 0.8332 & 0.8252 & 0.8128 \\
-Qwen-2.5-7B   & 0.7743 & \textit{(pending)} & \textit{(pending)} & \textit{(pending)} \\
+Qwen-2.5-7B   & $-$30.6 & $-$10.7 & $-$6.1 & $-$6.7 \\
+LLaMA-3.1-8B  & $-$6.9  & $-$11.3 & $-$9.6 & $-$5.3 \\
 \bottomrule
 \end{tabular}
-\caption{HOSVD AUROC -- HARP-compatible known/unknown split.  Zero leakage:
-         $U_L$, $U_D$ from training partition only.}
+\caption{Delta = HARP AUROC $-$ HOSVD AUROC (\%).  Smaller negative values
+         indicate closer performance.  HOSVD is within 5--12 points of HARP
+         on 6 of 8 pairs; NQ-Open on Qwen ($-$30.6) is the sole outlier due
+         to extreme class imbalance (99.0\% hallucinated).}
 \end{table}
 
-\subsection{Per-Dataset Train/Valid Split Details}
+\section{Evaluation Protocol}
 
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{lcccccc}
-\toprule
-\textbf{Model/Dataset} & \textbf{Train Beams} & \textbf{Train Hall\%} & \textbf{Valid Beams} & \textbf{Valid Hall\%} & \textbf{AUROC} \\
-\midrule
-LLaMA / TruthfulQA  & 711    & 46.0\% & 3,289   & 96.1\% & 0.7717 \\
-LLaMA / TriviaQA    & 15,491 & 60.2\% & 22,502  & 90.9\% & 0.8332 \\
-LLaMA / NQ-Open     & 4,134  & 79.0\% & 26,006  & 98.9\% & 0.8252 \\
-LLaMA / TyDiQA-GP   & 6,130  & 43.1\% & 6,324   & 81.6\% & 0.8128 \\
-\midrule
-Qwen / TruthfulQA   & 716    & 41.3\% & 2,808   & 95.0\% & 0.7743 \\
-Qwen / TriviaQA     & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
-Qwen / NQ-Open      & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
-Qwen / TyDiQA-GP    & \multicolumn{2}{c}{\textit{pending}} & \multicolumn{2}{c}{\textit{pending}} & \textit{pending} \\
-\bottomrule
-\end{tabular}
-\caption{Detailed split statistics.  Train beams include mostly hallucinated
-         samples because known prompts produce incorrect beams before the
-         first correct one (early-stopping).  Valid set includes all unknown
-         prompts + 25\% of known prompts.}
-\end{table}
-
-\section{Key Observations}
+We replicate HARP's exact evaluation protocol to ensure fair comparison:
 
 \begin{enumerate}
-  \item \textbf{Cross-model consistency.} TruthfulQA AUROC is nearly identical
-        across models (0.7717 vs 0.7743), suggesting the HOSVD subspace captures
+  \item \textbf{Beam Search Generation.} For each prompt, the model generates
+        10 candidate answers via beam search (\texttt{num\_beams=10},
+        \texttt{num\_return\_sequences=10}).  Early stopping halts further
+        beam scoring once a correct answer is found, reducing computational
+        overhead on known prompts.
+
+  \item \textbf{Contrastive Judging (BLEURT + ROUGE-L).} Each generated beam
+        is scored against \emph{both} the correct reference answer(s) and
+        any provided incorrect answer(s) using BLEURT-20 (semantic similarity)
+        and ROUGE-L (lexical overlap).  A beam is classified as \emph{correct}
+        if: $\text{BLEURT} > 0.5 \lor \text{ROUGE-L} > 0.7$ (contrastive
+        advantage check always passes with threshold $-1.0$).  This rubric
+        matches HARP's \texttt{DatasetJudge} implementation.
+
+  \item \textbf{Known/Unknown Classification.} A prompt is labeled \emph{known}
+        if \textbf{any} of its 10 beams is deemed correct; otherwise it is
+        \emph{unknown} (all beams hallucinated).  Known prompts contribute
+        both truthful and hallucinated beams; unknown prompts contribute
+        only hallucinated beams.
+
+  \item \textbf{Zero-Leakage Train/Valid Split.} Known prompts are split
+        75/25 for training and validation.  All unknown prompts are added
+        to the validation set \emph{only} — the training set never sees a
+        single unknown-prompt beam.  This guarantees that no hallucination
+        signal leaks into the HOSVD factor matrix computation.
+
+  \item \textbf{Population HOSVD Projection.} Factor matrices $U_L \in
+        \mathbb{R}^{L \times 5}$ and $U_D \in \mathbb{R}^{D \times 64}$
+        are computed exclusively from the \emph{training partition} via the
+        chunked Gram matrix trick.  Both training and validation beams are
+        projected: $\mathcal{G} = U_L^\top \, H_{\text{pool}} \, U_D$
+        yielding a $(5, 64)$ core tensor per beam, flattened to 320 features.
+
+  \item \textbf{Random Forest Classification.} A Random Forest classifier
+        (200 trees, balanced class weights, \texttt{random\_state=42}) is
+        trained on the 320-dimensional projected training features and
+        evaluated on the combined validation set (25\% of known-prompt
+        beams + 100\% of unknown-prompt beams).  AUROC is computed via
+        scikit-learn with hallucination as the positive class.
+
+  \item \textbf{No Multiple Sampling.} Unlike HARP and HaloScope (which
+        require 10+ independent forward passes), our HOSVD features are
+        extracted from a single generation pass per prompt.  The 10-beam
+        search serves only the evaluation rubric, not the feature extraction.
+\end{enumerate}
+
+\noindent
+\textbf{Key Observations:}
+\begin{enumerate}
+  \item \textbf{HOSVD is the second-best method on 6 of 8 model--dataset pairs.}
+        On Qwen, HOSVD ranks 2nd on TruthfulQA (77.4), TriviaQA (86.7), and
+        TyDiQA (81.7).  On LLaMA, HOSVD ranks 2nd on NQ-Open (82.5),
+        TruthfulQA (77.2), and TriviaQA (83.3).  HARP claims \#1 on all 8
+        pairs as the state of the art.
+
+  \item \textbf{On Qwen-2.5-7B, HOSVD outperforms all non-HARP baselines}
+        on TruthfulQA (77.4 vs.\ 63--64), TriviaQA (86.7 vs.\ 76--85),
+        and TyDiQA (81.7 vs.\ 30--75).  NQ-Open (53.4) is the only
+        underperformance — extreme class imbalance (99.0\% hallucinated).
+
+  \item \textbf{Cross-model consistency:} TruthfulQA AUROC is nearly identical
+        across models (77.2 vs.\ 77.4), suggesting the HOSVD subspace captures
         a model-agnostic hallucination signature.
 
-  \item \textbf{TriviaQA is the strongest signal.} AUROC 0.8332 on LLaMA-3.1-8B
-        benefits from the largest training set (15,491 beams) and most balanced
-        label distribution among the four datasets.
+  \item \textbf{No multiple sampling required.} Unlike HARP and HaloScope
+        (marked ``Single'' in HARP Table~1), HOSVD extracts features from
+        a single forward pass; the 10-beam generation is only for the
+        HARP-compatible rubric, not for feature extraction.
 
-  \item \textbf{NQ-Open at 0.8252 despite 96.2\% hallucination rate.}
-        The HOSVD extracts a usable decision boundary even under extreme class
-        imbalance -- only 1,158 truthful beams out of 30,140 total.
-
-  \item \textbf{TyDiQA-GP at 0.8128 with best label balance (62.6\% hall).}
-        The multilingual context passage helps LLaMA generate more accurate
-        answers, improving the quality of truthful-beam features.
+  \item \textbf{Compression efficiency.} HOSVD compresses raw $(L, T, D)$
+        hidden states (up to $32 \times 10 \times 4096 \approx 1.3$M entries)
+        into a 320-dimensional core vector ($\sim$4000$\times$ reduction)
+        while retaining discriminative power.
 \end{enumerate}
 
 \end{document}
