@@ -43,6 +43,8 @@ RANDOM_SEED = 42
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_folder", type=str, default=None)
 parser.add_argument("--dataset", type=str, default=None)
+parser.add_argument("--suffix", type=str, default="",
+                    help="File suffix, e.g. _fullbeams for full-beam files")
 args = parser.parse_args()
 
 
@@ -94,7 +96,8 @@ def project(X: torch.Tensor, U_L: torch.Tensor, U_D: torch.Tensor) -> np.ndarray
 # ==============================================================================
 
 def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
-    path = os.path.join(DATA_DIR, model_folder, f"{dataset}_pooled.pt")
+    path = os.path.join(DATA_DIR, model_folder,
+                       f"{dataset}_pooled{args.suffix}.pt")
     if not os.path.exists(path):
         print(f"  [{idx}/{total}] [SKIP] {path} not found")
         return None
