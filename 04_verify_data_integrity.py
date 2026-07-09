@@ -17,6 +17,8 @@ parser.add_argument("--model", type=str, default=None,
                     help="e.g. llama-3.1-8b-instruct")
 parser.add_argument("--dataset", type=str, default=None,
                     help="e.g. triviaqa")
+parser.add_argument("--suffix", type=str, default="",
+                    help="e.g. _fullbeams")
 args = parser.parse_args()
 
 DATA_DIR = "../data"
@@ -26,15 +28,18 @@ print("  DATA INTEGRITY AUDIT")
 print("=" * 72)
 
 if args.model and args.dataset:
-    fpath = os.path.join(DATA_DIR, args.model, f"{args.dataset}_pooled.pt")
+    fpath = os.path.join(DATA_DIR, args.model,
+                         f"{args.dataset}_pooled{args.suffix}.pt")
     if not os.path.exists(fpath):
         print(f"  File not found: {fpath}")
         exit(1)
     files = [fpath]
 elif args.model:
-    files = sorted(glob.glob(os.path.join(DATA_DIR, args.model, "*_pooled.pt")))
+    files = sorted(glob.glob(os.path.join(DATA_DIR, args.model,
+                                          f"*_pooled{args.suffix}.pt")))
 else:
-    files = sorted(glob.glob(os.path.join(DATA_DIR, "*", "*_pooled.pt")))
+    files = sorted(glob.glob(os.path.join(DATA_DIR, "*",
+                                          f"*_pooled{args.suffix}.pt")))
 
 if not files:
     print("  No pooled files found.")
@@ -48,7 +53,7 @@ for fpath in files:
     rel = os.path.relpath(fpath, DATA_DIR)
     folder = rel.split(os.sep)[0]
     fname = os.path.basename(fpath)
-    dataset = fname.replace("_pooled.pt", "")
+    dataset = fname.replace(f"_pooled{args.suffix}.pt", "")
 
     data = torch.load(fpath, weights_only=False)
     emb = data["all_emb"]
