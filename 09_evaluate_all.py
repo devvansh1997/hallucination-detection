@@ -1,11 +1,8 @@
 """
-08_evaluate_geometric.py — Geometric Classifiers (LR + SVM-RBF)
-=================================================================
-Swaps RF for LogisticRegression and SVC(RBF) on absolute HOSVD features.
-Tests whether smooth decision boundaries better match HOSVD's linear manifolds.
-
-Usage:
-  python 08_evaluate_geometric.py --model_folder llama-3.1-8b-instruct --dataset triviaqa
+09_evaluate_all.py — Head-to-Head: RF vs LR vs SVM-RBF
+=========================================================
+All three classifiers trained on identical 5k stratified subset,
+tested on full validation set.
 """
 
 import argparse
@@ -13,6 +10,7 @@ import os
 
 import numpy as np
 import yaml
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
@@ -180,8 +178,19 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
 
     results = {}
 
+    # Random Forest (baseline, 5k subset)
+    print(f"  [5/5] Training RandomForest (sub={len(y_train_sub)}) ...",
+          flush=True, end="")
+    rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
+                                random_state=RANDOM_SEED, n_jobs=-1)
+    rf.fit(X_train_sub, y_train_sub)
+    rf_probs = rf.predict_proba(X_valid_feat)[:, 1]
+    rf_auroc = roc_auc_score(y_valid, rf_probs)
+    results["RandomForest"] = rf_auroc
+    print(f" done.")
+
     # Logistic Regression (on subset, test on full)
-    print(f"  [5/5] Training LogisticRegression (sub={len(y_train_sub)}) ...",
+    print(f"       Training LogisticRegression ...",
           flush=True, end="")
     lr = LogisticRegression(max_iter=1000, class_weight="balanced",
                             random_state=RANDOM_SEED)
@@ -201,8 +210,9 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     results["SVM-RBF"] = svm_auroc
     print(f" done.")
 
-    print(f"\n  >> LogisticRegression  AUROC = {lr_auroc:.4f}")
-    print(f"  >> SVM-RBF              AUROC = {svm_auroc:.4f}")
+    print(f"\n  >> RandomForest         AUROC = {rf_auroc:.4f}")
+    print(f"  >> LogisticRegression    AUROC = {lr_auroc:.4f}")
+    print(f"  >> SVM-RBF               AUROC = {svm_auroc:.4f}")
     return results
     return results
 
@@ -233,6 +243,7 @@ if __name__ == "__main__":
     print(f"  SUMMARY")
     print(f"{'=' * 60}")
     for (model, ds), res in sorted(results.items()):
-        lr = res.get("LogisticRegression", 0)
+        rf  = res.get("RandomForest", 0)
+        lr  = res.get("LogisticRegression", 0)
         svm = res.get("SVM-RBF", 0)
-        print(f"  {model:30s}  {ds:15s}  LR={lr:.4f}  SVM-RBF={svm:.4f}")
+        print(f"  {model:30s}  {ds:15s}  RF={rf:.4f}  LR={lr:.4f}  SVM={svm:.4f}")
