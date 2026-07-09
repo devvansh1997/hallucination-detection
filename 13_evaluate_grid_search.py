@@ -172,15 +172,8 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
                 if off + r_l > L or off + r_d > D:
                     continue
 
-                # Dynamic cache
-                cache_path = os.path.join(DATA_DIR, model_folder,
-                    f"{dataset}_L{r_l}_D{r_d}_off{off}_ulud{args.suffix}.pt")
-                if os.path.exists(cache_path):
-                    cached = torch.load(cache_path, weights_only=True)
-                    U_L, U_D = cached["U_L"], cached["U_D"]
-                else:
-                    U_L, U_D = compute_ul_ud(X_train_pool, r_l, r_d, off)
-                    torch.save({"U_L": U_L, "U_D": U_D}, cache_path)
+                # Compute factor matrices (no caching per combo)
+                U_L, U_D = compute_ul_ud(X_train_pool, r_l, r_d, off)
 
                 # Project
                 X_train_feat = project(X_train_pool, U_L, U_D)
@@ -215,6 +208,17 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     print(f"  {'-'*30}")
     for r_l, r_d, off, auroc in grid_results:
         print(f"  {r_l:5d}  {r_d:5d}  {off:6d}  {auroc:8.4f}")
+
+    # Save best factor matrices
+    best = grid_results[0]
+    best_ul, best_ud = compute_ul_ud(X_train_pool, best[0], best[1], best[2])
+    best_cache = os.path.join(DATA_DIR, model_folder,
+        f"{dataset}_ulud{args.suffix}.pt")
+    torch.save({"U_L": best_ul, "U_D": best_ud,
+                "R_L": best[0], "R_D": best[1], "offset": best[2],
+                "AUROC": best[3]}, best_cache)
+    print(f"\n  Best combo saved: R_L={best[0]} R_D={best[1]} "
+          f"off={best[2]} AUROC={best[3]:.4f} -> {best_cache}")
 
     return grid_results
     return results
