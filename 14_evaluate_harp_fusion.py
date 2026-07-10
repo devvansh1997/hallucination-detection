@@ -16,6 +16,7 @@ import os
 import numpy as np
 import yaml
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
 import torch
@@ -192,8 +193,11 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     del X_all
     import gc; gc.collect()
 
-    # Random Forest (no scaling)
-    print(f"  [5/5] Training RandomForest (200 trees) ...", flush=True, end="")
+    # Scale + Random Forest
+    scaler = StandardScaler()
+    X_train_feat = scaler.fit_transform(X_train_feat)
+    X_valid_feat = scaler.transform(X_valid_feat)
+    print(f"  [5/5] Training RandomForest (200 trees, scaled) ...", flush=True, end="")
     rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
                                 random_state=RANDOM_SEED, n_jobs=-1)
     rf.fit(X_train_feat, y_train)
