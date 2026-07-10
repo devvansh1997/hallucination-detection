@@ -68,7 +68,7 @@ for s in eos_strs:
     eos_ids.update(tokenizer.encode("Yes" + s, add_special_tokens=False)[1:])
 
 # -- Generate --
-all_tensors = []          # list of lists: per prompt → per beam → (L, T, D)
+all_tensors = []          # per prompt → per beam → (prompt_bottleneck, gen_tokens)
 all_flags = []            # per beam
 all_is_known = []         # per prompt
 all_prompt_idx = []
@@ -118,9 +118,21 @@ for idx in tqdm(range(N_PILOT), desc="  Generating"):
             any_correct = True
         prompt_flags.append(not is_correct)
 
-        # Extract raw (L, T, D)
+        # Extract raw tensors
+        # A) Last prompt token — from hidden_states[0] (prompt processing step)
+        prompt_hs = hidden_states[0]           # tuple of (L+1) tensors, each (1, prompt_len, D)
+        if prompt_len == 0:
+            prompt_bottleneck = torch.zeros(L, D)
+        else:
+            p_layers = []
+            for l in range(L):
+                h = prompt_hs[l + 1][0, -1, :].cpu()     # last token, shape (D,)
+                p_layers.append(h)
+            prompt_bottleneck = torch.stack(p_layers, dim=0)  # (L, D)
+
+        # B) Generated tokens — from hidden_states[1:]
         if num_gen == 0 or len(gids) == 0:
-            prompt_tensors.append(torch.zeros(L, 1, D))
+            gen_tokens = torch.zeros(L, 1, D)
         else:
             layers = []
             for l in range(L):
@@ -131,7 +143,9 @@ for idx in tqdm(range(N_PILOT), desc="  Generating"):
                     tokens.append(hidden_states[step][l + 1][b].cpu())
                 layers.append(torch.cat(tokens, dim=0) if tokens
                               else torch.zeros(0, D))
-            prompt_tensors.append(torch.stack(layers, dim=0))  # (L, T, D)
+            gen_tokens = torch.stack(layers, dim=0)  # (L, T, D)
+
+        prompt_tensors.append((prompt_bottleneck, gen_tokens))
 
     all_tensors.append(prompt_tensors)
     all_flags.extend(prompt_flags)

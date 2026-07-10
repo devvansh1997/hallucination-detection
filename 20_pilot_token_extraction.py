@@ -119,36 +119,16 @@ prompt_idx = np.array(data["prompt_indices"])
 
 # Flatten per-prompt beam lists into flat arrays
 # Also extract 3 token candidates per beam
-all_A, all_B, all_C, all_y, all_pi = [], [], [], [], []
+all_A, all_B, all_C, all_y = [], [], [], []
 
-for pi, beam_tensors in enumerate(all_tensors):
-    for bi, H in enumerate(beam_tensors):
-        if H.ndim != 3 or H.shape[0] < 24:
-            print(f"  WARN: prompt {pi} beam {bi} has shape {H.shape}, skipping")
-            all_A.append(torch.zeros(9, 4096))
-            all_B.append(torch.zeros(9, 4096))
-            all_C.append(torch.zeros(9, 4096))
-            all_y.append(flags[len(all_y)])
-            continue
-        H = H[:, 15:24, :].float()             # (9, T, D) — mid layers
-        _, T, D = H.shape
-        if T == 0:
-            zeros = torch.zeros(9, D)
-            all_A.append(zeros)
-            all_B.append(zeros)
-            all_C.append(zeros)
-            all_y.append(flags[len(all_y)])
-            continue
-        # Candidate A
-        A = H[:, 0, :]                           # (9, D)
-        if A.dim() == 3:
-            A = A.squeeze(1)
-        B = H[:, 0, :]                           # (9, D) — same
-        if B.dim() == 3:
-            B = B.squeeze(1)
-        C = H.max(dim=1).values                  # (9, D) — max across tokens
-        if C.dim() == 3:
-            C = C.squeeze(1)
+for pi, beam_list in enumerate(all_tensors):
+    for prompt_bottleneck, gen_tokens in beam_list:
+        pb = prompt_bottleneck[15:24, :].float()           # (9, D) — last prompt token
+        gt = gen_tokens[15:24, :, :].float()               # (9, T, D) — generated tokens
+
+        A = pb                                               # Prompt Bottleneck
+        B = gt[:, 0, :] if gt.shape[1] > 0 else torch.zeros(9, D)  # Commitment: first gen token
+        C = gt.max(dim=1).values if gt.shape[1] > 0 else torch.zeros(9, D)  # Max-energy
 
         all_A.append(A)
         all_B.append(B)
