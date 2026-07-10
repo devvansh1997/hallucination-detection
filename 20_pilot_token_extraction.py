@@ -132,12 +132,16 @@ for pi, beam_tensors in enumerate(all_tensors):
             all_C.append(zeros)
             all_y.append(flags[len(all_y)])
             continue
-        # Candidate A: last prompt token = first column of generated hidden states? 
-        # Actually prompt tokens aren't in our extracted data (we only kept generated tokens)
-        # Using first generated token as proxy for prompt boundary
-        A = H[:, 0, :]                           # (9, D) -- first generated token
-        B = H[:, 0, :]                           # (9, D) -- same as A for first token
-        C = H.max(dim=1).values                  # (9, D) -- max across tokens
+        # Candidate A
+        A = H[:, 0, :]                           # (9, D)
+        if A.dim() == 3:
+            A = A.squeeze(1)
+        B = H[:, 0, :]                           # (9, D) — same
+        if B.dim() == 3:
+            B = B.squeeze(1)
+        C = H.max(dim=1).values                  # (9, D) — max across tokens
+        if C.dim() == 3:
+            C = C.squeeze(1)
 
         all_A.append(A)
         all_B.append(B)
@@ -156,6 +160,7 @@ for name, tensor_list in [("A: Prompt Boundary", all_A),
                            ("B: Commitment Token", all_B),
                            ("C: Max-Energy", all_C)]:
     X = torch.stack(tensor_list)                 # (N, 9, D)
+    assert X.ndim == 3, f"Expected 3D, got shape {X.shape}"
     res = evaluate_candidate(X, np.array(all_y), prompt_idx, is_known, name)
     if res:
         results[name] = res
