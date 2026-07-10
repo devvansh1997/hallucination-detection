@@ -156,20 +156,10 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
         print("  [WARN] Too few samples -- skipping")
         return None
 
-    # HOSVD -- check cache first, compute only if needed
-    cache_path = os.path.join(DATA_DIR, model_folder,
-                              f"{dataset}_ulud_reasoning_window{args.suffix}.pt")
-    if os.path.exists(cache_path):
-        print(f"  [3/5] Loading cached factor matrices ...", flush=True, end="")
-        cached = torch.load(cache_path, weights_only=True)
-        U_L, U_D = cached["U_L"], cached["U_D"]
-        print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
-    else:
-        print(f"  [3/5] Computing HOSVD (L={L}, D={D}) ...", flush=True, end="")
-        U_L, U_D = compute_ul_ud(X_all[train_idx_arr])
-        print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
-        torch.save({"U_L": U_L, "U_D": U_D}, cache_path)
-        print(f"       Saved computed matrices to {cache_path}")
+    # HOSVD
+    print(f"  [3/5] Computing HOSVD (L={L}, D={D}) ...", flush=True, end="")
+    U_L, U_D = compute_ul_ud(X_all[train_idx_arr])
+    print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
 
     print(f"  [4/5] Projecting ...", flush=True, end="")
     X_train_feat = project(X_all[train_idx_arr], U_L, U_D)
