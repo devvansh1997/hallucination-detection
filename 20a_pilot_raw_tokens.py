@@ -109,7 +109,9 @@ for idx in tqdm(range(N_PILOT), desc="  Generating"):
         # Judge
         r = rouge.compute(predictions=[gen_text], references=correct)
         rl = r["rougeL"]
-        bs = bleurt.compute(predictions=[gen_text], references=correct + wrong)
+        all_refs = correct + wrong
+        candidates = [gen_text] * len(all_refs)
+        bs = bleurt.compute(predictions=candidates, references=all_refs)
         max_correct_b = max(bs["scores"][:len(correct)], default=0)
         is_correct = (rl >= 0.7) or (max_correct_b > 0.5)
         if is_correct:
