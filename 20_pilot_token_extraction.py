@@ -123,8 +123,15 @@ all_A, all_B, all_C, all_y, all_pi = [], [], [], [], []
 
 for pi, beam_tensors in enumerate(all_tensors):
     for bi, H in enumerate(beam_tensors):
-        H = H[:, 15:24, :].float()             # (9, T, D) -- mid layers
-        L9, T, D = H.shape
+        H = H[:, 15:24, :].float()             # (9, T, D) — mid layers
+        _, T, D = H.shape
+        if T == 0:
+            zeros = torch.zeros(9, D)
+            all_A.append(zeros)
+            all_B.append(zeros)
+            all_C.append(zeros)
+            all_y.append(flags[len(all_y)])
+            continue
         # Candidate A: last prompt token = first column of generated hidden states? 
         # Actually prompt tokens aren't in our extracted data (we only kept generated tokens)
         # Using first generated token as proxy for prompt boundary
