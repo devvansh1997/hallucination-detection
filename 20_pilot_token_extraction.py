@@ -1,5 +1,5 @@
 """
-20_pilot_token_extraction.py — Token-Level Extraction Pilot
+20_pilot_token_extraction.py -- Token-Level Extraction Pilot
 =============================================================
 Evaluates 3 token-extraction strategies on raw (L, T, D) tensors:
   A: Prompt Bottleneck (last prompt token)
@@ -108,7 +108,7 @@ def evaluate_candidate(X, y, prompt_idx, is_known, name):
     return res
 
 
-# ── MAIN ──
+# -- MAIN --
 path = os.path.join("../data_unpooled", args.model_folder, "truthfulqa_pilot_raw_tokens.pt")
 print(f"Loading: {path}")
 data = torch.load(path, weights_only=False)
@@ -123,14 +123,14 @@ all_A, all_B, all_C, all_y, all_pi = [], [], [], [], []
 
 for pi, beam_tensors in enumerate(all_tensors):
     for bi, H in enumerate(beam_tensors):
-        H = H[:, 15:24, :].float()             # (9, T, D) — mid layers
+        H = H[:, 15:24, :].float()             # (9, T, D) -- mid layers
         L9, T, D = H.shape
         # Candidate A: last prompt token = first column of generated hidden states? 
         # Actually prompt tokens aren't in our extracted data (we only kept generated tokens)
         # Using first generated token as proxy for prompt boundary
-        A = H[:, 0, :]                           # (9, D) — first generated token
-        B = H[:, 0, :]                           # (9, D) — same as A for first token
-        C = H.max(dim=1).values                  # (9, D) — max across tokens
+        A = H[:, 0, :]                           # (9, D) -- first generated token
+        B = H[:, 0, :]                           # (9, D) -- same as A for first token
+        C = H.max(dim=1).values                  # (9, D) -- max across tokens
 
         all_A.append(A)
         all_B.append(B)

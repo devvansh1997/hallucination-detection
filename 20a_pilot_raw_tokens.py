@@ -1,5 +1,5 @@
 """
-20a_pilot_raw_tokens.py — 100-Sample Raw Token Extraction
+20a_pilot_raw_tokens.py -- 100-Sample Raw Token Extraction
 ===========================================================
 Generates 100 prompts from TruthfulQA, saves RAW (L, T, D) per-beam
 tensors (no mean-pooling).  Used by 20_pilot_token_extraction.py.
@@ -36,7 +36,7 @@ if not torch.cuda.is_available():
     raise RuntimeError("CUDA required")
 device = torch.device("cuda")
 
-# ── Load dataset ──
+# -- Load dataset --
 from datasets import load_dataset
 ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
 prompts = ds["question"][:N_PILOT]
@@ -47,7 +47,7 @@ import evaluate
 rouge = evaluate.load("rouge")
 bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
 
-# ── Load model ──
+# -- Load model --
 print(f"Loading: {MODEL_ID}")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, dtype=torch.bfloat16, device_map=device, trust_remote_code=True)
@@ -60,14 +60,14 @@ L = model.config.num_hidden_layers
 D = model.config.hidden_size
 print(f"  Layers: {L}  Hidden: {D}")
 
-# ── EOS tokens ──
+# -- EOS tokens --
 eos_strs = [".", "!", "?", ".\n", "!\n", "?\n", "\n", "\n\n"]
 eos_ids = {tokenizer.eos_token_id}
 for s in eos_strs:
     eos_ids.update(tokenizer.encode(s, add_special_tokens=False))
     eos_ids.update(tokenizer.encode("Yes" + s, add_special_tokens=False)[1:])
 
-# ── Generate ──
+# -- Generate --
 all_tensors = []          # list of lists: per prompt → per beam → (L, T, D)
 all_flags = []            # per beam
 all_is_known = []         # per prompt
@@ -139,7 +139,7 @@ for idx in tqdm(range(N_PILOT), desc="  Generating"):
     del outputs, hidden_states
     torch.cuda.empty_cache()
 
-# ── Save ──
+# -- Save --
 out_dir = os.path.join("../data_unpooled", args.model_folder)
 os.makedirs(out_dir, exist_ok=True)
 out_path = os.path.join(out_dir, "truthfulqa_pilot_raw_tokens.pt")
