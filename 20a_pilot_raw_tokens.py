@@ -28,7 +28,7 @@ for m in cfg["models"]:
     if m["folder"] == args.model_folder:
         model_id = m["id"]; break
 if model_id is None:
-    raise ValueError(f"Unknown model folder: {args.model_folder}")
+    raise ValueError("Unknown model folder: " + args.model_folder)
 MODEL_ID = model_id
 N_PILOT = 100
 
