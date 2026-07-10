@@ -133,8 +133,9 @@ for idx, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         gids = gids[gids != tokenizer.eos_token_id]
         gen_text = tokenizer.decode(gids, skip_special_tokens=True).strip()
 
-        # Judge
-        r = rouge.compute(predictions=[gen_text], references=correct)
+        # Judge (batch against all references)
+        r_candidates = [gen_text] * len(correct)
+        r = rouge.compute(predictions=r_candidates, references=correct) if correct else {"rougeL": 0.0}
         rl = r["rougeL"]
         all_refs = correct + wrong
         candidates = [gen_text] * len(all_refs)
