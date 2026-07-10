@@ -16,10 +16,6 @@ import os
 import numpy as np
 import yaml
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 
 import torch
@@ -196,50 +192,17 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     del X_all
     import gc; gc.collect()
 
-    # Scale full training set, no subsampling
-    scaler = StandardScaler()
-    X_train_feat = scaler.fit_transform(X_train_feat)
-    X_valid_feat = scaler.transform(X_valid_feat)
-    print(f"  Features scaled (StandardScaler on {X_train_feat.shape[0]} samples)")
-
-    results = {}
-
-    # Random Forest (full train)
-    print(f"  [5/5] Training RandomForest ...", flush=True, end="")
+    # Random Forest (no scaling)
+    print(f"  [5/5] Training RandomForest (200 trees) ...", flush=True, end="")
     rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
                                 random_state=RANDOM_SEED, n_jobs=-1)
     rf.fit(X_train_feat, y_train)
     rf_probs = rf.predict_proba(X_valid_feat)[:, 1]
-    results["RandomForest"] = roc_auc_score(y_valid, rf_probs)
+    auroc = roc_auc_score(y_valid, rf_probs)
     print(f" done.")
 
-    # Logistic Regression (full train)
-    print(f"       Training LogisticRegression ...", flush=True, end="")
-    lr = LogisticRegression(max_iter=1000, class_weight="balanced",
-                            random_state=RANDOM_SEED)
-    lr.fit(X_train_feat, y_train)
-    lr_probs = lr.predict_proba(X_valid_feat)[:, 1]
-    results["LogisticRegression"] = roc_auc_score(y_valid, lr_probs)
-    print(f" done.")
-
-    # MLP with early stopping (full train)
-    print(f"       Training MLP (128, early stopping) ...", flush=True, end="")
-    mlp = MLPClassifier(hidden_layer_sizes=(128,), activation="relu",
-                        solver="adam", early_stopping=True,
-                        n_iter_no_change=10, max_iter=1000,
-                        random_state=RANDOM_SEED)
-    mlp.fit(X_train_feat, y_train)
-    mlp_probs = mlp.predict_proba(X_valid_feat)[:, 1]
-    results["MLP"] = roc_auc_score(y_valid, mlp_probs)
-    print(f" done.")
-
-    rf_auroc  = results["RandomForest"]
-    lr_auroc  = results["LogisticRegression"]
-    mlp_auroc = results["MLP"]
-    print(f"\n  >> RandomForest         AUROC = {rf_auroc:.4f}")
-    print(f"  >> LogisticRegression    AUROC = {lr_auroc:.4f}")
-    print(f"  >> MLP (128)             AUROC = {mlp_auroc:.4f}")
-    return results
+    print(f"\n  >> AUROC = {auroc:.4f}")
+    return auroc
     return results
 
 
@@ -268,8 +231,5 @@ if __name__ == "__main__":
     print(f"\n{'=' * 60}")
     print(f"  SUMMARY")
     print(f"{'=' * 60}")
-    for (model, ds), res in sorted(results.items()):
-        rf  = res.get("RandomForest", 0)
-        lr  = res.get("LogisticRegression", 0)
-        mlp = res.get("MLP", 0)
-        print(f"  {model:30s}  {ds:15s}  RF={rf:.4f}  LR={lr:.4f}  MLP={mlp:.4f}")
+    for (model, ds), auroc in sorted(results.items()):
+        print(f"  {model:30s}  {ds:15s}  AUROC = {auroc:.4f}")
