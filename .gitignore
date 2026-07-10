@@ -6,6 +6,7 @@
 *.safetensors
 .claude/
 *.ipynb_checkpoints/
+data_unpooled/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

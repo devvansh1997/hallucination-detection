@@ -109,7 +109,7 @@ def evaluate_candidate(X, y, prompt_idx, is_known, name):
 
 
 # ── MAIN ──
-path = os.path.join(DATA_DIR, args.model_folder, "truthfulqa_pilot_raw_tokens.pt")
+path = os.path.join("../data_unpooled", args.model_folder, "truthfulqa_pilot_raw_tokens.pt")
 print(f"Loading: {path}")
 data = torch.load(path, weights_only=False)
 all_tensors = data["all_tensors"]              # list of lists: per prompt → per beam → (L,T,D)

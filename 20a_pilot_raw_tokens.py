@@ -140,7 +140,7 @@ for idx in tqdm(range(N_PILOT), desc="  Generating"):
     torch.cuda.empty_cache()
 
 # ── Save ──
-out_dir = os.path.join(cfg["output"]["data_dir"], args.model_folder)
+out_dir = os.path.join("../data_unpooled", args.model_folder)
 os.makedirs(out_dir, exist_ok=True)
 out_path = os.path.join(out_dir, "truthfulqa_pilot_raw_tokens.pt")
 torch.save({
