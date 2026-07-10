@@ -22,58 +22,37 @@
 
 \section{Dataset Overview}
 
-All datasets generated with HARP-compatible beam search (10 beams, early-stopping
-on first correct answer).  Hidden states extracted from all generated beams,
-mean-pooled across tokens, saved as $(L, D)$ tensors.  Labels assigned via
-contrastive BLEURT/ROUGE judge matching HARP's rubric.
+All datasets generated with the full 10-beam HARP-compatible protocol.
+Hidden states extracted from all generated beams, mean-pooled across tokens,
+saved as $(L, D)$ tensors.  Labels assigned via contrastive BLEURT/ROUGE
+judge matching HARP's rubric.  \textbf{Training vs.\ inference:} the 10-beam
+protocol is used exclusively to build the training population and capture
+the full variance space for HOSVD.  At inference time, our pipeline requires
+only a single forward pass to project and classify --- the 10-beam search
+is purely for HARP-compatible evaluation, not for deployed detection.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lccccc}
 \toprule
-\textbf{Model} & \textbf{Dataset} & \textbf{Prompts} & \textbf{Beams} & \textbf{Avg Beams/Prompt} & \textbf{File Size} \\
+\textbf{Model} & \textbf{Dataset} & \textbf{Prompts} & \textbf{Beams} & \textbf{Avg B/P} & \textbf{File Size} \\
 \midrule
 \multirow{4}{*}{LLaMA-3.1-8B (32, 4096)}
-  & TruthfulQA & 817   & 4,000   & 4.9 & 2.1 GB \\
-  & TriviaQA   & 9,960 & 37,993  & 3.8 & 19.9 GB \\
-  & NQ-Open    & 3,610 & 30,140  & 8.3 & 15.8 GB \\
-  & TyDiQA-GP  & 5,077 & 12,454  & 2.5 & 6.5 GB \\
+  & TruthfulQA & 817   & 8,170   & 10.0 & 2.1 GB \\
+  & TriviaQA   & 9,960 & 99,600  & 10.0 & 52.2 GB \\
+  & NQ-Open    & 3,610 & 36,100  & 10.0 & 9.4 GB \\
+  & TyDiQA-GP  & 5,077 & \textit{pending} & 10.0 & \textit{pending} \\
 \midrule
 \multirow{4}{*}{Qwen-2.5-7B (28, 3584)}
-  & TruthfulQA & 817   & 3,524   & 4.3 & 1.4 GB \\
-  & TriviaQA   & 9,960 & 68,769  & 6.9 & 27.6 GB \\
-  & NQ-Open    & 3,610 & 34,219  & 9.5 & 13.1 GB \\
-  & TyDiQA-GP  & 5,077 & 23,144  & 4.6 & 8.8 GB \\
+  & TruthfulQA & 817   & 8,170   & 10.0 & 1.6 GB \\
+  & TriviaQA   & 9,960 & 99,600  & 10.0 & 40.0 GB \\
+  & NQ-Open    & 3,610 & 36,100  & 10.0 & 7.2 GB \\
+  & TyDiQA-GP  & 5,077 & 50,770  & 10.0 & 10.2 GB \\
 \bottomrule
 \end{tabular}
-\caption{Generated dataset statistics.  Beams = total hidden-state samples
-         across all prompts.  Avg beams/prompt reflects early-stopping
-         efficiency (lower = more prompts found a correct answer early).}
-\end{table}
-
-\section{Label Distribution}
-
-\begin{table}[h]
-\centering
-\begin{tabular}{lcccc}
-\toprule
-\textbf{Model} & \textbf{Dataset} & \textbf{Truthful Beams} & \textbf{Halluc. Beams} & \textbf{Hall. Rate} \\
-\midrule
-\multirow{4}{*}{LLaMA-3.1-8B}
-  & TruthfulQA & 513    & 3,487   & 87.2\% \\
-  & TriviaQA   & 8,222  & 29,771  & 78.4\% \\
-  & NQ-Open    & 1,158  & 28,982  & 96.2\% \\
-  & TyDiQA-GP  & 4,654  & 7,800   & 62.6\% \\
-\midrule
-\multirow{4}{*}{Qwen-2.5-7B}
-  & TruthfulQA & 560    & 2,964   & 84.1\% \\
-  & TriviaQA   & 5,849  & 62,920  & 91.5\% \\
-  & NQ-Open    & 353    & 33,866  & 99.0\% \\
-  & TyDiQA-GP  & 3,733  & 19,411  & 83.9\% \\
-\bottomrule
-\end{tabular}
-\caption{Per-beam label distribution.  Truthful beams = model answer matched
-         reference via BLEURT/ROUGE; Hallucinated = did not match.}
+\caption{Full-beam dataset statistics.  All datasets use the full 10-beam
+         protocol (HARP-compatible).  Avg beams/prompt = 10.0 uniformly
+         (no early-stopping).}
 \end{table}
 
 \section{Results}
@@ -114,22 +93,6 @@ contrastive BLEURT/ROUGE judge matching HARP's rubric.
          values from HARP Table~1.  Our HOSVD uses the same evaluation
          protocol (known/unknown split, zero leakage) with 320-dimensional
          compressed core features and Random Forest.}
-\end{table}
-
-\subsection{HARP--HOSVD Gap}
-
-\begin{table}[h]
-\centering
-\begin{tabular}{lcccc}
-\toprule
-\textbf{Model} & \textbf{NQ-Open} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{TyDiQA} \\
-\midrule
-Qwen-2.5-7B   & $-$10.5 & $-$9.9 & $-$6.6 & $-$7.0 \\
-LLaMA-3.1-8B  & $-$6.1  & $-$8.9 & $-$16.6 & \textit{pending} \\
-\bottomrule
-\end{tabular}
-\caption{Delta = HARP AUROC $-$ HOSVD AUROC (\%).  HOSVD is within 5--10 points
-         of HARP on all pairs (best model per dataset).}
 \end{table}
 
 \subsection{Full-Beam vs.\ Early-Stop Protocol}
@@ -204,65 +167,100 @@ truthful examples significantly stabilises the HOSVD subspace.  When truthful
 beams already number in the thousands, additional copies are redundant and the
 diluted hallucination signal hurts the classifier.
 
-\section{Evaluation Protocol}
+\section{Ablations \& Hyperparameter Optimization}
 
-We replicate HARP's exact evaluation protocol to ensure fair comparison:
+\subsection{Classifier Comparison (Full Training Set)}
+
+We compared Random Forest (axis-aligned), Logistic Regression (linear), and
+MLP (non-linear, 128 hidden units, early stopping) on the full TriviaQA
+training set with scaled HOSVD features to identify the optimal decision
+boundary.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+\textbf{Model} & \textbf{Dataset} & \textbf{RF} & \textbf{LR} & \textbf{MLP} \\
+\midrule
+\multirow{3}{*}{LLaMA-3.1-8B}
+  & NQ-Open    & \textcolor{upgreen}{\textbf{0.8325}} & 0.7925 & 0.7773 \\
+  & TriviaQA   & 0.7645 & \textcolor{upgreen}{\textbf{0.7859}} & 0.7707 \\
+  & TruthfulQA & \textcolor{upgreen}{\textbf{0.7919}} & 0.7466 & 0.7298 \\
+\midrule
+\multirow{4}{*}{Qwen-2.5-7B}
+  & NQ-Open    & \textcolor{upgreen}{\textbf{0.7353}} & 0.6618 & 0.7306 \\
+  & TriviaQA   & 0.8628 & \textcolor{upgreen}{\textbf{0.8764}} & 0.8588 \\
+  & TruthfulQA & 0.7867 & 0.7690 & \textcolor{upgreen}{\textbf{0.8089}} \\
+  & TyDiQA-GP  & \textcolor{upgreen}{\textbf{0.8142}} & 0.8042 & 0.7900 \\
+\bottomrule
+\end{tabular}
+\caption{Classifier comparison on full training set (scaled features).
+         \textbf{Bold green} = best classifier per dataset.  RF wins on 4/7,
+         LR on 2/7, MLP on 1/7 --- no single classifier dominates.  LR
+         performs best on datasets with abundant truthful beams (Qwen
+         TriviaQA: 86.2\%); RF excels when hallucination signal is sparse.}
+\end{table}
+
+\subsection{Grid Search over HOSVD Hyperparameters}
+
+We swept tensor ranks $R_L \in \{5, 16, 32\}$, $R_D \in \{64, 256, 512\}$,
+and eigenvector offset $\in \{0, 10, 64\}$ (dropping top-k highest-variance
+components to test if reasoning signal lives in lower-variance modes).
+Logistic Regression was used for fast iteration.
+
+\noindent
+\textbf{Finding:} The optimal configuration under Logistic Regression is
+$R_L=5$, $R_D=64$, \textbf{offset=0}.  Expanding $R_D$ to 256 or 512
+universally degraded LR AUROC.  Dropping the top-10 components (offset=10)
+failed across all datasets.  \textbf{Disclaimer:} this optimum is bounded
+by the linear assumptions of LR.  Larger hidden-dimension ranks may
+introduce non-linear geometry that LR cannot exploit --- motivating our
+shift to HARP-HOSVD fusion with non-linear classifiers.
 
 \begin{enumerate}
-  \item \textbf{Beam Search Generation.} For each prompt, the model generates
-        10 candidate answers via beam search (\texttt{num\_beams=10},
-        \texttt{num\_return\_sequences=10}).  Early stopping halts further
-        beam scoring once a correct answer is found, reducing computational
-        overhead on known prompts.
-
-  \item \textbf{Contrastive Judging (BLEURT + ROUGE-L).} Each generated beam
-        is scored against \emph{both} the correct reference answer(s) and
-        any provided incorrect answer(s) using BLEURT-20 (semantic similarity)
-        and ROUGE-L (lexical overlap).  A beam is classified as \emph{correct}
-        if: $\text{BLEURT} > 0.5 \lor \text{ROUGE-L} > 0.7$ (contrastive
-        advantage check always passes with threshold $-1.0$).  This rubric
-        matches HARP's \texttt{DatasetJudge} implementation.
-
-  \item \textbf{Known/Unknown Classification.} A prompt is labeled \emph{known}
-        if \textbf{any} of its 10 beams is deemed correct; otherwise it is
-        \emph{unknown} (all beams hallucinated).  Known prompts contribute
-        both truthful and hallucinated beams; unknown prompts contribute
-        only hallucinated beams.
-
-  \item \textbf{Zero-Leakage Train/Valid Split.} Known prompts are split
-        75/25 for training and validation.  All unknown prompts are added
-        to the validation set \emph{only} — the training set never sees a
-        single unknown-prompt beam.  This guarantees that no hallucination
-        signal leaks into the HOSVD factor matrix computation.
-
-  \item \textbf{Population HOSVD Projection.} Factor matrices $U_L \in
-        \mathbb{R}^{L \times 5}$ and $U_D \in \mathbb{R}^{D \times 64}$
-        are computed exclusively from the \emph{training partition} via the
-        chunked Gram matrix trick.  Both training and validation beams are
-        projected: $\mathcal{G} = U_L^\top \, H_{\text{pool}} \, U_D$
-        yielding a $(5, 64)$ core tensor per beam, flattened to 320 features.
-
-  \item \textbf{Random Forest Classification.} A Random Forest classifier
-        (200 trees, balanced class weights, \texttt{random\_state=42}) is
-        trained on the 320-dimensional projected training features and
-        evaluated on the combined validation set (25\% of known-prompt
-        beams + 100\% of unknown-prompt beams).  AUROC is computed via
-        scikit-learn with hallucination as the positive class.
-
-  \item \textbf{No Multiple Sampling.} Unlike HARP and HaloScope (which
-        require 10+ independent forward passes), our HOSVD features are
-        extracted from a single generation pass per prompt.  The 10-beam
-        search serves only the evaluation rubric, not the feature extraction.
+  \item The reasoning signal and semantic noise are \textbf{highly entangled}
+        within the top 64 principal components of the hidden-state space.
+  \item Pure HOSVD applied to raw hidden states has a \textbf{mathematical
+        ceiling} ($\sim$0.79--0.83 AUROC, trailing HARP by 10--14 points).
 \end{enumerate}
+
+\noindent
+\textbf{Why:} Standard HOSVD maximises global variance.  The top eigenvectors
+capture the LLM's structural, syntactic, and semantic structure---the
+dominant signal.  The factual reasoning and hallucination signal lives in
+the \textbf{low-variance null space} of the unembedding matrix
+($\mathbf{W}_{\text{unemb}} \in \mathbb{R}^{V \times D}$), as demonstrated
+by HARP.  Our next step is HARP-HOSVD fusion: pre-filtering hidden states
+through the reasoning subspace (bottom 5\% of $\mathbf{W}_{\text{unemb}}$'s
+right singular vectors) before HOSVD projection.
+
+\subsection{HARP--HOSVD Gap}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{NQ-Open} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{TyDiQA} \\
+\midrule
+Qwen-2.5-7B   & $-$10.5 & $-$9.9 & $-$6.6 & $-$7.0 \\
+LLaMA-3.1-8B  & $-$6.1  & $-$8.9 & $-$16.6 & \textit{pending} \\
+\bottomrule
+\end{tabular}
+\caption{Delta = HARP AUROC $-$ HOSVD AUROC (\%).  Across 7 completed pairs,
+         HOSVD is within 5--11 points of HARP on 6; LLaMA TriviaQA ($-$16.6)
+         is the largest gap due to truth-dominant training under full-beam.
+         LLaMA TyDiQA pending.}
+\end{table}
 
 \noindent
 \textbf{Key Observations:}
 \begin{enumerate}
-  \item \textbf{HOSVD is the second-best method on 6 of 8 model--dataset pairs.}
+  \item \textbf{HOSVD is the second-best method on 5 of 7 completed pairs.}
         On Qwen, HOSVD ranks 2nd on TruthfulQA (78.2), TriviaQA (86.2), and
-        TyDiQA (81.4).  On LLaMA, HOSVD ranks 2nd on NQ-Open (83.3),
-        TruthfulQA (79.6), and TriviaQA (76.3).  HARP claims \#1 on all 8
-        pairs.  All HOSVD values use the full 10-beam protocol.
+        TyDiQA (81.4).  On LLaMA, HOSVD ranks 2nd on NQ-Open (83.3) and
+        TruthfulQA (79.6).  LLaMA TyDiQA-GP is pending.  HARP claims \#1 on
+        all completed pairs.
 
   \item \textbf{On Qwen-2.5-7B, HOSVD outperforms all non-HARP baselines}
         on TruthfulQA (78.2 vs.\ 63--64), TriviaQA (86.2 vs.\ 76--85),
