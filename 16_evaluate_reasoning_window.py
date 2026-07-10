@@ -106,6 +106,8 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
     print(f"  [1/5] Loading ...", flush=True, end="")
     data = torch.load(path, weights_only=False)
     X_all = torch.stack(data["all_emb"])
+    y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
+    is_known = np.array(data["all_is_known"])
 
     # Reasoning window: layers 15-23 (inclusive)
     orig_L = X_all.shape[1]
