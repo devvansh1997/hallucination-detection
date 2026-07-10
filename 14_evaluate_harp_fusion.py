@@ -121,31 +121,23 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
                                    list(range(n_prompts)))))
     print(f" done.  {N_beams} beams, {L}x{D_orig}")
 
-    # HARP filter: extract or load reasoning subspace
-    filter_path = os.path.join(DATA_DIR, model_folder,
-                               f"{model_folder}_harp_filter.pt")
-    if os.path.exists(filter_path):
-        print(f"  HARP filter: loading cached ...", flush=True, end="")
-        P_reasoning = torch.load(filter_path, weights_only=True)
-        print(f" done.  {tuple(P_reasoning.shape)}")
-    else:
-        print(f"  HARP filter: extracting from lm_head ...", flush=True, end="")
-        model_id = None
-        for m in cfg["models"]:
-            if m["folder"] == model_folder:
-                model_id = m["id"]; break
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_id, device_map="cpu", torch_dtype=torch.float32,
-            trust_remote_code=True)
-        W_unemb = hf_model.lm_head.weight.data.float()
-        _, _, Vh = torch.linalg.svd(W_unemb, full_matrices=False)
-        k = int(W_unemb.shape[1] * 0.95)
-        V_reasoning = Vh[k:, :]              # bottom 5%
-        P_reasoning = V_reasoning.T           # (D, r_dim)
-        torch.save(P_reasoning, filter_path)
-        del hf_model, W_unemb, Vh
-        torch.cuda.empty_cache()
-        print(f" done.  {tuple(P_reasoning.shape)}  saved to {filter_path}")
+    # HARP filter: extract reasoning subspace from lm_head
+    print(f"  HARP filter: extracting from lm_head ...", flush=True, end="")
+    model_id = None
+    for m in cfg["models"]:
+        if m["folder"] == model_folder:
+            model_id = m["id"]; break
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_id, device_map="cpu", torch_dtype=torch.float32,
+        trust_remote_code=True)
+    W_unemb = hf_model.lm_head.weight.data.float()
+    _, _, Vh = torch.linalg.svd(W_unemb, full_matrices=False)
+    k = int(W_unemb.shape[1] * 0.95)
+    V_reasoning = Vh[k:, :]
+    P_reasoning = V_reasoning.T
+    del hf_model, W_unemb, Vh
+    torch.cuda.empty_cache()
+    print(f" done.  {tuple(P_reasoning.shape)}")
 
     # Apply HARP filter: project hidden states onto reasoning subspace
     X_all = X_all.float() @ P_reasoning       # (N, L, reasoning_dim)
@@ -189,21 +181,11 @@ def evaluate_one(model_folder: str, dataset: str, idx: int = 1, total: int = 1):
         print("  [WARN] Too few samples -- skipping")
         return None
 
-    # HOSVD on HARP-filtered tensors (cached)
-    cache_path = os.path.join(DATA_DIR, model_folder,
-                              f"{dataset}_ulud_harpfusion{args.suffix}.pt")
-    if os.path.exists(cache_path):
-        print(f"  [3/5] Loading cached HOSVD matrices ...", flush=True, end="")
-        cached = torch.load(cache_path, weights_only=True)
-        U_L, U_D = cached["U_L"], cached["U_D"]
-        print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
-    else:
-        print(f"  [3/5] Computing HOSVD (L={L}, D={D}) on filtered tensors ...",
-              flush=True, end="")
-        U_L, U_D = compute_ul_ud(X_all[train_idx_arr])
-        print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
-        torch.save({"U_L": U_L, "U_D": U_D}, cache_path)
-        print(f"       Saved to {cache_path}")
+    # HOSVD on HARP-filtered tensors (no caching)
+    print(f"  [3/5] Computing HOSVD (L={L}, D={D}) on filtered tensors ...",
+          flush=True, end="")
+    U_L, U_D = compute_ul_ud(X_all[train_idx_arr])
+    print(f" done.  U_L: {tuple(U_L.shape)}  U_D: {tuple(U_D.shape)}")
 
     print(f"  [4/5] Projecting ...", flush=True, end="")
     X_train_feat = project(X_all[train_idx_arr], U_L, U_D)
