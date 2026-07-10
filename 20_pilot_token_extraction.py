@@ -123,6 +123,13 @@ all_A, all_B, all_C, all_y, all_pi = [], [], [], [], []
 
 for pi, beam_tensors in enumerate(all_tensors):
     for bi, H in enumerate(beam_tensors):
+        if H.ndim != 3 or H.shape[0] < 24:
+            print(f"  WARN: prompt {pi} beam {bi} has shape {H.shape}, skipping")
+            all_A.append(torch.zeros(9, 4096))
+            all_B.append(torch.zeros(9, 4096))
+            all_C.append(torch.zeros(9, 4096))
+            all_y.append(flags[len(all_y)])
+            continue
         H = H[:, 15:24, :].float()             # (9, T, D) — mid layers
         _, T, D = H.shape
         if T == 0:
