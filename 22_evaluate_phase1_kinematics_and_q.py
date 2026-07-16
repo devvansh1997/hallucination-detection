@@ -5,7 +5,7 @@ HOSVD + Q-Statistic + Depth Kinematics + Gram-Schmidt Residualization.
 Dummy data unit tests run first to verify pipeline integrity.
 """
 
-import argparse, gc, os
+import argparse, gc, os, time
 import numpy as np
 import yaml
 from sklearn.ensemble import RandomForestClassifier
@@ -136,6 +136,8 @@ if __name__ == "__main__":
             print(f"{'=' * 60}")
 
             # ── STEP 1: Load & Split ──
+            t0 = time.time()
+            print(f"  [1/6] Loading & splitting ...", flush=True, end="")
             data = torch.load(path, weights_only=False)
             X = torch.stack(data["all_emb"]).float()         # (N, 9, D)
             y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
@@ -163,7 +165,11 @@ if __name__ == "__main__":
             mad = (X_t - med).abs().median(dim=0).values + 1e-6
             X = (X - med) / mad
 
+            print(f" done.  ({time.time()-t0:.1f}s)")
+
             # ── STEP 2: HOSVD + Q-Statistic ──
+            t0 = time.time()
+            print(f"  [2/6] HOSVD + Q-statistic ...", flush=True, end="")
             U_L, U_D = compute_ul_ud(X[t_idx])
             P_L = U_L @ U_L.T  # (L, L)
             P_D = U_D @ U_D.T  # (D, D)
@@ -175,21 +181,30 @@ if __name__ == "__main__":
             q_total = E.pow(2).sum(dim=(1, 2)).unsqueeze(1)       # (N, 1)
             q_layer = (X - X @ P_D).pow(2).sum(dim=2)             # (N, L)
             F_q = torch.cat([q_total, q_layer], dim=1).numpy()    # (N, 10)
+            print(f" done.  ({time.time()-t0:.1f}s)")
 
             # ── STEP 3: Depth Kinematics ──
+            t0 = time.time()
+            print(f"  [3/6] Depth kinematics ...", flush=True, end="")
             x_n = F.normalize(X, dim=2)                            # (N, L, D)
             d_l = (x_n[:, 1:] - x_n[:, :-1]).norm(dim=2)          # (N, L-1)
             dot = (x_n[:, :-1] * x_n[:, 1:]).sum(dim=2)
             theta_l = torch.acos(torch.clamp(dot, -1.0, 1.0))     # (N, L-1)
             F_kin = torch.cat([d_l, theta_l], dim=1).numpy()      # (N, 16)
+            print(f" done.  ({time.time()-t0:.1f}s)")
 
             # ── STEP 4: Gram-Schmidt ──
+            t0 = time.time()
+            print(f"  [4/6] Gram-Schmidt residualization ...", flush=True, end="")
             F_new = np.concatenate([F_q, F_kin], axis=1)          # (N, 26)
             ridge = Ridge(alpha=1.0)
             ridge.fit(F_core[t_idx], F_new[t_idx])
             F_perp = F_new - ridge.predict(F_core)                 # (N, 26)
+            print(f" done.  ({time.time()-t0:.1f}s)")
 
             # ── STEP 5: Multi-Variant Ablation ──
+            t0 = time.time()
+            print(f"  [5/6] Training classifiers (4 variants x 3) ...", flush=True, end="")
             variants = {
                 "V1: Core (320)":              (F_core, 320),
                 "V2: Core + Raw Geo (346)":    (np.concatenate([F_core, F_new], axis=1), 346),
