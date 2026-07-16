@@ -151,20 +151,23 @@ _, U_D = torch.linalg.eigh(A_d)
 U_D = torch.flip(U_D[:, -R_D:], dims=[1])
 del X_d, A_d
 
-# Project: G = X ×1 U_L^T ×2 U_H^T ×3 U_D^T
-G = X_head.float()
-G = torch.tensordot(G, U_L, dims=([1], [0]))   # (N, R_L, H, HD)
-G = G.permute(0, 2, 1, 3)                       # (N, H, R_L, HD)
-G = torch.tensordot(G, U_H, dims=([1], [0]))   # (N, R_L, R_H, HD)
-G = G.permute(0, 2, 1, 3)                       # (N, R_H, R_L, HD)
-G = torch.tensordot(G, U_D, dims=([2], [0]))   # (N, R_H, R_L, R_D)
-G = G.permute(0, 2, 1, 3)                       # (N, R_L, R_H, R_D)
+# Project: G = X x1 U_L^T x2 U_H^T x3 U_D^T
+# X: (N, 9, 32, 128)  U_L: (9,5)  U_H: (32,8)  U_D: (128,16)
+
+# Mode 1 (layer) — contract dim 1
+G = torch.tensordot(X_head.float(), U_L, dims=([1], [0]))  # (N, 32, 128, 5)
+# Mode 2 (head) — permute to put head at last dim, then contract
+G = G.permute(0, 1, 3, 2)                                   # (N, 32, 5, 128)
+G = torch.tensordot(G, U_H, dims=([1], [0]))                # (N, 5, 128, 8)
+# Mode 3 (head_dim) — permute to put head_dim at last dim
+G = G.permute(0, 1, 3, 2)                                   # (N, 5, 8, 128)
+G = torch.tensordot(G, U_D, dims=([3], [0]))                # (N, 5, 8, 16)
 
 F_tucker = G.reshape(N, -1)                     # (5, 640)
 
 # ── Assertions ──
-assert F_tucker.shape == (N, R_L * R_H * R_D), \
-    f"Tucker core shape: {F_tucker.shape}, expected ({N}, {R_L*R_H*R_D})"
+assert G.shape == (N, R_L, R_H, R_D), \
+    f"Tucker core shape: {G.shape}, expected ({N}, {R_L}, {R_H}, {R_D})"
 assert not torch.isnan(F_tucker).any(), "NaN in Tucker core"
 assert not torch.isinf(F_tucker).any(), "Inf in Tucker core"
 print(f"  [PASS] Tucker core: {tuple(F_tucker.shape)}  (no NaN/Inf)")
