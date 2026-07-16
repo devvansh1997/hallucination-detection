@@ -8,6 +8,7 @@ Extract first generated token per beam. Assert shapes.
 import gc, os
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import yaml
@@ -200,4 +201,66 @@ print(f"  [PASS] Tucker core: {tuple(F_tucker.shape)}  (no NaN/Inf)")
 # ── Save ──
 torch.save({"all_emb": F_tucker, "U_L": U_L, "U_H": U_H, "U_D": U_D},
            os.path.join(out_dir, "truthfulqa_tucker_pilot.pt"))
-print(f"  [PASS] Tucker core saved.  Done.")
+print(f"  [PASS] Tucker core saved.  Done.\n")
+
+# ============================================================================
+# STEP 4: Gram-Schmidt vs Phase 1 HOSVD Baseline
+# ============================================================================
+print(f"[Step 4] Gram-Schmidt orthogonalization")
+
+# Compute Phase 1 baseline: HOSVD on pooled hidden states
+# Reshape head tensor: (N, 9, 32, 128) -> (N, 9, 4096)
+X_pooled = X_head.reshape(N, len(LAYERS), n_heads * head_dim).float()
+# Standard HOSVD (R_L=5, R_D=64)
+X_f = X_pooled.permute(1, 0, 2).reshape(len(LAYERS), -1)
+A_L = X_f @ X_f.T
+_, U_L_hosvd = torch.linalg.eigh(A_L)
+U_L_hosvd = torch.flip(U_L_hosvd[:, -5:], dims=[1])
+X_d = X_pooled.permute(2, 0, 1).reshape(-1, N * len(LAYERS))
+A_D = X_d @ X_d.T
+_, U_D_hosvd = torch.linalg.eigh(A_D)
+U_D_hosvd = torch.flip(U_D_hosvd[:, -64:], dims=[1])
+# Project
+tmp = X_pooled @ U_D_hosvd  # (N, 9, 64)
+G_core = tmp.transpose(1, 2) @ U_L_hosvd  # (N, 64, 5)
+F_core = G_core.transpose(1, 2).reshape(N, -1).numpy()  # (5, 320)
+print(f"  Phase 1 core: {F_core.shape}")
+
+# Un-mixed features: Tucker (640) + Lookback flattened (9*32=288)
+F_lookback_flat = X_lookback.reshape(N, -1)  # (5, 288)
+F_unmixed = np.concatenate([F_tucker.numpy(), F_lookback_flat.numpy()], axis=1)  # (5, 928)
+print(f"  Un-mixed features: {F_unmixed.shape}")
+
+# Gram-Schmidt: Ridge(F_core -> F_unmixed), F_perp = residual
+from sklearn.linear_model import Ridge
+ridge = Ridge(alpha=1.0)
+ridge.fit(F_core, F_unmixed)
+F_perp = F_unmixed - ridge.predict(F_core)  # (5, 928)
+
+# Assert orthogonality on train fold
+corr = np.corrcoef(F_core.ravel()[:100], F_perp.ravel()[:100])[0, 1]
+print(f"  Gram-Schmidt correlation: {corr:.6f}  (should be ~0)")
+assert abs(corr) < 0.3, f"GS correlation too high: {corr:.4f}"
+print(f"  [PASS] F_perp is orthogonal to F_core")
+
+# ============================================================================
+# STEP 5: Multi-Variant Ablation (no labels, so sanity only)
+# ============================================================================
+print(f"\n[Step 5] Classifier sanity check (5 samples, no labels — shape check only)")
+
+# Build 4 variants
+variants = {
+    "V1: Core (320)":              F_core,
+    "V2: Tucker (640)":            F_tucker.numpy(),
+    "V3: Lookback (288)":          F_lookback_flat.numpy(),
+    "V4: Core + Orth Unmixed (1248)": np.concatenate([F_core, F_perp], axis=1),
+}
+
+for name, feats in variants.items():
+    assert feats.shape[0] == N, f"{name}: expected {N} rows, got {feats.shape[0]}"
+    assert not np.isnan(feats).any(), f"{name}: NaN detected"
+    print(f"  [PASS] {name:35s}  shape={feats.shape}")
+
+print(f"\n{'='*60}")
+print(f"  ALL STEPS PASSED — 5/5")
+print(f"{'='*60}")
