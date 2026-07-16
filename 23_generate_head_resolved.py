@@ -166,13 +166,8 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         if not h_stored:
             head_by_layer[l] = None
         else:
-            gen_h = h_stored[1:]  # generation steps only
-            if gen_h:
-                # Stack generation steps: (T_gen, num_beams, 1, 4096)
-                h_cat = torch.cat(gen_h, dim=0)
-                head_by_layer[l] = h_cat
-            else:
-                head_by_layer[l] = None
+            gen_h = h_stored[1:]  # list of (num_beams, 1, 4096) — keep as list
+            head_by_layer[l] = gen_h if gen_h else None
 
         # Lookback
         a_stored = attn_storage[l]
@@ -200,17 +195,19 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         # -- Head tensor: signed absolute extremum per layer, per beam --
         layer_tensors = []
         for l in range(W_START, W_END):
-            h_cat = head_by_layer[l]
-            if h_cat is None:
+            gen_h = head_by_layer[l]  # list of (num_beams, 1, 4096)
+            if gen_h is None:
                 layer_tensors.append(torch.zeros(n_heads, head_dim))
                 continue
-            # h_cat: (T_gen, num_beams, 1, 4096)
-            # Extract beam b: (T_gen, 1, 4096) -> (T_gen, n_heads, head_dim)
-            hb = h_cat[:, b, 0, :].reshape(-1, n_heads, head_dim)  # (T_gen, n_heads, head_dim)
-            # Signed absolute extremum: pick token with max L2 norm across heads
-            norms = hb.norm(dim=(1, 2))                     # (T_gen,)
+            # Collect beam b across all gen steps
+            beam_tokens = []
+            for s in gen_h:  # (num_beams, 1, 4096)
+                beam_tokens.append(s[b, 0, :].reshape(n_heads, head_dim))  # (n_heads, head_dim)
+            hb = torch.stack(beam_tokens, dim=0)  # (T_gen, n_heads, head_dim)
+            # Signed absolute extremum: pick token with max L2 norm
+            norms = hb.norm(dim=(1, 2))
             peak_idx = norms.argmax()
-            layer_tensors.append(hb[peak_idx])              # (n_heads, head_dim)
+            layer_tensors.append(hb[peak_idx])
         head_tensor = torch.stack(layer_tensors, dim=0)     # (L, n_heads, head_dim)
 
         # -- Lookback ratios --
