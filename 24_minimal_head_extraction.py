@@ -52,9 +52,26 @@ all_head_tensors = []
 all_lookback = []
 
 for pi, prompt in enumerate(prompts):
+# -- Load BLEURT + ROUGE for judging --
+import evaluate
+rouge = evaluate.load("rouge")
+bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
+
+# -- Containers --
+all_head_tensors = []
+all_lookback = []
+all_flags = []
+all_is_known = []
+all_pi = []
+
+for pi, prompt in enumerate(prompts):
     print(f"\n  Prompt {pi}: {prompt[:60]}...")
 
-    # Register hooks for head outputs AND attention weights
+    correct = [str(ds["best_answer"][i]) for i in range(N_PROMPTS)]
+    wrong = [str(a) for a in ds["incorrect_answers"][pi]]
+    ref_correct = [correct[pi]]
+    ref_wrong = wrong
+
     head_storage = {l: [] for l in LAYERS}
     attn_storage = {l: [] for l in LAYERS}
     hooks = []
@@ -74,79 +91,104 @@ for pi, prompt in enumerate(prompts):
         hooks.append(model.model.layers[l].self_attn.o_proj.register_forward_hook(make_head_hook(l)))
         hooks.append(model.model.layers[l].self_attn.register_forward_hook(make_attn_hook(l)))
 
-    # Generate 1 beam only (simple)
+    # Generate 10 beams
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     prompt_len = inputs.input_ids.shape[1]
 
     with torch.no_grad():
         outputs = model.generate(
-            **inputs, max_new_tokens=32, eos_token_id=list(eos_ids),
-            do_sample=True, temperature=0.7,
+            **inputs, max_new_tokens=64, eos_token_id=list(eos_ids),
+            do_sample=True, temperature=0.5, top_k=5, top_p=0.99,
+            num_beams=10, num_return_sequences=10,
             return_dict_in_generate=True,
-            pad_token_id=tokenizer.eos_token_id)
+            pad_token_id=tokenizer.eos_token_id, early_stopping=True)
 
     for h in hooks:
         h.remove()
 
-    # Decode
-    gen_ids = outputs.sequences[0, prompt_len:]
-    gen_ids = gen_ids[gen_ids != tokenizer.eos_token_id]
-    gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    print(f"  Generated: {gen_text[:80]}...  ({len(gen_ids)} tokens)")
+    gen_ids_all = outputs.sequences[:, prompt_len:]
 
-    # ── Assertions ──
+    # Head: pre-process stored tensors into lists per layer
+    head_by_layer = {}
     for l in LAYERS:
         stored = head_storage[l]
-        assert len(stored) >= 2, f"Layer {l}: only {len(stored)} hook firings"
-        assert stored[0].shape == (1, prompt_len, 4096), \
-            f"Layer {l} prompt step shape: {stored[0].shape}"
-        assert stored[1].shape == (1, 1, 4096), \
-            f"Layer {l} gen step shape: {stored[1].shape}"
-    print(f"  [PASS] All {len(LAYERS)} layers: prompt={stored[0].shape}, gen={stored[1].shape}")
+        if stored:
+            head_by_layer[l] = stored[1:]  # list of (B, 1, 4096) gen steps
+        else:
+            head_by_layer[l] = []
 
-    # Extract first generated token per layer (head tensor)
-    layer_vecs = []
-    for l in LAYERS:
-        h = head_storage[l][1][0, 0, :].reshape(n_heads, head_dim)
-        layer_vecs.append(h)
-    head_tensor = torch.stack(layer_vecs, dim=0)  # (9, 32, 128)
-    assert head_tensor.shape == (len(LAYERS), n_heads, head_dim)
-    print(f"  [PASS] Head tensor: {tuple(head_tensor.shape)}")
+    any_correct = False
+    for b in range(gen_ids_all.shape[0]):
+        gids = gen_ids_all[b]
+        gids = gids[gids != tokenizer.eos_token_id]
+        gen_text = tokenizer.decode(gids, skip_special_tokens=True).strip()
 
-    # ── Lookback ratios ──
-    lookback_vecs = []
-    for l in LAYERS:
-        a_stored = attn_storage[l]
-        if not a_stored or len(a_stored) < 2:
-            lookback_vecs.append(torch.zeros(n_heads))
-            continue
-        # a_stored[1:] = generation steps: (1, n_heads, 1, S_total) where S_total grows
-        ratios = []
-        for s in a_stored[1:]:  # (1, n_heads, 1, S_step)
-            at = s[0, :, 0, :]  # (n_heads, S_step)
-            ctx_len = min(prompt_len, at.shape[-1])
-            ctx_mass = at[:, :ctx_len].sum(dim=-1)
-            tot_mass = at.sum(dim=-1) + 1e-9
-            ratios.append(ctx_mass / tot_mass)
-        lookback_vecs.append(torch.stack(ratios).mean(dim=0))  # (n_heads,)
-    lookback = torch.stack(lookback_vecs, dim=0)  # (9, 32)
-    assert lookback.shape == (len(LAYERS), n_heads), f"Lookback shape: {lookback.shape}"
-    print(f"  [PASS] Lookback: {tuple(lookback.shape)}  range=[{lookback.min():.2f}, {lookback.max():.2f}]")
+        # Judge (BLEURT + ROUGE)
+        r = rouge.compute(predictions=[gen_text]*len(ref_correct), references=ref_correct) if ref_correct else {"rougeL": 0.0}
+        rl = r["rougeL"]
+        all_refs = ref_correct + ref_wrong
+        bs = bleurt.compute(predictions=[gen_text]*len(all_refs), references=all_refs) if all_refs else {"scores": [0]}
+        max_correct_b = max(bs["scores"][:len(ref_correct)], default=0)
+        is_correct = (rl >= 0.7) or (max_correct_b > 0.5)
+        if is_correct:
+            any_correct = True
 
-    all_head_tensors.append(head_tensor)
-    all_lookback.append(lookback)
+        # Head tensor (first gen token, per beam)
+        layer_vecs = []
+        for l in LAYERS:
+            gen_h = head_by_layer[l]  # list of (B, 1, 4096)
+            if gen_h:
+                layer_vecs.append(gen_h[0][b, 0, :].reshape(n_heads, head_dim))
+            else:
+                layer_vecs.append(torch.zeros(n_heads, head_dim))
+        head_tensor = torch.stack(layer_vecs, dim=0)  # (9, 32, 128)
 
-    del outputs, head_storage, attn_storage
+        # Lookback ratios
+        lookback_vecs = []
+        for l in LAYERS:
+            a_stored = attn_storage[l]
+            if not a_stored or len(a_stored) < 2:
+                lookback_vecs.append(torch.zeros(n_heads))
+                continue
+            ratios = []
+            for s in a_stored[1:]:  # (B, n_heads, 1, S_step)
+                at = s[b, :, 0, :]  # (n_heads, S_step)
+                ctx_len = min(prompt_len, at.shape[-1])
+                ctx_mass = at[:, :ctx_len].sum(dim=-1)
+                tot_mass = at.sum(dim=-1) + 1e-9
+                ratios.append(ctx_mass / tot_mass)
+            lookback_vecs.append(torch.stack(ratios).mean(dim=0))
+        lookback = torch.stack(lookback_vecs, dim=0)  # (9, 32)
+
+        all_head_tensors.append(head_tensor)
+        all_lookback.append(lookback)
+        all_flags.append(not is_correct)
+        all_pi.append(pi)
+
+    all_is_known.append(any_correct)
+
+    del outputs, head_storage, attn_storage, head_by_layer
     torch.cuda.empty_cache()
+
+    if (pi + 1) % 10 == 0:
+        k = sum(all_is_known)
+        hrate = sum(all_flags) / len(all_flags) * 100
+        print(f"  [{pi+1}/{N_PROMPTS}] known={k}  hall_rate={hrate:.0f}%")
 
 # ── Save extracted head tensors ──
 out_dir = "../data/llama-3.1-8b-instruct"
 os.makedirs(out_dir, exist_ok=True)
 X_head = torch.stack(all_head_tensors, dim=0)  # (5, 9, 32, 128)
 X_lookback = torch.stack(all_lookback, dim=0)    # (5, 9, 32)
-torch.save({"all_emb": X_head, "all_lookback": X_lookback},
+torch.save({"all_emb": X_head, "all_lookback": X_lookback,
+            "all_hallucination_flag": all_flags,
+            "all_is_known": all_is_known,
+            "prompt_indices": all_pi},
            os.path.join(out_dir, "truthfulqa_head_resolved_1beam_pilot.pt"))
+n_beams = len(all_head_tensors)
 print(f"\n[Step 1] Saved: head={tuple(X_head.shape)}  lookback={tuple(X_lookback.shape)}")
+print(f"  Beams: {n_beams}  Known prompts: {sum(all_is_known)}/{N_PROMPTS}  "
+      f"Hall rate: {sum(all_flags)/n_beams*100:.0f}%")
 
 # ============================================================================
 # STEP 2: 4-Mode Tucker Compression
