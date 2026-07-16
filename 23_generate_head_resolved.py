@@ -147,7 +147,7 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
             top_k=gen_cfg["top_k"], top_p=gen_cfg["top_p"],
             num_beams=gen_cfg["num_beams"],
             num_return_sequences=gen_cfg["num_return_sequences"],
-            output_attentions=True,
+            return_dict_in_generate=True,
             pad_token_id=tokenizer.eos_token_id, early_stopping=True)
 
     for h in hooks:
