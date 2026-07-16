@@ -114,12 +114,62 @@ for pi, prompt in enumerate(prompts):
     del outputs, head_storage
     torch.cuda.empty_cache()
 
-# ── Save ──
+# ── Save extracted head tensors ──
 out_dir = "../data/llama-3.1-8b-instruct"
 os.makedirs(out_dir, exist_ok=True)
-out = torch.stack(all_head_tensors, dim=0)
-print(f"\nSaved: {out.shape}  ({N_PROMPTS} prompts, {len(LAYERS)} layers, {n_heads} heads, {head_dim} dim)")
+X_head = torch.stack(all_head_tensors, dim=0)  # (5, 9, 32, 128)
+torch.save({"all_emb": X_head},
+           os.path.join(out_dir, "truthfulqa_head_resolved_1beam_pilot.pt"))
+print(f"\n[Step 1] Saved: {tuple(X_head.shape)}")
 
-out_path = os.path.join(out_dir, "truthfulqa_head_resolved_1beam_pilot.pt")
-torch.save({"all_emb": out}, out_path)
-print(f"  {out_path}")
+# ============================================================================
+# STEP 2: 4-Mode Tucker Compression
+# ============================================================================
+print(f"\n[Step 2] 4-Mode Tucker (R_L=5, R_H=8, R_D=16)")
+
+N, L9, H, HD = X_head.shape
+R_L, R_H, R_D = 5, 8, 16
+
+# Mode-1 (layer) unfolding
+X_l = X_head.permute(1, 0, 2, 3).reshape(L9, -1).float()
+A_l = X_l @ X_l.T
+_, U_L = torch.linalg.eigh(A_l)
+U_L = torch.flip(U_L[:, -R_L:], dims=[1])
+del X_l, A_l
+
+# Mode-2 (head) unfolding
+X_h = X_head.permute(2, 0, 1, 3).reshape(H, -1).float()
+A_h = X_h @ X_h.T
+_, U_H = torch.linalg.eigh(A_h)
+U_H = torch.flip(U_H[:, -R_H:], dims=[1])
+del X_h, A_h
+
+# Mode-3 (head_dim) unfolding
+X_d = X_head.permute(3, 0, 1, 2).reshape(HD, -1).float()
+A_d = X_d @ X_d.T
+_, U_D = torch.linalg.eigh(A_d)
+U_D = torch.flip(U_D[:, -R_D:], dims=[1])
+del X_d, A_d
+
+# Project: G = X ×1 U_L^T ×2 U_H^T ×3 U_D^T
+G = X_head.float()
+G = torch.tensordot(G, U_L, dims=([1], [0]))   # (N, R_L, H, HD)
+G = G.permute(0, 2, 1, 3)                       # (N, H, R_L, HD)
+G = torch.tensordot(G, U_H, dims=([1], [0]))   # (N, R_L, R_H, HD)
+G = G.permute(0, 2, 1, 3)                       # (N, R_H, R_L, HD)
+G = torch.tensordot(G, U_D, dims=([2], [0]))   # (N, R_H, R_L, R_D)
+G = G.permute(0, 2, 1, 3)                       # (N, R_L, R_H, R_D)
+
+F_tucker = G.reshape(N, -1)                     # (5, 640)
+
+# ── Assertions ──
+assert F_tucker.shape == (N, R_L * R_H * R_D), \
+    f"Tucker core shape: {F_tucker.shape}, expected ({N}, {R_L*R_H*R_D})"
+assert not torch.isnan(F_tucker).any(), "NaN in Tucker core"
+assert not torch.isinf(F_tucker).any(), "Inf in Tucker core"
+print(f"  [PASS] Tucker core: {tuple(F_tucker.shape)}  (no NaN/Inf)")
+
+# ── Save ──
+torch.save({"all_emb": F_tucker, "U_L": U_L, "U_H": U_H, "U_D": U_D},
+           os.path.join(out_dir, "truthfulqa_tucker_pilot.pt"))
+print(f"  [PASS] Tucker core saved.  Done.")
