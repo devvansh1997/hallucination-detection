@@ -48,21 +48,30 @@ for s in [".", "!", "?", "\n"]:
 
 # -- Extract --
 all_head_tensors = []
+all_lookback = []
 
 for pi, prompt in enumerate(prompts):
     print(f"\n  Prompt {pi}: {prompt[:60]}...")
 
-    # Register hooks
+    # Register hooks for head outputs AND attention weights
     head_storage = {l: [] for l in LAYERS}
+    attn_storage = {l: [] for l in LAYERS}
     hooks = []
 
-    def make_hook(l):
+    def make_head_hook(l):
         def h(m, inp, out):
             head_storage[l].append(inp[0].detach().cpu())
         return h
 
+    def make_attn_hook(l):
+        def h(m, inp, out):
+            if isinstance(out, tuple) and len(out) > 1 and out[1] is not None:
+                attn_storage[l].append(out[1].detach().cpu())
+        return h
+
     for l in LAYERS:
-        hooks.append(model.model.layers[l].self_attn.o_proj.register_forward_hook(make_hook(l)))
+        hooks.append(model.model.layers[l].self_attn.o_proj.register_forward_hook(make_head_hook(l)))
+        hooks.append(model.model.layers[l].self_attn.register_forward_hook(make_attn_hook(l)))
 
     # Generate 1 beam only (simple)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -88,39 +97,55 @@ for pi, prompt in enumerate(prompts):
     for l in LAYERS:
         stored = head_storage[l]
         assert len(stored) >= 2, f"Layer {l}: only {len(stored)} hook firings"
-        # stored[0] = prompt step: (1, prompt_len, 4096)
         assert stored[0].shape == (1, prompt_len, 4096), \
             f"Layer {l} prompt step shape: {stored[0].shape}"
-        # stored[1] = first gen step: (1, 1, 4096)  [batch=1 since no beam search]
         assert stored[1].shape == (1, 1, 4096), \
             f"Layer {l} gen step shape: {stored[1].shape}"
     print(f"  [PASS] All {len(LAYERS)} layers: prompt={stored[0].shape}, gen={stored[1].shape}")
 
-    # Extract first generated token per layer
+    # Extract first generated token per layer (head tensor)
     layer_vecs = []
     for l in LAYERS:
-        # stored[1][0, 0, :] = (4096,) -> reshape to (32, 128)
         h = head_storage[l][1][0, 0, :].reshape(n_heads, head_dim)
         layer_vecs.append(h)
     head_tensor = torch.stack(layer_vecs, dim=0)  # (9, 32, 128)
+    assert head_tensor.shape == (len(LAYERS), n_heads, head_dim)
+    print(f"  [PASS] Head tensor: {tuple(head_tensor.shape)}")
 
-    # -- Assert final shape --
-    assert head_tensor.shape == (len(LAYERS), n_heads, head_dim), \
-        f"Final shape: {head_tensor.shape}"
-    print(f"  [PASS] Final tensor: {tuple(head_tensor.shape)}")
+    # ── Lookback ratios ──
+    lookback_vecs = []
+    for l in LAYERS:
+        a_stored = attn_storage[l]
+        if not a_stored or len(a_stored) < 2:
+            lookback_vecs.append(torch.zeros(n_heads))
+            continue
+        # a_stored[1:] = generation steps: (1, n_heads, 1, S_total) where S_total grows
+        ratios = []
+        for s in a_stored[1:]:  # (1, n_heads, 1, S_step)
+            at = s[0, :, 0, :]  # (n_heads, S_step)
+            ctx_len = min(prompt_len, at.shape[-1])
+            ctx_mass = at[:, :ctx_len].sum(dim=-1)
+            tot_mass = at.sum(dim=-1) + 1e-9
+            ratios.append(ctx_mass / tot_mass)
+        lookback_vecs.append(torch.stack(ratios).mean(dim=0))  # (n_heads,)
+    lookback = torch.stack(lookback_vecs, dim=0)  # (9, 32)
+    assert lookback.shape == (len(LAYERS), n_heads), f"Lookback shape: {lookback.shape}"
+    print(f"  [PASS] Lookback: {tuple(lookback.shape)}  range=[{lookback.min():.2f}, {lookback.max():.2f}]")
 
     all_head_tensors.append(head_tensor)
+    all_lookback.append(lookback)
 
-    del outputs, head_storage
+    del outputs, head_storage, attn_storage
     torch.cuda.empty_cache()
 
 # ── Save extracted head tensors ──
 out_dir = "../data/llama-3.1-8b-instruct"
 os.makedirs(out_dir, exist_ok=True)
 X_head = torch.stack(all_head_tensors, dim=0)  # (5, 9, 32, 128)
-torch.save({"all_emb": X_head},
+X_lookback = torch.stack(all_lookback, dim=0)    # (5, 9, 32)
+torch.save({"all_emb": X_head, "all_lookback": X_lookback},
            os.path.join(out_dir, "truthfulqa_head_resolved_1beam_pilot.pt"))
-print(f"\n[Step 1] Saved: {tuple(X_head.shape)}")
+print(f"\n[Step 1] Saved: head={tuple(X_head.shape)}  lookback={tuple(X_lookback.shape)}")
 
 # ============================================================================
 # STEP 2: 4-Mode Tucker Compression
