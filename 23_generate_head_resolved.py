@@ -156,6 +156,36 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
     gen_ids_all = outputs.sequences[:, prompt_len:]
 
     any_correct = False
+
+    # Pre-process head storage ONCE (all beams share the same hook data)
+    head_by_layer = {}
+    lookback_by_layer = {}
+    for l in range(W_START, W_END):
+        # Head: stored[0]=prompt (B=1, S_p, D), stored[1:]=gen steps (B=num_beams, 1, D)
+        h_stored = head_storage[l]
+        if not h_stored:
+            head_by_layer[l] = None
+        else:
+            gen_h = h_stored[1:]  # generation steps only
+            if gen_h:
+                # Stack generation steps: (T_gen, num_beams, 1, 4096)
+                h_cat = torch.cat(gen_h, dim=0)
+                head_by_layer[l] = h_cat
+            else:
+                head_by_layer[l] = None
+
+        # Lookback
+        a_stored = attn_storage[l]
+        if not a_stored:
+            lookback_by_layer[l] = None
+        else:
+            gen_a = a_stored[1:]
+            if gen_a:
+                a_cat = torch.cat(gen_a, dim=0)  # (T_gen, num_beams, n_heads, 1, S_total)
+                lookback_by_layer[l] = a_cat
+            else:
+                lookback_by_layer[l] = None
+
     for b in range(gen_ids_all.shape[0]):
         gids = gen_ids_all[b]
         gids = gids[gids != tokenizer.eos_token_id]
@@ -171,51 +201,38 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         if is_correct:
             any_correct = True
 
-            # -- Head tensor: per-layer o_proj inputs (generated tokens only) --
-            layer_tensors = []
-            for l in range(W_START, W_END):
-                stored = head_storage[l]
-                if not stored:
-                    layer_tensors.append(torch.zeros(1, n_heads, head_dim))
-                    continue
-                # stored[0] = prompt step (num_beams, prompt_len, 4096) — discard
-                # stored[1:] = generation steps (num_beams, 1, 4096) per step
-                gen_steps = stored[1:min(len(gids)+1, len(stored))]
-                if not gen_steps:
-                    layer_tensors.append(torch.zeros(1, n_heads, head_dim))
-                    continue
-                step_tensors = []
-                for s in gen_steps:
-                    sb = s[b:b+1]  # (1, 1, 4096) — extract beam b
-                    step_tensors.append(sb.reshape(1, 1, n_heads, head_dim))
-                layer_cat = torch.cat(step_tensors, dim=1)  # (1, T_gen, n_heads, head_dim)
-                # Signed absolute extremum pooling across time
-                abs_vals = layer_cat.abs()
-                max_idx = abs_vals.flatten(1).abs().sum(dim=2).argmax(dim=1, keepdim=True)
-                flat = layer_cat.reshape(1, -1, n_heads, head_dim)
-                pooled = flat.gather(dim=1, index=max_idx.unsqueeze(-1).unsqueeze(-1)
-                                     .expand(-1, 1, n_heads, head_dim)).squeeze(1)
-                layer_tensors.append(pooled)
-        head_tensor = torch.cat(layer_tensors, dim=0)  # (9, n_heads, head_dim)
+        # -- Head tensor: signed absolute extremum per layer, per beam --
+        layer_tensors = []
+        for l in range(W_START, W_END):
+            h_cat = head_by_layer[l]
+            if h_cat is None:
+                layer_tensors.append(torch.zeros(n_heads, head_dim))
+                continue
+            # h_cat: (T_gen, num_beams, 1, 4096)
+            # Extract beam b: (T_gen, 1, 4096) -> (T_gen, n_heads, head_dim)
+            hb = h_cat[:, b, 0, :].reshape(-1, n_heads, head_dim)  # (T_gen, n_heads, head_dim)
+            # Signed absolute extremum: pick token with max L2 norm across heads
+            norms = hb.norm(dim=(1, 2))                     # (T_gen,)
+            peak_idx = norms.argmax()
+            layer_tensors.append(hb[peak_idx])              # (n_heads, head_dim)
+        head_tensor = torch.stack(layer_tensors, dim=0)     # (L, n_heads, head_dim)
 
         # -- Lookback ratios --
         lookback_vecs = []
         for l in range(W_START, W_END):
-            stored = attn_storage[l]
-            if not stored:
+            a_cat = lookback_by_layer[l]
+            if a_cat is None:
                 lookback_vecs.append(torch.zeros(n_heads))
                 continue
-            gen_steps = stored[1:min(len(gids)+1, len(stored))]
-            if not gen_steps:
-                lookback_vecs.append(torch.zeros(n_heads))
-                continue
+            # a_cat: (T_gen, num_beams, n_heads, 1, S_total)
+            ab = a_cat[:, b]  # (T_gen, n_heads, 1, S_total)
             ratios = []
-            for s in gen_steps:  # (num_beams, n_heads, 1, S_total)
-                sb = s[b]        # (n_heads, 1, S_total)
-                total_len = sb.shape[-1]
+            for t in range(ab.shape[0]):
+                at = ab[t, :, 0, :]  # (n_heads, S_total)
+                total_len = at.shape[-1]
                 ctx_len = min(prompt_len, total_len)
-                ctx_mass = sb[:, 0, :ctx_len].sum(dim=-1)  # (n_heads,)
-                tot_mass = sb[:, 0, :].sum(dim=-1) + 1e-9
+                ctx_mass = at[:, :ctx_len].sum(dim=-1)
+                tot_mass = at.sum(dim=-1) + 1e-9
                 ratios.append(ctx_mass / tot_mass)
             lookback_vecs.append(torch.stack(ratios).mean(dim=0))  # (n_heads,)
         lookback = torch.stack(lookback_vecs, dim=0)  # (L, n_heads)
@@ -223,9 +240,9 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         all_head.append(head_tensor)
         all_lookback.append(lookback)
         all_flags.append(not is_correct)
+        all_pi.append(pi)                     # per-beam tracking — no mismatch
 
     all_is_known.append(any_correct)
-    all_pi.extend([pi] * 10)
 
     del outputs, head_storage, attn_storage
     torch.cuda.empty_cache()
