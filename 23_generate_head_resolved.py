@@ -171,31 +171,31 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         if is_correct:
             any_correct = True
 
-        # -- Head tensor: per-layer o_proj inputs (generated tokens only) --
-        layer_tensors = []
-        for l in range(W_START, W_END):
-            stored = head_storage[l]
-            if not stored:
-                layer_tensors.append(torch.zeros(1, n_heads, head_dim))
-                continue
-            # stored[0] is prompt step (discard), stored[1:] are generated steps
-            gen_steps = stored[1:min(len(gids)+1, len(stored))]
-            if not gen_steps:
-                layer_tensors.append(torch.zeros(1, n_heads, head_dim))
-                continue
-            # Each step: (1, 1, 4096) -> reshape to (1, 1, n_heads, head_dim)
-            step_tensors = []
-            for s in gen_steps:
-                step_tensors.append(s.reshape(1, 1, n_heads, head_dim))
-            layer_cat = torch.cat(step_tensors, dim=1)  # (1, T_gen, n_heads, head_dim)
-            # Signed absolute extremum pooling across time
-            abs_vals = layer_cat.abs()
-            max_idx = abs_vals.flatten(1).abs().sum(dim=2).argmax(dim=1, keepdim=True)
-            # Gather original signed values
-            flat = layer_cat.reshape(1, -1, n_heads, head_dim)
-            pooled = flat.gather(dim=1, index=max_idx.unsqueeze(-1).unsqueeze(-1)
-                                 .expand(-1, 1, n_heads, head_dim)).squeeze(1)
-            layer_tensors.append(pooled)
+            # -- Head tensor: per-layer o_proj inputs (generated tokens only) --
+            layer_tensors = []
+            for l in range(W_START, W_END):
+                stored = head_storage[l]
+                if not stored:
+                    layer_tensors.append(torch.zeros(1, n_heads, head_dim))
+                    continue
+                # stored[0] = prompt step (num_beams, prompt_len, 4096) — discard
+                # stored[1:] = generation steps (num_beams, 1, 4096) per step
+                gen_steps = stored[1:min(len(gids)+1, len(stored))]
+                if not gen_steps:
+                    layer_tensors.append(torch.zeros(1, n_heads, head_dim))
+                    continue
+                step_tensors = []
+                for s in gen_steps:
+                    sb = s[b:b+1]  # (1, 1, 4096) — extract beam b
+                    step_tensors.append(sb.reshape(1, 1, n_heads, head_dim))
+                layer_cat = torch.cat(step_tensors, dim=1)  # (1, T_gen, n_heads, head_dim)
+                # Signed absolute extremum pooling across time
+                abs_vals = layer_cat.abs()
+                max_idx = abs_vals.flatten(1).abs().sum(dim=2).argmax(dim=1, keepdim=True)
+                flat = layer_cat.reshape(1, -1, n_heads, head_dim)
+                pooled = flat.gather(dim=1, index=max_idx.unsqueeze(-1).unsqueeze(-1)
+                                     .expand(-1, 1, n_heads, head_dim)).squeeze(1)
+                layer_tensors.append(pooled)
         head_tensor = torch.cat(layer_tensors, dim=0)  # (9, n_heads, head_dim)
 
         # -- Lookback ratios --
@@ -210,14 +210,15 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
                 lookback_vecs.append(torch.zeros(n_heads))
                 continue
             ratios = []
-            for s in gen_steps:  # (1, n_heads, 1, S_total)
-                total_len = s.shape[-1]
+            for s in gen_steps:  # (num_beams, n_heads, 1, S_total)
+                sb = s[b]        # (n_heads, 1, S_total)
+                total_len = sb.shape[-1]
                 ctx_len = min(prompt_len, total_len)
-                ctx_mass = s[0, :, 0, :ctx_len].sum(dim=-1)  # (n_heads,)
-                tot_mass = s[0, :, 0, :].sum(dim=-1) + 1e-9
+                ctx_mass = sb[:, 0, :ctx_len].sum(dim=-1)  # (n_heads,)
+                tot_mass = sb[:, 0, :].sum(dim=-1) + 1e-9
                 ratios.append(ctx_mass / tot_mass)
             lookback_vecs.append(torch.stack(ratios).mean(dim=0))  # (n_heads,)
-        lookback = torch.stack(lookback_vecs, dim=0)  # (9, n_heads)
+        lookback = torch.stack(lookback_vecs, dim=0)  # (L, n_heads)
 
         all_head.append(head_tensor)
         all_lookback.append(lookback)
