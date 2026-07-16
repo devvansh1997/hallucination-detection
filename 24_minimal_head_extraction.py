@@ -227,8 +227,8 @@ F_core = G_core.transpose(1, 2).reshape(N, -1).numpy()  # (5, 320)
 print(f"  Phase 1 core: {F_core.shape}")
 
 # Un-mixed features: Tucker (640) + Lookback flattened (9*32=288)
-F_lookback_flat = X_lookback.reshape(N, -1)  # (5, 288)
-F_unmixed = np.concatenate([F_tucker.numpy(), F_lookback_flat.numpy()], axis=1)  # (5, 928)
+F_lookback_flat = X_lookback.float().reshape(N, -1)  # (5, 288)
+F_unmixed = np.concatenate([F_tucker.float().numpy(), F_lookback_flat.numpy()], axis=1)  # (5, 928)
 print(f"  Un-mixed features: {F_unmixed.shape}")
 
 # Gram-Schmidt: Ridge(F_core -> F_unmixed), F_perp = residual
@@ -251,7 +251,7 @@ print(f"\n[Step 5] Classifier sanity check (5 samples, no labels — shape check
 # Build 4 variants
 variants = {
     "V1: Core (320)":              F_core,
-    "V2: Tucker (640)":            F_tucker.numpy(),
+    "V2: Tucker (640)":            F_tucker.float().numpy(),
     "V3: Lookback (288)":          F_lookback_flat.numpy(),
     "V4: Core + Orth Unmixed (1248)": np.concatenate([F_core, F_perp], axis=1),
 }
