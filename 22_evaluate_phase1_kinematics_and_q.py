@@ -48,17 +48,20 @@ def run_dummy_tests():
     _, U_D = torch.linalg.eigh(A_D)
     U_D = torch.flip(U_D[:, -R_D:], dims=[1])
 
-    # Project
-    P_L = U_L @ U_L.T
-    P_D = U_D @ U_D.T
-    X_hat = P_L @ X.float() @ P_D
-    F_core = X_hat.reshape(N, -1)
+    # Project to core
+    temp = X.float() @ U_D                               # (N, L, R_D)
+    G = temp.transpose(1, 2) @ U_L                        # (N, R_D, R_L)
+    G = G.transpose(1, 2)                                  # (N, R_L, R_D)
+    F_core = G.reshape(N, -1)                             # (N, R_L*R_D)
 
     # Test 1: Shape
     assert F_core.shape == (50, R_L * R_D), f"Shape: {F_core.shape}"
     print("    [PASS] Test 1: Core feature shape correct")
 
     # Test 2: Q-Statistic non-collinearity
+    P_L = U_L @ U_L.T
+    P_D = U_D @ U_D.T
+    X_hat = P_L @ X.float() @ P_D
     E = X.float() - X_hat
     e_norms = E.reshape(N, -1).norm(dim=1)
     corr = torch.corrcoef(torch.stack([e_norms, F_core.norm(dim=1)]))[0, 1]
@@ -174,8 +177,13 @@ if __name__ == "__main__":
             P_L = U_L @ U_L.T  # (L, L)
             P_D = U_D @ U_D.T  # (D, D)
 
-            X_hat = P_L @ X @ P_D                                 # (N, L, D)
-            F_core = X_hat.reshape(N, -1).numpy()                 # (N, 320)
+            temp = X.float() @ U_D
+            G = temp.transpose(1, 2) @ U_L
+            G = G.transpose(1, 2)
+            F_core = G.reshape(N, -1).numpy()              # (N, 320)
+
+            # Reconstruction for Q-statistic
+            X_hat = P_L @ X.float() @ P_D                    # (N, L, D)
 
             E = X - X_hat
             q_total = E.pow(2).sum(dim=(1, 2)).unsqueeze(1)       # (N, 1)
