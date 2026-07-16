@@ -179,12 +179,8 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         if not a_stored:
             lookback_by_layer[l] = None
         else:
-            gen_a = a_stored[1:]
-            if gen_a:
-                a_cat = torch.cat(gen_a, dim=0)  # (T_gen, num_beams, n_heads, 1, S_total)
-                lookback_by_layer[l] = a_cat
-            else:
-                lookback_by_layer[l] = None
+            gen_a = a_stored[1:]  # list of (num_beams, n_heads, 1, S_varying)
+            lookback_by_layer[l] = gen_a if gen_a else None
 
     for b in range(gen_ids_all.shape[0]):
         gids = gen_ids_all[b]
@@ -220,15 +216,13 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         # -- Lookback ratios --
         lookback_vecs = []
         for l in range(W_START, W_END):
-            a_cat = lookback_by_layer[l]
-            if a_cat is None:
+            gen_a = lookback_by_layer[l]  # list of (num_beams, n_heads, 1, S_varying)
+            if gen_a is None:
                 lookback_vecs.append(torch.zeros(n_heads))
                 continue
-            # a_cat: (T_gen, num_beams, n_heads, 1, S_total)
-            ab = a_cat[:, b]  # (T_gen, n_heads, 1, S_total)
             ratios = []
-            for t in range(ab.shape[0]):
-                at = ab[t, :, 0, :]  # (n_heads, S_total)
+            for s in gen_a:  # (num_beams, n_heads, 1, S_step)
+                at = s[b, :, 0, :]  # (n_heads, S_step)
                 total_len = at.shape[-1]
                 ctx_len = min(prompt_len, total_len)
                 ctx_mass = at[:, :ctx_len].sum(dim=-1)
