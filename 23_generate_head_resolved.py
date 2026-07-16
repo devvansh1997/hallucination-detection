@@ -192,23 +192,15 @@ for pi, sample in enumerate(tqdm(samples, desc=f"  {name}")):
         if is_correct:
             any_correct = True
 
-        # -- Head tensor: signed absolute extremum per layer, per beam --
+        # -- Head tensor: first generated token only --
         layer_tensors = []
         for l in range(W_START, W_END):
-            gen_h = head_by_layer[l]  # list of (num_beams, 1, 4096)
-            if gen_h is None:
+            gen_h = head_by_layer[l]  # list of (B, 1, 4096)
+            if gen_h is None or len(gen_h) == 0:
                 layer_tensors.append(torch.zeros(n_heads, head_dim))
-                continue
-            # Collect beam b across all gen steps
-            beam_tokens = []
-            for s in gen_h:  # (num_beams, 1, 4096)
-                beam_tokens.append(s[b, 0, :].reshape(n_heads, head_dim))  # (n_heads, head_dim)
-            hb = torch.stack(beam_tokens, dim=0)  # (T_gen, n_heads, head_dim)
-            # Signed absolute extremum: pick token with max L2 norm
-            norms = hb.norm(dim=(1, 2))
-            peak_idx = norms.argmax()
-            layer_tensors.append(hb[peak_idx])
-        head_tensor = torch.stack(layer_tensors, dim=0)     # (L, n_heads, head_dim)
+            else:
+                layer_tensors.append(gen_h[0][b, 0, :].reshape(n_heads, head_dim))
+        head_tensor = torch.stack(layer_tensors, dim=0)
 
         # -- Lookback ratios --
         lookback_vecs = []
