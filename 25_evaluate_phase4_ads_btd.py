@@ -526,18 +526,15 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
             # Use layer-wise mean across T as proxy for pooled features
             X_pooled = X_beam.mean(dim=1, keepdim=True)  # (1, 1, L, D)
 
-            try:
-                h_S, h_R, eps_S, eps_R = dual_stream_btd(
-                    X_pooled, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
-                X_R_s = X_pooled @ P_R.float()
-                s_n = extract_spectral_invariants(X_R_s, None)
-                all_h_S.append(h_S[0])
-                all_h_R.append(h_R[0])
-                all_spec.append(s_n[0])
-                all_epsR.append(eps_R[0].item())
-                all_flags.append(not is_correct)
-            except Exception:
-                pass
+            h_S, h_R, eps_S, eps_R = dual_stream_btd(
+                X_pooled, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+            X_R_s = X_pooled @ P_R.float()
+            s_n = extract_spectral_invariants(X_R_s, None)
+            all_h_S.append(h_S[0])
+            all_h_R.append(h_R[0])
+            all_spec.append(s_n[0])
+            all_epsR.append(eps_R[0].item())
+            all_flags.append(not is_correct)
 
         all_is_known.append(any_correct)
         del outputs; torch.cuda.empty_cache()
