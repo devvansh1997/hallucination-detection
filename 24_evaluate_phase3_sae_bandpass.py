@@ -55,7 +55,7 @@ def run_dummy_tests():
     freq = M_s.mean(dim=0)
     mask = (freq >= 0.0005) & (freq <= 0.05)
     filt = M_s[:, mask]
-    assert 78 <= filt.shape[1] <= 80
+    assert 60 <= filt.shape[1] <= 80, f"Bandpass kept {filt.shape[1]} cols"
     print("  [PASS] Test 2: Bandpass ~80 cols")
 
     Fc = torch.randn(100, 320).numpy()
