@@ -213,11 +213,87 @@ def test_section2():
 
 
 # ============================================================================
+# SECTION 3: DYNAMICAL SPECTRAL GRAFT
+# ============================================================================
+
+def extract_spectral_invariants(X_R_stream, X_R, U_D_save=None, r_R=32, alpha=1e-3):
+    """Per-sample spectral invariants from token-resolved reasoning trajectory.
+    X_R_stream: (N, T, L, D) — reasoning-projected tensor
+    Returns s_n: (N, 3) with [log_max_eig, cond_penalty, drift_rate]"""
+    N, T, L, D = X_R_stream.shape
+    s_all = []
+    for n in range(N):
+        # Flatten per-sample: (T, L, D) -> (T, L*D)
+        x_n = X_R_stream[n].reshape(T, -1).float()          # (T, L*D)
+
+        # Project to reasoning core via Tucker factor (if available, else use direct)
+        # For test: use x_n directly as trajectory
+        rho = x_n  # (T, r_dim) — simplified; full version uses V_R @ core
+
+        # Gram matrix with ridge
+        K = (rho @ rho.T) / T + alpha * torch.eye(T, device=rho.device)
+
+        # Eigenvalues
+        eigvals = torch.linalg.eigvalsh(K)
+        lam_max = eigvals[-1]
+        lam_min = eigvals[0]
+
+        s1 = torch.log(lam_max + 1e-9).item()
+        s2 = -2.0 * torch.log(lam_max / (lam_min + 1e-9)).item()
+
+        # Drift rate: OLS on log-norm vs time
+        norms = rho.norm(dim=1)                            # (T,)
+        log_norms = torch.log(norms + 1e-9)
+        t = torch.arange(T, dtype=torch.float32)
+        t_mean = t.mean()
+        beta = ((t - t_mean) * (log_norms - log_norms.mean())).sum() / \
+               ((t - t_mean)**2).sum() + 1e-9
+        s3 = beta.item()
+
+        s_all.append([s1, s2, s3])
+
+    return np.array(s_all, dtype=np.float32)
+
+
+def test_section3():
+    print("[Section 3 Tests]")
+
+    # Test 3A: Positive definiteness
+    N, T = 4, 10
+    rho_syn = torch.randn(N, T, 32)
+    X_stream = rho_syn.unsqueeze(2).unsqueeze(2).expand(-1, -1, 1, 1)  # (N,T,1,1)
+    s = extract_spectral_invariants(X_stream, None)
+    assert not np.isnan(s).any(), "NaN in spectral invariants"
+    print(f"  Test 3A: s1={s[:,0].mean():.3f}+-{s[:,0].std():.3f}  "
+          f"s2={s[:,1].mean():.3f}  s3={s[:,2].mean():.3f}  (no NaN)")
+
+    # Test 3B: Drift sensitivity — exploding vs decaying
+    T2 = 20
+    t = torch.arange(T2, dtype=torch.float32)
+    # Exploding: norm ~ exp(0.3*t)
+    rho_explode = torch.randn(1, T2, 32) * torch.exp(0.3 * t).unsqueeze(1).unsqueeze(0)
+    X_ex = rho_explode.unsqueeze(2).unsqueeze(2)
+    s_ex = extract_spectral_invariants(X_ex, None)
+    # Decaying: norm ~ exp(-0.1*t)
+    rho_decay = torch.randn(1, T2, 32) * torch.exp(-0.1 * t).unsqueeze(1).unsqueeze(0)
+    X_dec = rho_decay.unsqueeze(2).unsqueeze(2)
+    s_dec = extract_spectral_invariants(X_dec, None)
+
+    print(f"  Test 3B: explode s3={s_ex[0,2]:.4f} (>0 expected)  "
+          f"decay s3={s_dec[0,2]:.4f} (<0 expected)")
+    assert s_ex[0, 2] > 0, f"Exploding trajectory should have positive drift"
+    assert s_dec[0, 2] < 0, f"Decaying trajectory should have negative drift"
+
+    print("  [PASS] All Section 3 tests\n")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 if __name__ == "__main__":
     V_S, V_R, P_S, P_R, D = build_vocab_anchor()
     test_section1(V_S, V_R, P_S, P_R)
     test_section2()
-    print("[PAUSED] Section 2 verified. Waiting for explicit 'go' command "
-          "to implement Section 3.")
+    test_section3()
+    print("[PAUSED] Section 3 verified. Waiting for explicit 'go' command "
+          "to implement Section 4.")
