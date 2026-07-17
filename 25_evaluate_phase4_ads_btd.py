@@ -10,7 +10,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import torch
 import numpy as np
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import yaml
 
 with open("config.yaml") as f:
