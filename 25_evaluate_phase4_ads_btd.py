@@ -430,6 +430,135 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
 
 
 # ============================================================================
+# REAL DATA EXTRACTION LOOP
+# ============================================================================
+def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
+                           n_pilot=10):
+    """Hooks model, generates TruthfulQA, extracts ADS-BTD features per beam."""
+    out_path = os.path.join("../data", model_folder, "truthfulqa_ads_btd_features.pt")
+    if os.path.exists(out_path):
+        print(f"  Loading cached: {out_path}")
+        return torch.load(out_path, weights_only=False)
+
+    model_id = cfg["models"][0]["id"]
+    print(f"  Loading model: {model_id}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=torch.bfloat16, device_map="cuda",
+        trust_remote_code=True, attn_implementation="eager")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    model.eval()
+
+    from datasets import load_dataset
+    ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
+    prompts = [str(ds["question"][i]) for i in range(n_pilot)]
+    corr_list = [str(ds["best_answer"][i]) for i in range(n_pilot)]
+    wrg_list = [list(ds["incorrect_answers"][i]) for i in range(n_pilot)]
+
+    import evaluate
+    rouge = evaluate.load("rouge")
+    bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
+
+    eos_ids = {tokenizer.eos_token_id}
+    for s in [".", "!", "?", "\n"]:
+        for tok in tokenizer.encode(s, add_special_tokens=False):
+            eos_ids.add(tok)
+
+    # Hooks on layers 15-23
+    resid_cache = {l: [] for l in LAYERS}
+    hooks = []
+    for l in LAYERS:
+        def h(l=l, r=resid_cache):
+            return lambda m, inp, out: r[l].append(out[0].detach().cpu())
+        hooks.append(model.model.layers[l].register_forward_hook(h()))
+
+    all_h_S, all_h_R, all_spec, all_epsR, all_flags = [], [], [], [], []
+    all_is_known = []
+
+    for pi in range(n_pilot):
+        prompt = prompts[pi]
+        corr = [corr_list[pi]]
+        wrg = [str(w) for w in wrg_list[pi]] if wrg_list[pi] else []
+        for l in LAYERS: resid_cache[l] = []
+
+        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+        prompt_len = inputs.input_ids.shape[1]
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=64, eos_token_id=list(eos_ids),
+                do_sample=True, temperature=0.5, top_k=5, top_p=0.99,
+                num_beams=10, num_return_sequences=10,
+                return_dict_in_generate=True,
+                pad_token_id=tokenizer.eos_token_id, early_stopping=True)
+
+        gen_ids_all = outputs.sequences[:, prompt_len:]
+        any_correct = False
+
+        for b in range(gen_ids_all.shape[0]):
+            gids = gen_ids_all[b]
+            gids = gids[gids != tokenizer.eos_token_id]
+            gen_text = tokenizer.decode(gids, skip_special_tokens=True).strip()
+
+            r = rouge.compute(predictions=[gen_text]*len(corr), references=corr) if corr else {"rougeL":0}
+            refs = corr + wrg
+            bs = bleurt.compute(predictions=[gen_text]*len(refs), references=refs) if refs else {"scores":[0]}
+            mc = max(bs["scores"][:len(corr)], default=0)
+            is_correct = (r["rougeL"]>=0.7) or (mc>0.5)
+            if is_correct: any_correct = True
+
+            # Build (1, T, L, D) from cached residuals
+            layer_tensors = []
+            for l in LAYERS:
+                stored = resid_cache[l]
+                if len(stored) < 2:
+                    layer_tensors.append(torch.zeros(1, 1, 4096))
+                else:
+                    gen_cpu = stored[1:]
+                    layer_tensors.append(torch.cat([s[b:b+1, -1:, :] for s in gen_cpu], dim=1))
+            X_beam = torch.stack(layer_tensors, dim=1).permute(0, 3, 1, 2)  # (1, T, L, D) approx
+            if X_beam.shape[2] == 0: continue
+
+            # Repack: (1, T, L, D) -> need T=1 for our pooling BTD
+            # Use layer-wise mean across T as proxy for pooled features
+            X_pooled = X_beam.mean(dim=1, keepdim=True)  # (1, 1, L, D)
+
+            try:
+                h_S, h_R, eps_S, eps_R = dual_stream_btd(
+                    X_pooled, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+                X_R_s = X_pooled @ P_R.float()
+                s_n = extract_spectral_invariants(X_R_s, None)
+                all_h_S.append(h_S[0])
+                all_h_R.append(h_R[0])
+                all_spec.append(s_n[0])
+                all_epsR.append(eps_R[0].item())
+                all_flags.append(not is_correct)
+            except Exception:
+                pass
+
+        all_is_known.append(any_correct)
+        del outputs; torch.cuda.empty_cache()
+
+    for h in hooks: h.remove()
+
+    # Save
+    data = {
+        "h_S": torch.stack(all_h_S, dim=0),
+        "h_R": torch.stack(all_h_R, dim=0),
+        "spectral_s": np.array(all_spec),
+        "epsilon_R": np.array(all_epsR),
+        "all_hallucination_flag": all_flags,
+        "all_is_known": all_is_known,
+    }
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save(data, out_path)
+    print(f"  Saved: {out_path} ({len(all_flags)} beams)")
+    return data
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 if __name__ == "__main__":
@@ -437,5 +566,8 @@ if __name__ == "__main__":
     test_section1(V_S, V_R, P_S, P_R)
     test_section2()
     test_section3()
+    # Extract real features (or load cached)
+    real_data = extract_real_features(V_S, V_R, P_S, P_R, n_pilot=5)
+    # Evaluate
     evaluate_ads_btd(V_S, V_R, P_S, P_R)
     print("\n[DONE] All 4 sections complete.")
