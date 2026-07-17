@@ -147,8 +147,8 @@ def dual_stream_btd(X, P_S, P_R, r_L=3, r_S=64, r_R=32):
         core = G.mean(dim=1)                               # (N, rl*rd) — avg across tokens
         # Reconstruction error
         X_hat = (flat @ UD @ UD.T).reshape(N, T, L, D)
-        norm_X = flat.reshape(N, T, L, D).norm(dim=(1,2,3))
-        norm_E = (X_hat - flat.reshape(N, T, L, D)).norm(dim=(1,2,3))
+        norm_X = flat.reshape(N, -1).norm(dim=1)
+        norm_E = (X_hat - flat.reshape(N, T, L, D)).reshape(N, -1).norm(dim=1)
         eps = norm_E / (norm_X + 1e-9)
         return core, eps
 
