@@ -32,6 +32,8 @@ if tokenizer.pad_token is None:
 tokenizer.padding_side = "left"
 model.eval()
 
+print(f"  Model ready. Starting extraction on {N_PROMPTS} prompts ...", flush=True)
+
 n_heads = model.config.num_attention_heads
 head_dim = model.config.hidden_size // n_heads
 print(f"Layers: {model.config.num_hidden_layers}  Heads: {n_heads}  Head dim: {head_dim}")
@@ -49,8 +51,11 @@ for s in [".", "!", "?", "\n"]:
 
 # -- Load BLEURT + ROUGE for judging --
 import evaluate
+print("  Loading ROUGE ...", flush=True)
 rouge = evaluate.load("rouge")
+print("  Loading BLEURT-20 ...", flush=True)
 bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
+print("  Metrics ready.", flush=True)
 
 # -- Extract --
 all_head_tensors = []
