@@ -47,17 +47,12 @@ for s in [".", "!", "?", "\n"]:
     for tok in tokenizer.encode(s, add_special_tokens=False):
         eos_ids.add(tok)
 
-# -- Extract --
-all_head_tensors = []
-all_lookback = []
-
-for pi, prompt in enumerate(prompts):
 # -- Load BLEURT + ROUGE for judging --
 import evaluate
 rouge = evaluate.load("rouge")
 bleurt = evaluate.load("bleurt", config_name="BLEURT-20")
 
-# -- Containers --
+# -- Extract --
 all_head_tensors = []
 all_lookback = []
 all_flags = []
