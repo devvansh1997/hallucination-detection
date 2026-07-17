@@ -216,7 +216,7 @@ def test_section2():
 # SECTION 3: DYNAMICAL SPECTRAL GRAFT
 # ============================================================================
 
-def extract_spectral_invariants(X_R_stream, X_R, U_D_save=None, r_R=32, alpha=1e-3):
+def extract_spectral_invariants(X_R_stream, _unused=None, alpha=1e-3):
     """Per-sample spectral invariants from token-resolved reasoning trajectory.
     X_R_stream: (N, T, L, D) — reasoning-projected tensor
     Returns s_n: (N, 3) with [log_max_eig, cond_penalty, drift_rate]"""
@@ -262,8 +262,6 @@ def test_section3():
     N, T = 4, 10
     rho_syn = torch.randn(N, T, 32)
     # Wrap in (N, T, L, D) format — L=1, D=32 for simplicity
-    X_stream = rho_syn.unsqueeze(2).unsqueeze(3)  # (N, T, 1, 1) -> wrong
-    # Correct: (N, T, L=1, D=32)
     X_stream = rho_syn.unsqueeze(2)  # (N, T, 1, 32)
     s = extract_spectral_invariants(X_stream, None)
     assert not np.isnan(s).any(), "NaN in spectral invariants"
@@ -308,10 +306,23 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     print(f"  SECTION 4: FULL ADS-BTD EVALUATION")
     print(f"{'='*60}")
 
-    # -- Load data --
-    path = os.path.join("../data", model_folder, f"{dataset}_pooled_maxenergy.pt")
-    if os.path.exists(path):
-        data = torch.load(path, weights_only=False)
+    # -- Load data (try real extracted features first, fallback to maxenergy, then synthetic) --
+    real_path = os.path.join("../data", model_folder, "truthfulqa_ads_btd_features.pt")
+    old_path  = os.path.join("../data", model_folder, f"{dataset}_pooled_maxenergy.pt")
+
+    if os.path.exists(real_path):
+        print(f"  Loading real ADS-BTD features: {real_path}")
+        rdata = torch.load(real_path, weights_only=False)
+        h_S_np = rdata["h_S"].float().numpy()
+        h_R_np = rdata["h_R"].float().numpy()
+        s_all  = rdata["spectral_s"]
+        eps_R_np = rdata["epsilon_R"]
+        y_all  = np.array([int(f) for f in rdata["all_hallucination_flag"]])
+        is_known = np.array(rdata["all_is_known"])
+        prompt_idx = np.repeat(np.arange(len(is_known)), 10)
+    elif os.path.exists(old_path):
+        print(f"  Loading pooled maxenergy: {old_path}")
+        data = torch.load(old_path, weights_only=False)
         X_raw = torch.stack(data["all_emb"]).float()
         y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
         is_known = np.array(data["all_is_known"])
@@ -319,8 +330,7 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
                                    data.get("all_prompt_indices",
                                             list(range(len(is_known))))))
     else:
-        # Fallback: generate synthetic pilot data for testing
-        print(f"  [WARN] {path} not found — using synthetic pilot ({n_pilot} samples)")
+        print(f"  [WARN] No data file found — using synthetic pilot ({n_pilot} samples)")
         N_syn = n_pilot * 10
         X_raw = torch.randn(N_syn, 9, 4096)
         y_all = np.random.randint(0, 2, N_syn)
@@ -340,22 +350,20 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     t_idx = np.where(t_mask)[0]; v_idx = np.where(v_mask)[0]
     print(f"  Train={len(t_idx)}  Valid={len(v_idx)}")
 
-    # Add token dim: (N, 9, 4096) -> (N, 1, 9, 4096)
-    X_4d = X_raw.unsqueeze(1)
-    X_clean = robust_preclean(X_4d)
-
-    # Dual-stream BTD
-    print("  Running dual-stream BTD ...")
-    h_S, h_R, eps_S, eps_R = dual_stream_btd(
-        X_clean, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
-    h_S_np = h_S.numpy()
-    h_R_np = h_R.numpy()
-    eps_R_np = eps_R.numpy()
-
-    # Spectral invariants
-    print("  Extracting spectral invariants ...")
-    X_R_stream = X_clean @ P_R.float()
-    s_all = extract_spectral_invariants(X_R_stream, None)
+    # BTD + Spectral (skip if real features already loaded)
+    if not have_real:
+        # Add token dim: (N, 9, 4096) -> (N, 1, 9, 4096)
+        X_4d = X_raw.unsqueeze(1)
+        X_clean = robust_preclean(X_4d)
+        print("  Running dual-stream BTD ...")
+        h_S, h_R, eps_S, eps_R = dual_stream_btd(
+            X_clean, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+        h_S_np = h_S.numpy()
+        h_R_np = h_R.numpy()
+        eps_R_np = eps_R.numpy()
+        print("  Extracting spectral invariants ...")
+        X_R_stream = X_clean @ P_R.float()
+        s_all = extract_spectral_invariants(X_R_stream, None)
 
     # Assemble
     F_spec = np.concatenate([h_R_np, s_all, eps_R_np.reshape(-1, 1)], axis=1)  # (N, 99)
@@ -367,30 +375,6 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
         "V2: Reasoning + Spectral (99)":    (F_spec, 99),
         "V3: Full ADS-BTD (291)":           (F_full, 291),
     }
-
-    # V0: optional old Phase 1 baseline
-    old_path = os.path.join("../data", model_folder, "truthfulqa_pooled_maxenergy.pt")
-    if os.path.exists(old_path) and os.path.exists(path):
-        try:
-            old = torch.load(old_path, weights_only=False)
-            X_old = torch.stack(old["all_emb"]).float()
-            L_old, D_old = X_old.shape[1], X_old.shape[2]
-            # Simple HOSVD on old data
-            X_f = X_old[t_idx].permute(1,0,2).reshape(L_old,-1)
-            AL = X_f @ X_f.T; _, UL = torch.linalg.eigh(AL); UL = torch.flip(UL[:,-5:],dims=[1])
-            X_d = X_old[t_idx].permute(2,0,1).reshape(D_old,-1)
-            AD = torch.zeros(D_old,D_old,dtype=torch.float32)
-            for st in range(0,len(t_idx)*L_old,50000):
-                en = min(st+50000,len(t_idx)*L_old)
-                AD.addmm_(X_d[:,st:en].float(), X_d[:,st:en].float().T)
-            _, UD = torch.linalg.eigh(AD); UD = torch.flip(UD[:,-64:],dims=[1])
-            tmp = X_old.float() @ UD
-            G_c = tmp.transpose(1,2) @ UL
-            F_old = G_c.transpose(1,2).reshape(len(X_old),-1).numpy()
-            variants["V0: Old Phase 1 HOSVD (320)"] = (F_old, 320)
-            print("  V0 (Old Phase 1) loaded")
-        except Exception as e:
-            print(f"  [WARN] V0 load failed: {e}")
 
     # Ledoit-Wolf whitening
     print("  Ledoit-Wolf whitening ...")
@@ -421,7 +405,6 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
         if rf_a > best: best = rf_a
         print(f"  {vname:35s}  {dim:5d}  {rf_a:8.4f}  {lr_a:8.4f}  {mlp_a:8.4f}")
 
-    v1_rf = variants.get("V1: Semantic Core (192)", (None, 0))[1]
     print(f"  Best RF AUROC: {best:.4f}")
     if best > 0.8094:
         print(f"  >> ADS-BTD BROKE the 0.8094 HOSVD baseline!")
@@ -523,7 +506,7 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
             X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1, 1, 9, 4096) -> (N=1, T=1, L=9, D=4096)
 
             h_S, h_R, eps_S, eps_R = dual_stream_btd(
-                X_pooled, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+                X_beam, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
             X_R_s = X_pooled @ P_R.float()
             s_n = extract_spectral_invariants(X_R_s, None)
             all_h_S.append(h_S[0])
