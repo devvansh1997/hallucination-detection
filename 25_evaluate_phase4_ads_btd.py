@@ -309,7 +309,7 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     print(f"{'='*60}")
 
     # Load pooled max-energy data
-    path = os.path.join(DATA_DIR, model_folder, f"{dataset}_pooled_maxenergy.pt")
+    path = os.path.join("../data", model_folder, f"{dataset}_pooled_maxenergy.pt")
     if not os.path.exists(path):
         print(f"  [SKIP] {path} not found. Run 21_generate_maxpool_datasets.py first.")
         return
