@@ -72,9 +72,50 @@ def run_dummy_tests():
 # STEP 1-2: STANDALONE SAE EXTRACTION
 def extract_sae_features(model_folder, n_pilot):
     try:
-        from sae_lens import SAE
+        from sae_lens import SAE, get_pretrained_saes_directory
     except ImportError:
         raise RuntimeError("sae-lens not installed. pip install sae-lens")
+
+    def load_layer_sae(layer_idx):
+        directory = get_pretrained_saes_directory()
+        llama_releases = [
+            k for k in directory.keys()
+            if ("3.1" in k.lower() and "8b" in k.lower())
+            or "scope" in k.lower() or "eleuther" in k.lower()
+        ]
+        candidates = []
+        for rel in llama_releases:
+            sae_map = directory[rel].saes_map
+            matching = [
+                h for h in sae_map.keys()
+                if (f".{layer_idx}." in h or f"_{layer_idx}" in h
+                    or f"layer_{layer_idx}" in h)
+                and ("resid" in h.lower() or "mlp" in h.lower()
+                     or "blocks" in h.lower())
+            ]
+            for hk in matching:
+                candidates.append((rel, hk))
+        candidates.extend([
+            ("seonglae/Llama-3.1-8B-sae", f"blocks.{layer_idx}.hook_resid_post"),
+            ("seonglae/Llama-3.1-8B-sae", f"blocks.{layer_idx}.hook_resid_pre"),
+            ("llama_scope", f"layer_{layer_idx}/width_32k/average_l0_71"),
+        ])
+        for release, sae_id in candidates:
+            try:
+                print(f"  [SAE] Trying release='{release}', sae_id='{sae_id}' ...")
+                sae, _, _ = SAE.from_pretrained(release=release, sae_id=sae_id,
+                                                 device=str(device))
+                print(f"  [SAE] SUCCESS")
+                return sae
+            except Exception:
+                continue
+        print(f"\n[FATAL] No SAE for layer {layer_idx}.")
+        print("Available LLaMA releases:")
+        for r in llama_releases:
+            sh = list(directory[r].saes_map.keys())[:3]
+            print(f"  '{r}' -> {sh}")
+        raise RuntimeError(
+            f"No SAE for layer {layer_idx}. See available releases above.")
 
     print(f"  Backbone: {model_id}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -85,16 +126,11 @@ def extract_sae_features(model_folder, n_pilot):
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
     model.eval()
-    D = model.config.hidden_size
 
     saes = {}
-    release = "llama_scope_lxr_8b"
     for l in LAYERS:
-        print(f"  SAE layer {l} ...")
-        sae, _, _ = SAE.from_pretrained(
-            release=release, sae_id=f"blocks.{l}.hook_resid_post",
-            device=str(device))
-        saes[l] = sae
+        print(f"  Loading SAE layer {l} ...")
+        saes[l] = load_layer_sae(l)
     M = saes[LAYERS[0]].cfg.d_sae
     print(f"  SAE dict width: {M}")
 
