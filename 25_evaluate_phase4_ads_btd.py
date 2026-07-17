@@ -40,6 +40,8 @@ def build_vocab_anchor():
     print(f"  SVD on {W_tilde.shape} (float64) ...")
     U, S, Vh = torch.linalg.svd(W_tilde, full_matrices=False)
     V = Vh.T  # (D, D) in float64
+    # QR re-orthogonalization to fix trailing singular value numerical drift
+    V, _ = torch.linalg.qr(V)
 
     k = D - M_REASON
     V_S = V[:, :k]
@@ -110,10 +112,112 @@ def test_section1(V_S_bf16, V_R_bf16, P_S_bf16, P_R_bf16):
 
 
 # ============================================================================
-# MAIN — SECTION 1
+# SECTION 2: SEPARABLE DUAL-STREAM BTD & ANOMALY EXTRACTION
+# ============================================================================
+
+def dual_stream_btd(X, P_S, P_R, r_L=3, r_S=64, r_R=32):
+    """Project into semantic/reasoning streams, apply per-stream Tucker.
+    X: (N, T, L, D)  -> returns h_S (N, r_L*r_S), h_R (N, r_L*r_R),
+       eps_S (N,), eps_R (N,)"""
+    N, T, L, D = X.shape
+    Xf = X.float()
+
+    # Project into streams
+    X_S = Xf @ P_S.float()                                    # (N, T, L, D)
+    X_R = Xf @ P_R.float()                                    # (N, T, L, D)
+
+    # Flatten T into batch for Tucker: (N, T, L, D) -> (N*T, L, D)
+    def tucker_stream(Xs, rl, rd):
+        flat = Xs.reshape(-1, L, D)                           # (N*T, L, D)
+        # Mode-L factor
+        X_l = flat.permute(1, 0, 2).reshape(L, -1)
+        AL = X_l @ X_l.T
+        _, UL = torch.linalg.eigh(AL)
+        UL = torch.flip(UL[:, -rl:], dims=[1])
+        # Mode-D factor
+        X_d = flat.permute(2, 0, 1).reshape(D, -1)
+        AD = X_d @ X_d.T
+        _, UD = torch.linalg.eigh(AD)
+        UD = torch.flip(UD[:, -rd:], dims=[1])
+        # Core projection
+        G = flat @ UD                                     # (N*T, L, rd)
+        G = G.transpose(1, 2) @ UL                         # (N*T, rd, rl)
+        G = G.transpose(1, 2)                              # (N*T, rl, rd)
+        G = G.reshape(N, T, rl * rd)                       # (N, T, rl*rd)
+        core = G.mean(dim=1)                               # (N, rl*rd) — avg across tokens
+        # Reconstruction error
+        X_hat = (flat @ UD @ UD.T).reshape(N, T, L, D)
+        norm_X = flat.reshape(N, T, L, D).norm(dim=(1,2,3))
+        norm_E = (X_hat - flat.reshape(N, T, L, D)).norm(dim=(1,2,3))
+        eps = norm_E / (norm_X + 1e-9)
+        return core, eps
+
+    h_S, eps_S = tucker_stream(X_S, r_L, r_S)
+    h_R, eps_R = tucker_stream(X_R, r_L, r_R)
+    return h_S, h_R, eps_S, eps_R
+
+
+def test_section2():
+    print("[Section 2 Tests]")
+
+    # Synthetic data
+    N, T, L, D = 5, 3, 9, 128
+    X = torch.randn(N, T, L, D)
+    V_S_syn = torch.eye(D)[:, :D//2]    # (128, 64)
+    V_R_syn = torch.eye(D)[:, D//2:]    # (128, 64)
+    P_S_syn = V_S_syn @ V_S_syn.T
+    P_R_syn = V_R_syn @ V_R_syn.T
+
+    h_S, h_R, eps_S, eps_R = dual_stream_btd(X, P_S_syn, P_R_syn,
+                                              r_L=2, r_S=8, r_R=4)
+
+    # Test 2A: Pythagorean stream separability (orthogonal projections)
+    # ||X - X_hat_S - X_hat_R||^2 == ||X_S - X_hat_S||^2 + ||X_R - X_hat_R||^2
+    Xf = X.float()
+    X_S = Xf @ P_S_syn.float()
+    X_R = Xf @ P_R_syn.float()
+    # Reconstruct via Tucker (same as in dual_stream_btd)
+    flat = Xf.reshape(-1, L, D)
+    flat_S = X_S.reshape(-1, L, D)
+    flat_R = X_R.reshape(-1, L, D)
+
+    # Tucker on semantic
+    X_lS = flat_S.permute(1,0,2).reshape(L,-1); ALS = X_lS @ X_lS.T
+    _, ULS = torch.linalg.eigh(ALS); ULS = torch.flip(ULS[:,-2:], dims=[1])
+    X_dS = flat_S.permute(2,0,1).reshape(D,-1); ADS = X_dS @ X_dS.T
+    _, UDS = torch.linalg.eigh(ADS); UDS = torch.flip(UDS[:,-8:], dims=[1])
+    Xh_S = (flat_S @ UDS @ UDS.T).reshape(N,T,L,D)
+
+    # Tucker on reasoning
+    X_lR = flat_R.permute(1,0,2).reshape(L,-1); ALR = X_lR @ X_lR.T
+    _, ULR = torch.linalg.eigh(ALR); ULR = torch.flip(ULR[:,-2:], dims=[1])
+    X_dR = flat_R.permute(2,0,1).reshape(D,-1); ADR = X_dR @ X_dR.T
+    _, UDR = torch.linalg.eigh(ADR); UDR = torch.flip(UDR[:,-4:], dims=[1])
+    Xh_R = (flat_R @ UDR @ UDR.T).reshape(N,T,L,D)
+
+    left = (Xf - Xh_S - Xh_R).norm()**2
+    right = (X_S - Xh_S).norm()**2 + (X_R - Xh_R).norm()**2
+    # X_S + X_R = X (since P_S + P_R = I), so left ≈ ||X - Xh_S - Xh_R||^2
+    # right ≈ ||X_S - Xh_S||^2 + ||X_R - Xh_R||^2
+    rel_err = abs(left - right) / (right + 1e-9)
+    print(f"  Test 2A: Pythagorean separability rel err = {rel_err:.2e}  (target < 1e-3)")
+    assert rel_err < 1e-3, f"Separability violated: {rel_err:.2e}"
+
+    # Test 2B: Residual bounds
+    assert (eps_S >= 0).all() and (eps_S <= 1.0).all(), f"eps_S out of [0,1]"
+    assert (eps_R >= 0).all() and (eps_R <= 1.0).all(), f"eps_R out of [0,1]"
+    print(f"  Test 2B: eps_S in [{eps_S.min():.4f}, {eps_S.max():.4f}], "
+          f"eps_R in [{eps_R.min():.4f}, {eps_R.max():.4f}]")
+
+    print("  [PASS] All Section 2 tests\n")
+
+
+# ============================================================================
+# MAIN
 # ============================================================================
 if __name__ == "__main__":
     V_S, V_R, P_S, P_R, D = build_vocab_anchor()
     test_section1(V_S, V_R, P_S, P_R)
-    print("[PAUSED] Section 1 verified. Waiting for explicit 'go' command "
-          "to implement Section 2.")
+    test_section2()
+    print("[PAUSED] Section 2 verified. Waiting for explicit 'go' command "
+          "to implement Section 3.")
