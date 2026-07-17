@@ -308,23 +308,29 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     print(f"  SECTION 4: FULL ADS-BTD EVALUATION")
     print(f"{'='*60}")
 
-    # Load pooled max-energy data
+    # -- Load data --
     path = os.path.join("../data", model_folder, f"{dataset}_pooled_maxenergy.pt")
-    if not os.path.exists(path):
-        print(f"  [SKIP] {path} not found. Run 21_generate_maxpool_datasets.py first.")
-        return
-
-    data = torch.load(path, weights_only=False)
-    X_raw = torch.stack(data["all_emb"]).float()  # (N, 9, 4096)
-    y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
-    is_known = np.array(data["all_is_known"])
-    prompt_idx = np.array(data.get("prompt_indices",
+    if os.path.exists(path):
+        data = torch.load(path, weights_only=False)
+        X_raw = torch.stack(data["all_emb"]).float()
+        y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
+        is_known = np.array(data["all_is_known"])
+        prompt_idx = np.array(data.get("prompt_indices",
                                    data.get("all_prompt_indices",
                                             list(range(len(is_known))))))
+    else:
+        # Fallback: generate synthetic pilot data for testing
+        print(f"  [WARN] {path} not found — using synthetic pilot ({n_pilot} samples)")
+        N_syn = n_pilot * 10
+        X_raw = torch.randn(N_syn, 9, 4096)
+        y_all = np.random.randint(0, 2, N_syn)
+        is_known = np.ones(n_pilot, dtype=bool)
+        prompt_idx = np.repeat(np.arange(n_pilot), 10)
 
-    # HARP split
     N = len(y_all)
     ki = np.where(is_known)[0]
+    if len(ki) == 0:
+        ki = np.arange(len(is_known))  # fallback
     np.random.seed(42); np.random.shuffle(ki)
     s = int(len(ki) * 0.75)
     tp = set(ki[:s]); vp = set(ki[s:])
@@ -334,51 +340,71 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     t_idx = np.where(t_mask)[0]; v_idx = np.where(v_mask)[0]
     print(f"  Train={len(t_idx)}  Valid={len(v_idx)}")
 
-    # Add token dim for BTD: (N, 9, 4096) -> (N, 1, 9, 4096)
-    X_4d = X_raw.unsqueeze(1)  # (N, T=1, L=9, D=4096)
-
-    # Pre-clean
+    # Add token dim: (N, 9, 4096) -> (N, 1, 9, 4096)
+    X_4d = X_raw.unsqueeze(1)
     X_clean = robust_preclean(X_4d)
 
     # Dual-stream BTD
     print("  Running dual-stream BTD ...")
     h_S, h_R, eps_S, eps_R = dual_stream_btd(
         X_clean, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
-    F_btd = np.concatenate([h_S.numpy(), h_R.numpy()], axis=1)  # (N, 288)
+    h_S_np = h_S.numpy()
+    h_R_np = h_R.numpy()
+    eps_R_np = eps_R.numpy()
 
     # Spectral invariants
     print("  Extracting spectral invariants ...")
-    X_R_stream = X_clean @ P_R.float()  # (N, T=1, L=9, D=4096)
+    X_R_stream = X_clean @ P_R.float()
     s_all = extract_spectral_invariants(X_R_stream, None)
 
-    # Assemble features
-    F_new = np.concatenate([
-        h_S.numpy(),           # (N, 192)
-        h_R.numpy(),           # (N, 96)
-        s_all,                 # (N, 3)
-        eps_R.numpy().reshape(-1, 1),  # (N, 1)
-    ], axis=1)  # (N, 292)
-
-    # Whitening
-    print("  Ledoit-Wolf whitening ...")
-    lw = LedoitWolf()
-    F_train = lw.fit_transform(F_new[t_idx])
-    F_valid = lw.transform(F_new[v_idx])
+    # Assemble
+    F_spec = np.concatenate([h_R_np, s_all, eps_R_np.reshape(-1, 1)], axis=1)  # (N, 99)
+    F_full = np.concatenate([h_S_np, F_spec], axis=1)                           # (N, 291)
 
     # Variants
     variants = {
-        "V1: BTD core (288)":  (F_btd, 288),
-        "V2: Reasoning + Spectral (99)":  (np.concatenate([h_R.numpy(), s_all, eps_R.numpy().reshape(-1, 1)], axis=1), 99),
-        "V3: Full ADS-BTD (292)": (F_new, 292),
+        "V1: Semantic Core (192)":          (h_S_np, 192),
+        "V2: Reasoning + Spectral (99)":    (F_spec, 99),
+        "V3: Full ADS-BTD (291)":           (F_full, 291),
     }
 
-    print(f"\n  {'Variant':30s}  {'Dim':>5s}  {'RF':>8s}  {'LR':>8s}  {'MLP':>8s}")
-    print(f"  {'-'*30}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*8}")
-    best_rf = 0
+    # V0: optional old Phase 1 baseline
+    old_path = os.path.join("../data", model_folder, "truthfulqa_pooled_maxenergy.pt")
+    if os.path.exists(old_path) and os.path.exists(path):
+        try:
+            old = torch.load(old_path, weights_only=False)
+            X_old = torch.stack(old["all_emb"]).float()
+            L_old, D_old = X_old.shape[1], X_old.shape[2]
+            # Simple HOSVD on old data
+            X_f = X_old[t_idx].permute(1,0,2).reshape(L_old,-1)
+            AL = X_f @ X_f.T; _, UL = torch.linalg.eigh(AL); UL = torch.flip(UL[:,-5:],dims=[1])
+            X_d = X_old[t_idx].permute(2,0,1).reshape(D_old,-1)
+            AD = torch.zeros(D_old,D_old,dtype=torch.float32)
+            for st in range(0,len(t_idx)*L_old,50000):
+                en = min(st+50000,len(t_idx)*L_old)
+                AD.addmm_(X_d[:,st:en].float(), X_d[:,st:en].float().T)
+            _, UD = torch.linalg.eigh(AD); UD = torch.flip(UD[:,-64:],dims=[1])
+            tmp = X_old.float() @ UD
+            G_c = tmp.transpose(1,2) @ UL
+            F_old = G_c.transpose(1,2).reshape(len(X_old),-1).numpy()
+            variants["V0: Old Phase 1 HOSVD (320)"] = (F_old, 320)
+            print("  V0 (Old Phase 1) loaded")
+        except Exception as e:
+            print(f"  [WARN] V0 load failed: {e}")
+
+    # Ledoit-Wolf whitening
+    print("  Ledoit-Wolf whitening ...")
+    lw = LedoitWolf()
+
+    print(f"\n  {'Variant':35s}  {'Dim':>5s}  {'RF':>8s}  {'LR':>8s}  {'MLP':>8s}")
+    print(f"  {'-'*35}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*8}")
+    best = 0
     for vname, (feats, dim) in variants.items():
+        F_tr = lw.fit_transform(feats[t_idx])
+        F_va = lw.transform(feats[v_idx])
         scaler = StandardScaler()
-        tr = scaler.fit_transform(feats[t_idx])
-        va = scaler.transform(feats[v_idx])
+        tr = scaler.fit_transform(F_tr)
+        va = scaler.transform(F_va)
 
         rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
                                     random_state=42, n_jobs=-1)
@@ -392,11 +418,12 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
                             random_state=42)
         mlp.fit(tr, y_all[t_idx]); mlp_a = roc_auc_score(y_all[v_idx], mlp.predict_proba(va)[:,1])
 
-        if rf_a > best_rf: best_rf = rf_a
-        print(f"  {vname:30s}  {dim:5d}  {rf_a:8.4f}  {lr_a:8.4f}  {mlp_a:8.4f}")
+        if rf_a > best: best = rf_a
+        print(f"  {vname:35s}  {dim:5d}  {rf_a:8.4f}  {lr_a:8.4f}  {mlp_a:8.4f}")
 
-    print(f"\n  Best RF AUROC: {best_rf:.4f}")
-    if best_rf > 0.8094:
+    v1_rf = variants.get("V1: Semantic Core (192)", (None, 0))[1]
+    print(f"  Best RF AUROC: {best:.4f}")
+    if best > 0.8094:
         print(f"  >> ADS-BTD BROKE the 0.8094 HOSVD baseline!")
     else:
         print(f"  >> ADS-BTD did NOT break the 0.8094 HOSVD baseline.")
