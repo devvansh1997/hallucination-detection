@@ -71,10 +71,20 @@ def run_dummy_tests():
 
 # STEP 1-2: STANDALONE SAE EXTRACTION
 def extract_sae_features(model_folder, n_pilot):
+    from sae_lens import SAE
+
+    # Handle API changes across sae-lens v5.x / v6.x+
     try:
-        from sae_lens import SAE, get_pretrained_saes_directory
+        from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
     except ImportError:
-        raise RuntimeError("sae-lens not installed. pip install sae-lens")
+        try:
+            from sae_lens.loading.pretrained_saes_directory import get_pretrained_saes_directory
+        except ImportError:
+            try:
+                from sae_lens import pretrained_saes
+                get_pretrained_saes_directory = pretrained_saes.get_pretrained_saes_directory
+            except (ImportError, AttributeError):
+                get_pretrained_saes_directory = lambda: {}
 
     def load_layer_sae(layer_idx):
         directory = get_pretrained_saes_directory()
