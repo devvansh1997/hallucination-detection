@@ -290,6 +290,119 @@ def test_section3():
 
 
 # ============================================================================
+# SECTION 4: WHITENING, FUSION & CLASSIFIER EVALUATION
+# ============================================================================
+
+from sklearn.covariance import LedoitWolf
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score
+
+
+def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
+                     dataset="truthfulqa", n_pilot=10):
+    """Full pipeline on pilot data: load pooled tensors, BTD + spectral + classify."""
+    print(f"\n{'='*60}")
+    print(f"  SECTION 4: FULL ADS-BTD EVALUATION")
+    print(f"{'='*60}")
+
+    # Load pooled max-energy data
+    path = os.path.join(DATA_DIR, model_folder, f"{dataset}_pooled_maxenergy.pt")
+    if not os.path.exists(path):
+        print(f"  [SKIP] {path} not found. Run 21_generate_maxpool_datasets.py first.")
+        return
+
+    data = torch.load(path, weights_only=False)
+    X_raw = torch.stack(data["all_emb"]).float()  # (N, 9, 4096)
+    y_all = np.array([int(f) for f in data["all_hallucination_flag"]])
+    is_known = np.array(data["all_is_known"])
+    prompt_idx = np.array(data.get("prompt_indices",
+                                   data.get("all_prompt_indices",
+                                            list(range(len(is_known))))))
+
+    # HARP split
+    N = len(y_all)
+    ki = np.where(is_known)[0]
+    np.random.seed(42); np.random.shuffle(ki)
+    s = int(len(ki) * 0.75)
+    tp = set(ki[:s]); vp = set(ki[s:])
+    vp.update(np.where(~is_known)[0])
+    t_mask = np.array([prompt_idx[i] in tp for i in range(N)])
+    v_mask = np.array([prompt_idx[i] in vp for i in range(N)])
+    t_idx = np.where(t_mask)[0]; v_idx = np.where(v_mask)[0]
+    print(f"  Train={len(t_idx)}  Valid={len(v_idx)}")
+
+    # Add token dim for BTD: (N, 9, 4096) -> (N, 1, 9, 4096)
+    X_4d = X_raw.unsqueeze(1)  # (N, T=1, L=9, D=4096)
+
+    # Pre-clean
+    X_clean = robust_preclean(X_4d)
+
+    # Dual-stream BTD
+    print("  Running dual-stream BTD ...")
+    h_S, h_R, eps_S, eps_R = dual_stream_btd(
+        X_clean, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+    F_btd = np.concatenate([h_S.numpy(), h_R.numpy()], axis=1)  # (N, 288)
+
+    # Spectral invariants
+    print("  Extracting spectral invariants ...")
+    X_R_stream = X_clean @ P_R.float()  # (N, T=1, L=9, D=4096)
+    s_all = extract_spectral_invariants(X_R_stream, None)
+
+    # Assemble features
+    F_new = np.concatenate([
+        h_S.numpy(),           # (N, 192)
+        h_R.numpy(),           # (N, 96)
+        s_all,                 # (N, 3)
+        eps_R.numpy().reshape(-1, 1),  # (N, 1)
+    ], axis=1)  # (N, 292)
+
+    # Whitening
+    print("  Ledoit-Wolf whitening ...")
+    lw = LedoitWolf()
+    F_train = lw.fit_transform(F_new[t_idx])
+    F_valid = lw.transform(F_new[v_idx])
+
+    # Variants
+    variants = {
+        "V1: BTD core (288)":  (F_btd, 288),
+        "V2: Reasoning + Spectral (99)":  (np.concatenate([h_R.numpy(), s_all, eps_R.numpy().reshape(-1, 1)], axis=1), 99),
+        "V3: Full ADS-BTD (292)": (F_new, 292),
+    }
+
+    print(f"\n  {'Variant':30s}  {'Dim':>5s}  {'RF':>8s}  {'LR':>8s}  {'MLP':>8s}")
+    print(f"  {'-'*30}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*8}")
+    best_rf = 0
+    for vname, (feats, dim) in variants.items():
+        scaler = StandardScaler()
+        tr = scaler.fit_transform(feats[t_idx])
+        va = scaler.transform(feats[v_idx])
+
+        rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
+                                    random_state=42, n_jobs=-1)
+        rf.fit(tr, y_all[t_idx]); rf_a = roc_auc_score(y_all[v_idx], rf.predict_proba(va)[:,1])
+
+        lr = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+        lr.fit(tr, y_all[t_idx]); lr_a = roc_auc_score(y_all[v_idx], lr.predict_proba(va)[:,1])
+
+        mlp = MLPClassifier(hidden_layer_sizes=(128,), activation="relu", solver="adam",
+                            early_stopping=True, n_iter_no_change=10, max_iter=1000,
+                            random_state=42)
+        mlp.fit(tr, y_all[t_idx]); mlp_a = roc_auc_score(y_all[v_idx], mlp.predict_proba(va)[:,1])
+
+        if rf_a > best_rf: best_rf = rf_a
+        print(f"  {vname:30s}  {dim:5d}  {rf_a:8.4f}  {lr_a:8.4f}  {mlp_a:8.4f}")
+
+    print(f"\n  Best RF AUROC: {best_rf:.4f}")
+    if best_rf > 0.8094:
+        print(f"  >> ADS-BTD BROKE the 0.8094 HOSVD baseline!")
+    else:
+        print(f"  >> ADS-BTD did NOT break the 0.8094 HOSVD baseline.")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 if __name__ == "__main__":
@@ -297,5 +410,5 @@ if __name__ == "__main__":
     test_section1(V_S, V_R, P_S, P_R)
     test_section2()
     test_section3()
-    print("[PAUSED] Section 3 verified. Waiting for explicit 'go' command "
-          "to implement Section 4.")
+    evaluate_ads_btd(V_S, V_R, P_S, P_R)
+    print("\n[DONE] All 4 sections complete.")
