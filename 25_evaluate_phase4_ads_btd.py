@@ -510,21 +510,17 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
             is_correct = (r["rougeL"]>=0.7) or (mc>0.5)
             if is_correct: any_correct = True
 
-            # Build (1, T, L, D) from cached residuals
-            layer_tensors = []
+            # Build (1, 1, L, D) — mean-pool across tokens, stack layers
+            layer_vecs = []
             for l in LAYERS:
                 stored = resid_cache[l]
                 if len(stored) < 2:
-                    layer_tensors.append(torch.zeros(1, 1, 4096))
+                    layer_vecs.append(torch.zeros(1, 4096))
                 else:
                     gen_cpu = stored[1:]
-                    layer_tensors.append(torch.cat([s[b:b+1, -1:, :] for s in gen_cpu], dim=1))
-            X_beam = torch.stack(layer_tensors, dim=1).permute(0, 3, 1, 2)  # (1, T, L, D) approx
-            if X_beam.shape[2] == 0: continue
-
-            # Repack: (1, T, L, D) -> need T=1 for our pooling BTD
-            # Use layer-wise mean across T as proxy for pooled features
-            X_pooled = X_beam.mean(dim=1, keepdim=True)  # (1, 1, L, D)
+                    tok_vecs = [s[b:b+1, -1:, :].squeeze(0) for s in gen_cpu]  # list of (T_i, 4096)
+                    layer_vecs.append(torch.cat(tok_vecs, dim=0).mean(dim=0, keepdim=True))  # (1, 4096)
+            X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1, 1, 9, 4096) -> (N=1, T=1, L=9, D=4096)
 
             h_S, h_R, eps_S, eps_R = dual_stream_btd(
                 X_pooled, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
