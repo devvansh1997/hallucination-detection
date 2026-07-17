@@ -261,7 +261,10 @@ def test_section3():
     # Test 3A: Positive definiteness
     N, T = 4, 10
     rho_syn = torch.randn(N, T, 32)
-    X_stream = rho_syn.unsqueeze(2).unsqueeze(2).expand(-1, -1, 1, 1)  # (N,T,1,1)
+    # Wrap in (N, T, L, D) format — L=1, D=32 for simplicity
+    X_stream = rho_syn.unsqueeze(2).unsqueeze(3)  # (N, T, 1, 1) -> wrong
+    # Correct: (N, T, L=1, D=32)
+    X_stream = rho_syn.unsqueeze(2)  # (N, T, 1, 32)
     s = extract_spectral_invariants(X_stream, None)
     assert not np.isnan(s).any(), "NaN in spectral invariants"
     print(f"  Test 3A: s1={s[:,0].mean():.3f}+-{s[:,0].std():.3f}  "
@@ -272,11 +275,10 @@ def test_section3():
     t = torch.arange(T2, dtype=torch.float32)
     # Exploding: norm ~ exp(0.3*t)
     rho_explode = torch.randn(1, T2, 32) * torch.exp(0.3 * t).unsqueeze(1).unsqueeze(0)
-    X_ex = rho_explode.unsqueeze(2).unsqueeze(2)
+    X_ex = rho_explode.unsqueeze(2)  # (1, T2, 1, 32)
     s_ex = extract_spectral_invariants(X_ex, None)
-    # Decaying: norm ~ exp(-0.1*t)
     rho_decay = torch.randn(1, T2, 32) * torch.exp(-0.1 * t).unsqueeze(1).unsqueeze(0)
-    X_dec = rho_decay.unsqueeze(2).unsqueeze(2)
+    X_dec = rho_decay.unsqueeze(2)  # (1, T2, 1, 32)
     s_dec = extract_spectral_invariants(X_dec, None)
 
     print(f"  Test 3B: explode s3={s_ex[0,2]:.4f} (>0 expected)  "
