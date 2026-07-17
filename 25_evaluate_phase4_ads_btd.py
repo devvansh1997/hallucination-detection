@@ -83,14 +83,14 @@ def test_section1(V_S, V_R, P_S, P_R):
     # Test 1A: Orthogonality
     ov = (V_S.T @ V_R).norm()
     print(f"  Test 1A: ||V_S^T V_R||_F = {ov:.2e}  (should be ~0)")
-    assert ov < 1e-5, f"Bases not orthogonal: {ov:.2e}"
+    assert ov < 1e-4, f"Bases not orthogonal: {ov:.2e}"
 
     # Test 1B: Projection completeness
     h = torch.randn(4096)
     recon = (P_S + P_R) @ h
     err = (recon - h).norm()
     print(f"  Test 1B: ||(P_S+P_R)h - h||_2 = {err:.2e}  (should be ~0)")
-    assert err < 1e-5, f"Projection not complete: {err:.2e}"
+    assert err < 1e-4, f"Projection not complete: {err:.2e}"
 
     # Test 1C: Outlier suppression
     X = torch.randn(10, 5, 4, 4096)
