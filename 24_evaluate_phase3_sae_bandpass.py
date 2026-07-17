@@ -115,7 +115,13 @@ def extract_sae_features(model_folder, n_pilot):
                 print(f"  [SAE] Trying release='{release}', sae_id='{sae_id}' ...")
                 sae, _, _ = SAE.from_pretrained(release=release, sae_id=sae_id,
                                                  device=str(device))
-                print(f"  [SAE] SUCCESS")
+                # Cast to bfloat16, strip decoder to save VRAM
+                sae = sae.to(dtype=torch.bfloat16, device=device)
+                for attr in ["W_dec", "b_dec"]:
+                    if hasattr(sae, attr):
+                        delattr(sae, attr)
+                gc.collect(); torch.cuda.empty_cache()
+                print(f"  [SAE] SUCCESS (encoder only, bf16)")
                 return sae
             except Exception:
                 continue
@@ -160,19 +166,20 @@ def extract_sae_features(model_folder, n_pilot):
             eos_ids.add(tok)
 
     all_features, all_flags, all_is_known, all_pi = [], [], [], []
-    resid = {l: [] for l in LAYERS}
-    hooks = []
+    # CPU cache: captures raw residuals during generation, encodes after
+    resid_cache = {l: [] for l in LAYERS}
+    hooks_resid = []
     for l in LAYERS:
-        def h(l=l, r=resid):
-            return lambda m, inp, out: r[l].append(out[0].detach())
-        hooks.append(model.model.layers[l].register_forward_hook(h()))
+        def h(l=l, r=resid_cache):
+            return lambda m, inp, out: r[l].append(out[0].detach().cpu())
+        hooks_resid.append(model.model.layers[l].register_forward_hook(h()))
 
     t0 = time.time()
     for pi in range(n_pilot):
         prompt = prompts[pi]
         corr = [corr_list[pi]]
         wrg = [str(w) for w in wrg_list[pi]] if wrg_list[pi] else []
-        for l in LAYERS: resid[l] = []
+        for l in LAYERS: resid_cache[l] = []
 
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         prompt_len = inputs.input_ids.shape[1]
@@ -200,21 +207,21 @@ def extract_sae_features(model_folder, n_pilot):
             is_correct = (r["rougeL"]>=0.7) or (mc>0.5)
             if is_correct: any_correct = True
 
+            # SAE encode: process layer-by-layer, GPU per layer, CPU offload after
             layer_latents = []
             for l in LAYERS:
-                stored = resid[l]
+                stored = resid_cache[l]
                 if len(stored) < 2:
                     layer_latents.append(torch.zeros(M)); continue
-                sae_outs = []
-                for step_t in stored[1:]:
-                    h = step_t[b:b+1, -1:, :]
-                    lat = saes[l].encode(h)
-                    sae_outs.append(lat.squeeze(0).squeeze(0).cpu())
-                if sae_outs:
-                    stack = torch.stack(sae_outs, dim=0)
-                    layer_latents.append(torch.relu(stack).max(dim=0).values)
-                else:
-                    layer_latents.append(torch.zeros(M))
+                gen_cpu = stored[1:]  # list of (B, 1, D) on CPU
+                x_cat = torch.cat([s[b:b+1, -1:, :] for s in gen_cpu], dim=1).to(
+                    device=device, dtype=torch.bfloat16)
+                with torch.no_grad():
+                    lat = saes[l].encode(x_cat)
+                pooled = torch.relu(lat).max(dim=1).values.squeeze(0).cpu()
+                layer_latents.append(pooled)
+                del x_cat, lat; torch.cuda.empty_cache()
+
             all_features.append(torch.cat(layer_latents, dim=0))
             all_flags.append(not is_correct)
             all_pi.append(pi)
@@ -227,7 +234,7 @@ def extract_sae_features(model_folder, n_pilot):
             print(f"  [{pi+1:3d}/{n_pilot}] known={sum(all_is_known)}  "
                   f"hall={sum(all_flags)/len(all_flags)*100:.0f}%  {e/60:.0f}m", flush=True)
 
-    for h in hooks: h.remove()
+    for h in hooks_resid: h.remove()
 
     out_dir = os.path.join(DATA_DIR, args.model_folder)
     os.makedirs(out_dir, exist_ok=True)
