@@ -471,7 +471,8 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
     hooks = []
     for l in LAYERS:
         def h(l=l, r=resid_cache):
-            return lambda m, inp, out: r[l].append(out[0].detach().cpu())
+            return lambda m, inp, out: r[l].append(
+                (out[0] if isinstance(out, tuple) else out).detach().cpu())
         hooks.append(model.model.layers[l].register_forward_hook(h()))
 
     all_h_S, all_h_R, all_spec, all_epsR, all_flags = [], [], [], [], []
