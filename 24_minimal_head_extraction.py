@@ -303,6 +303,60 @@ for name, feats in variants.items():
     assert not np.isnan(feats).any(), f"{name}: NaN detected"
     print(f"  [PASS] {name:35s}  shape={feats.shape}")
 
+# ============================================================================
+# STEP 6: Classification (HARP split + RF/LR/MLP)
+# ============================================================================
+print(f"\n[Step 6] Classification with HARP split")
+
+y_all = np.array(all_flags)
+N_beams = len(y_all)
+prompt_idx = np.array(all_pi)
+is_known_arr = np.array(all_is_known)
+
+known_prompts = np.where(is_known_arr)[0]
+np.random.seed(42); np.random.shuffle(known_prompts)
+s = int(len(known_prompts) * 0.75)
+tp = set(known_prompts[:s]); vp = set(known_prompts[s:])
+unk = np.where(~is_known_arr)[0]
+vp.update(unk)
+t_mask = np.array([prompt_idx[i] in tp for i in range(N_beams)])
+v_mask = np.array([prompt_idx[i] in vp for i in range(N_beams)])
+t_idx = np.where(t_mask)[0]; v_idx = np.where(v_mask)[0]
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score
+
+print(f"  Train={len(t_idx)}  Valid={len(v_idx)}", flush=True)
+
+results = {}
+for vname, feats in variants.items():
+    scaler = StandardScaler()
+    tr = scaler.fit_transform(feats[t_idx])
+    va = scaler.transform(feats[v_idx])
+
+    res = {}
+    rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
+                                random_state=42, n_jobs=-1)
+    rf.fit(tr, y_all[t_idx])
+    res["RF"] = roc_auc_score(y_all[v_idx], rf.predict_proba(va)[:, 1])
+
+    lr = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+    lr.fit(tr, y_all[t_idx])
+    res["LR"] = roc_auc_score(y_all[v_idx], lr.predict_proba(va)[:, 1])
+
+    mlp = MLPClassifier(hidden_layer_sizes=(128,), activation="relu",
+                        solver="adam", early_stopping=True,
+                        n_iter_no_change=10, max_iter=1000, random_state=42)
+    mlp.fit(tr, y_all[t_idx])
+    res["MLP"] = roc_auc_score(y_all[v_idx], mlp.predict_proba(va)[:, 1])
+
+    results[vname] = res
+    print(f"  {vname:35s}  RF={res['RF']:.4f}  LR={res['LR']:.4f}  MLP={res['MLP']:.4f}")
+
+print(f"\n  NOTE: {N_PROMPTS}-prompt pilot — AUROC indicative only.")
 print(f"\n{'='*60}")
-print(f"  ALL STEPS PASSED — 5/5")
+print(f"  ALL STEPS PASSED — 6/6")
 print(f"{'='*60}")
