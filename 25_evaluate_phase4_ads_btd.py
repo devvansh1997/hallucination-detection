@@ -449,19 +449,25 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
         for tok in tokenizer.encode(s, add_special_tokens=False):
             eos_ids.add(tok)
 
-    # Hooks on layers 15-23
+    from tqdm import tqdm
+
+    # Hooks keep tensors on GPU — no CPU sync during generation
     resid_cache = {l: [] for l in LAYERS}
     hooks = []
     for l in LAYERS:
         def h(l=l, r=resid_cache):
             return lambda m, inp, out: r[l].append(
-                (out[0] if isinstance(out, tuple) else out).detach().cpu())
+                (out[0] if isinstance(out, tuple) else out).detach())
         hooks.append(model.model.layers[l].register_forward_hook(h()))
+
+    # Move projections to GPU for fast matmul
+    P_S_gpu = P_S.float().to("cuda")
+    P_R_gpu = P_R.float().to("cuda")
 
     all_h_S, all_h_R, all_spec, all_epsR, all_flags = [], [], [], [], []
     all_is_known = []
 
-    for pi in range(len(prompts)):
+    for pi in tqdm(range(len(prompts)), desc="Extracting ADS-BTD"):
         prompt = prompts[pi]
         corr = [corr_list[pi]]
         wrg = [str(w) for w in wrg_list[pi]] if wrg_list[pi] else []
@@ -473,7 +479,7 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
         with torch.no_grad():
             outputs = model.generate(
                 **inputs, max_new_tokens=64, eos_token_id=list(eos_ids),
-                do_sample=True, temperature=0.5, top_k=5, top_p=0.99,
+                do_sample=False,
                 num_beams=10, num_return_sequences=10,
                 return_dict_in_generate=True,
                 pad_token_id=tokenizer.eos_token_id, early_stopping=True)
@@ -493,26 +499,26 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
             is_correct = (r["rougeL"]>=0.7) or (mc>0.5)
             if is_correct: any_correct = True
 
-            # Build (1, 1, L, D) — mean-pool across tokens, stack layers
+            # Build (1, 1, L, D) on GPU, BTD proj on GPU, move features to CPU
             layer_vecs = []
             for l in LAYERS:
                 stored = resid_cache[l]
                 if len(stored) < 2:
-                    layer_vecs.append(torch.zeros(1, 4096))
+                    layer_vecs.append(torch.zeros(1, 4096, device="cuda"))
                 else:
-                    gen_cpu = stored[1:]
-                    tok_vecs = [s[b:b+1, -1:, :].squeeze(0) for s in gen_cpu]  # list of (T_i, 4096)
-                    layer_vecs.append(torch.cat(tok_vecs, dim=0).mean(dim=0, keepdim=True))  # (1, 4096)
-            X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1, 1, 9, 4096) -> (N=1, T=1, L=9, D=4096)
+                    gen_gpu = stored[1:]
+                    tok_vecs = [s[b:b+1, -1:, :] for s in gen_gpu]
+                    layer_vecs.append(torch.cat(tok_vecs, dim=0).mean(dim=0, keepdim=True))
+            X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1,1,9,4096) on GPU
 
             h_S, h_R, eps_S, eps_R = dual_stream_btd(
-                X_beam.float(), P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
-            X_R_s = X_beam.float() @ P_R.float()
-            s_n = extract_spectral_invariants(X_R_s, None)
-            all_h_S.append(h_S[0])
-            all_h_R.append(h_R[0])
+                X_beam.float(), P_S_gpu, P_R_gpu, r_L=3, r_S=64, r_R=32)
+            X_R_s = X_beam.float() @ P_R_gpu
+            s_n = extract_spectral_invariants(X_R_s.cpu(), None)
+            all_h_S.append(h_S[0].cpu())
+            all_h_R.append(h_R[0].cpu())
             all_spec.append(s_n[0])
-            all_epsR.append(eps_R[0].item())
+            all_epsR.append(eps_R[0].cpu().item())
             all_flags.append(not is_correct)
 
         all_is_known.append(any_correct)
