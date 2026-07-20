@@ -479,7 +479,7 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
         with torch.no_grad():
             outputs = model.generate(
                 **inputs, max_new_tokens=64, eos_token_id=list(eos_ids),
-                do_sample=False,
+                do_sample=True, temperature=0.7, top_p=0.95,
                 num_beams=10, num_return_sequences=10,
                 return_dict_in_generate=True,
                 pad_token_id=tokenizer.eos_token_id, early_stopping=True)
