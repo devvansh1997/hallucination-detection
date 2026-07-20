@@ -309,8 +309,9 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     # -- Load data (try real extracted features first, fallback to maxenergy, then synthetic) --
     real_path = os.path.join("../data", model_folder, "truthfulqa_ads_btd_features.pt")
     old_path  = os.path.join("../data", model_folder, f"{dataset}_pooled_maxenergy.pt")
+    have_real = os.path.exists(real_path)
 
-    if os.path.exists(real_path):
+    if have_real:
         print(f"  Loading real ADS-BTD features: {real_path}")
         rdata = torch.load(real_path, weights_only=False)
         h_S_np = rdata["h_S"].float().numpy()
