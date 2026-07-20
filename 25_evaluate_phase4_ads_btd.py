@@ -383,6 +383,7 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
     print(f"  {'-'*35}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*8}")
     best = 0
     for vname, (feats, dim) in variants.items():
+        feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
         scaler = StandardScaler()
         tr = scaler.fit_transform(feats[t_idx])
         va = scaler.transform(feats[v_idx])
