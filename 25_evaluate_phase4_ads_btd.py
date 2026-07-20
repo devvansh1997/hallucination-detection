@@ -507,9 +507,9 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
                     layer_vecs.append(torch.zeros(1, 4096, device="cuda"))
                 else:
                     gen_gpu = stored[1:]
-                    tok_vecs = [s[b:b+1, -1:, :] for s in gen_gpu]
-                    layer_vecs.append(torch.cat(tok_vecs, dim=0).mean(dim=0, keepdim=True))
-            X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1,1,9,4096) on GPU
+                    tok_vecs = [s[b:b+1, -1:, :].squeeze(0) for s in gen_gpu]  # each (1, 4096)
+                    layer_vecs.append(torch.cat(tok_vecs, dim=0).mean(dim=0, keepdim=True))  # (1, 4096)
+            X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1, 1, 9, 4096)
 
             h_S, h_R, eps_S, eps_R = dual_stream_btd(
                 X_beam.float(), P_S_gpu, P_R_gpu, r_L=3, r_S=64, r_R=32)
