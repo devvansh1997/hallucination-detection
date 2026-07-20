@@ -291,7 +291,6 @@ def test_section3():
 # SECTION 4: WHITENING, FUSION & CLASSIFIER EVALUATION
 # ============================================================================
 
-from sklearn.covariance import LedoitWolf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
@@ -377,19 +376,16 @@ def evaluate_ads_btd(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruct",
         "V3: Full ADS-BTD (291)":           (F_full, 291),
     }
 
-    # Ledoit-Wolf whitening
-    print("  Ledoit-Wolf whitening ...")
-    lw = LedoitWolf()
+    # StandardScaler only (LedoitWolf has no transform in sklearn)
+    print("  Scaling features ...")
 
     print(f"\n  {'Variant':35s}  {'Dim':>5s}  {'RF':>8s}  {'LR':>8s}  {'MLP':>8s}")
     print(f"  {'-'*35}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*8}")
     best = 0
     for vname, (feats, dim) in variants.items():
-        F_tr = lw.fit_transform(feats[t_idx])
-        F_va = lw.transform(feats[v_idx])
         scaler = StandardScaler()
-        tr = scaler.fit_transform(F_tr)
-        va = scaler.transform(F_va)
+        tr = scaler.fit_transform(feats[t_idx])
+        va = scaler.transform(feats[v_idx])
 
         rf = RandomForestClassifier(n_estimators=200, class_weight="balanced",
                                     random_state=42, n_jobs=-1)
