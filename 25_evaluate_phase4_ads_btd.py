@@ -506,8 +506,8 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
             X_beam = torch.stack(layer_vecs, dim=1).unsqueeze(1)  # (1, 1, 9, 4096) -> (N=1, T=1, L=9, D=4096)
 
             h_S, h_R, eps_S, eps_R = dual_stream_btd(
-                X_beam, P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
-            X_R_s = X_beam @ P_R.float()
+                X_beam.float(), P_S.float(), P_R.float(), r_L=3, r_S=64, r_R=32)
+            X_R_s = X_beam.float() @ P_R.float()
             s_n = extract_spectral_invariants(X_R_s, None)
             all_h_S.append(h_S[0])
             all_h_R.append(h_R[0])
