@@ -434,9 +434,11 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
 
     from datasets import load_dataset
     ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
-    prompts = [str(ds["question"][i]) for i in range(n_pilot)]
-    corr_list = [str(ds["best_answer"][i]) for i in range(n_pilot)]
-    wrg_list = [list(ds["incorrect_answers"][i]) for i in range(n_pilot)]
+    prompts = [str(ds["question"][i]) for i in range(len(ds))]
+    if n_pilot > 0:
+        prompts = prompts[:n_pilot]
+    corr_list = [str(ds["best_answer"][i]) for i in range(len(prompts))]
+    wrg_list = [list(ds["incorrect_answers"][i]) for i in range(len(prompts))]
 
     import evaluate
     rouge = evaluate.load("rouge")
@@ -459,7 +461,7 @@ def extract_real_features(V_S, V_R, P_S, P_R, model_folder="llama-3.1-8b-instruc
     all_h_S, all_h_R, all_spec, all_epsR, all_flags = [], [], [], [], []
     all_is_known = []
 
-    for pi in range(n_pilot):
+    for pi in range(len(prompts)):
         prompt = prompts[pi]
         corr = [corr_list[pi]]
         wrg = [str(w) for w in wrg_list[pi]] if wrg_list[pi] else []
@@ -541,8 +543,14 @@ if __name__ == "__main__":
     test_section1(V_S, V_R, P_S, P_R)
     test_section2()
     test_section3()
-    # Extract real features (or load cached)
-    real_data = extract_real_features(V_S, V_R, P_S, P_R, n_pilot=5)
+    # Delete old pilot cache, extract full dataset
+    old_cache = os.path.join("../data", "llama-3.1-8b-instruct",
+                             "truthfulqa_ads_btd_features.pt")
+    if os.path.exists(old_cache):
+        os.remove(old_cache)
+        print(f"  Deleted old pilot cache: {old_cache}")
+
+    real_data = extract_real_features(V_S, V_R, P_S, P_R, n_pilot=0)  # 0 = full dataset
     # Evaluate
     evaluate_ads_btd(V_S, V_R, P_S, P_R)
     print("\n[DONE] All 4 sections complete.")
