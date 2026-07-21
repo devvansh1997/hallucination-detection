@@ -285,7 +285,12 @@ def main():
         inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
         prompt_len = inputs.input_ids.shape[1]
 
-        gen = torch.Generator(device=device).manual_seed(args.gen_seed * 100003 + idx)
+        # this transformers version's generate() has no generator= kwarg (it's not part
+        # of its public API here -- _validate_model_kwargs rejects it); seed the global
+        # RNG deterministically per-prompt instead, which gives the same reproducibility.
+        prompt_seed = args.gen_seed * 100003 + idx
+        torch.manual_seed(prompt_seed)
+        torch.cuda.manual_seed_all(prompt_seed)
         with torch.no_grad():
             outputs = model.generate(
                 **inputs, max_new_tokens=gen_cfg["max_new_tokens"], eos_token_id=list(eos_ids),
@@ -293,7 +298,7 @@ def main():
                 top_k=gen_cfg["top_k"], top_p=gen_cfg["top_p"],
                 num_beams=gen_cfg["num_beams"], num_return_sequences=gen_cfg["num_return_sequences"],
                 output_hidden_states=True, return_dict_in_generate=True,
-                pad_token_id=tokenizer.eos_token_id, early_stopping=True, generator=gen)
+                pad_token_id=tokenizer.eos_token_id, early_stopping=True)
 
         hidden_states = outputs.hidden_states
         gen_ids_full = outputs.sequences[:, prompt_len:]
