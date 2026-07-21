@@ -24,10 +24,10 @@ import importlib.util
 import json
 import os
 import sys
-import time
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,9 +71,10 @@ def derive_all_streams(raw_store_dir, route):
     prompt_ids, beam_idxs, labels = [], [], []
     band_final_list = []   # for route N's 2d, kept in beam order
 
-    t0 = time.time()
-    n_done = 0
-    for shard_path in shard_paths:
+    n_beams_total = meta.get("n_beams")
+    bar = tqdm(total=n_beams_total, desc="[Part 2] deriving velocity/kinematic/re-pooling", unit="beam")
+    for shard_i, shard_path in enumerate(shard_paths):
+        bar.set_postfix_str(f"shard {shard_i+1}/{len(shard_paths)}")
         raw, offsets, pid, bidx, lab = gate_mod.load_raw_state_shard(shard_path)
         n_beams_shard = len(pid)
         for i in range(n_beams_shard):
@@ -91,9 +92,8 @@ def derive_all_streams(raw_store_dir, route):
                 band_final_list.append(h["final_norm"])
 
             prompt_ids.append(int(pid[i])); beam_idxs.append(int(bidx[i])); labels.append(int(lab[i]))
-            n_done += 1
-        if n_done % 500 < n_beams_shard:
-            print(f"  {n_done} beams derived ({time.time()-t0:.0f}s elapsed)")
+            bar.update(1)
+    bar.close()
 
     packed = vel_mod.pack_velocity_dataset(v95_list, v05_list, kin_list, s95_list, s05_list,
                                             prompt_ids, beam_idxs, labels)

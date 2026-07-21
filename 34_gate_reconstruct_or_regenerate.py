@@ -54,6 +54,7 @@ import time
 import numpy as np
 import torch
 import yaml
+from tqdm import tqdm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
@@ -352,7 +353,8 @@ def run_route_n(model_folder, dataset, gen_seed, out_dir, batch_size=8):
     per_beam_raw = []
     t0 = time.time()
 
-    for idx, sample in enumerate(samples):
+    prompt_bar = tqdm(list(enumerate(samples)), desc="[Route N] generation", unit="prompt")
+    for idx, sample in prompt_bar:
         inputs = tokenizer(sample["prompt_text"], return_tensors="pt").to(device)
         prompt_len = inputs.input_ids.shape[1]
         torch.manual_seed(gen_seed * 100003 + idx); torch.cuda.manual_seed_all(gen_seed * 100003 + idx)
@@ -408,8 +410,12 @@ def run_route_n(model_folder, dataset, gen_seed, out_dir, batch_size=8):
         all_prompt_idx.extend([idx] * gen_ids_full.shape[0])
         del outputs, hidden_states
         torch.cuda.empty_cache(); gc.collect()
-        if idx % 50 == 0:
-            print(f"  {idx}/{len(samples)}  ({time.time()-t0:.0f}s elapsed)")
+        n_beams_so_far = len(all_decoded_text)
+        n_halluc_so_far = sum(all_flags)
+        prompt_bar.set_postfix_str(f"{n_beams_so_far} beams, {n_halluc_so_far} hallucinated so far")
+    prompt_bar.close()
+    print(f"[Route N] Generation complete: {len(samples)} prompts, {len(all_decoded_text)} beams "
+          f"({time.time()-t0:.0f}s total)")
 
     n_beams = len(all_decoded_text)
     labels = all_flags
@@ -610,8 +616,9 @@ def run_route_r(manifest, model_folder, dataset, found_texts, out_dir, batch_siz
 
     recomputed_z_band_mean = np.zeros_like(stored_z_band_mean)
     per_beam_raw = []
-    t0 = time.time()
-    for start in range(0, n_beams, batch_size):
+    batch_starts = list(range(0, n_beams, batch_size))
+    batch_bar = tqdm(batch_starts, desc="[Route R] re-forward + fingerprint", unit="batch")
+    for start in batch_bar:
         end = min(start + batch_size, n_beams)
         batch = all_ids[start:end]
         lengths = [len(ids) for ids, _ in batch]
@@ -639,8 +646,8 @@ def run_route_r(manifest, model_folder, dataset, found_texts, out_dir, batch_siz
             if h_final.shape[0] > 0:
                 z_band_tok = h_final @ V_R_dev.T.to(h_final.dtype)
                 recomputed_z_band_mean[beam_i] = z_band_tok.mean(dim=0).float().cpu().numpy()
-        if start % (batch_size * 20) == 0:
-            print(f"    {end}/{n_beams}  ({time.time()-t0:.0f}s elapsed)")
+        batch_bar.set_postfix_str(f"{end}/{n_beams} beams")
+    batch_bar.close()
 
     pass_rate, cos = fingerprint_verify(recomputed_z_band_mean, stored_z_band_mean)
     print(f"  Fingerprint verification: {pass_rate*100:.2f}% of beams have cosine > 0.999 "

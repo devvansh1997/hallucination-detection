@@ -26,6 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -91,21 +92,27 @@ PREPROCESS_VARIANTS = {
 }
 
 
-def run_core_variant(X_raw, y, prompt_idx, folds, preprocess_fn, r_l, r_d, seed=SEED):
+def run_core_variant(X_raw, y, prompt_idx, folds, preprocess_fn, r_l, r_d, seed=SEED, progress_label="core"):
     n_beams = X_raw.shape[0]
     oof_rf = np.full(n_beams, np.nan); oof_lr = np.full(n_beams, np.nan)
     fold_rf, fold_lr = [], []
     core_by_fold = []
-    for fold_i, (tr, va) in enumerate(folds):
+    bar = tqdm(list(enumerate(folds)), desc=f"[{progress_label}] folds", unit="fold", leave=False)
+    for fold_i, (tr, va) in bar:
+        bar.set_postfix_str("scaling+Tucker")
         X_scaled = preprocess_fn(X_raw, tr)
         U_L, U_D = s01.compute_ul_ud(X_scaled[tr], r_l, r_d)
         core = s01.project_core(X_scaled, U_L, U_D)
         core_by_fold.append(core)
 
+        bar.set_postfix_str("fitting RF")
         rf_scores = s01.fit_eval("RF", core[tr], y[tr], core[va], seed + fold_i)
         oof_rf[va] = rf_scores; fold_rf.append(float(roc_auc_score(y[va], rf_scores)))
+        bar.set_postfix_str("fitting LR")
         lr_scores = s01.fit_eval("LR", core[tr], y[tr], core[va], seed + fold_i)
         oof_lr[va] = lr_scores; fold_lr.append(float(roc_auc_score(y[va], lr_scores)))
+        bar.set_postfix_str(f"fold {fold_i+1}/{len(folds)} done, RF auroc={fold_rf[-1]:.3f}")
+    bar.close()
 
     return ({"RF": summarize_oof(oof_rf, y, prompt_idx, fold_rf, seed),
               "LR": summarize_oof(oof_lr, y, prompt_idx, fold_lr, seed)},
@@ -114,10 +121,14 @@ def run_core_variant(X_raw, y, prompt_idx, folds, preprocess_fn, r_l, r_d, seed=
 
 def run_hygiene_ladder(X, y, prompt_idx, folds, r_l, r_d, seed=SEED):
     results, oofs = {}, {}
-    for vname, fn in PREPROCESS_VARIANTS.items():
-        summary, oof, _ = run_core_variant(X, y, prompt_idx, folds, fn, r_l, r_d, seed)
+    variant_bar = tqdm(list(PREPROCESS_VARIANTS.items()), desc="[B3 hygiene ladder] variants", unit="variant")
+    for vname, fn in variant_bar:
+        variant_bar.set_postfix_str(vname)
+        summary, oof, _ = run_core_variant(X, y, prompt_idx, folds, fn, r_l, r_d, seed, progress_label=vname)
         results[vname] = summary
         oofs[vname] = oof
+        tqdm.write(f"  [{vname}] RF pooled={summary['RF']['pooled_oof_auroc']:.4f}")
+    variant_bar.close()
 
     vanilla_oof = oofs["vanilla_mad"]["RF"]
     deltas = {}
@@ -142,21 +153,27 @@ def run_velocity_condition(V_concat, y, prompt_idx, core_by_fold, folds, r_l=4, 
     oof_fused_rf = np.full(n_beams, np.nan); oof_fused_lr = np.full(n_beams, np.nan)
     fold_vrf, fold_vlr, fold_frf, fold_flr = [], [], [], []
 
-    for fold_i, (tr, va) in enumerate(folds):
+    bar = tqdm(list(enumerate(folds)), desc="[B1 velocity-core] folds", unit="fold", leave=False)
+    for fold_i, (tr, va) in bar:
+        bar.set_postfix_str("scaling+Tucker (8192-channel, slower than static core)")
         Vs = s01.mad_scale(V_concat, tr)
         U_L, U_D = s01.compute_ul_ud(Vs[tr], r_l, r_d)
         vcore = s01.project_core(Vs, U_L, U_D)      # (n_beams, r_l*r_d) = 256-dim
 
+        bar.set_postfix_str("velocity-only RF/LR")
         rf_v = s01.fit_eval("RF", vcore[tr], y[tr], vcore[va], seed + fold_i)
         oof_vonly_rf[va] = rf_v; fold_vrf.append(float(roc_auc_score(y[va], rf_v)))
         lr_v = s01.fit_eval("LR", vcore[tr], y[tr], vcore[va], seed + fold_i)
         oof_vonly_lr[va] = lr_v; fold_vlr.append(float(roc_auc_score(y[va], lr_v)))
 
+        bar.set_postfix_str("fused RF/LR")
         core_this = core_by_fold[fold_i]
         rf_f, lr_f = residualize_fuse_eval(core_this[tr], core_this[va], vcore[tr], vcore[va],
                                             y[tr], y[va], seed + fold_i)
         oof_fused_rf[va] = rf_f; fold_frf.append(float(roc_auc_score(y[va], rf_f)))
         oof_fused_lr[va] = lr_f; fold_flr.append(float(roc_auc_score(y[va], lr_f)))
+        bar.set_postfix_str(f"fold {fold_i+1}/{len(folds)} done")
+    bar.close()
 
     return {
         "velocity_only": {"RF": summarize_oof(oof_vonly_rf, y, prompt_idx, fold_vrf, seed),
@@ -178,7 +195,8 @@ def run_kinematic_condition(kin, y, prompt_idx, core_by_fold, folds, seed=SEED):
     oof_fused_rf = np.full(n_beams, np.nan); oof_fused_lr = np.full(n_beams, np.nan)
     fold_krf, fold_klr, fold_frf, fold_flr = [], [], [], []
 
-    for fold_i, (tr, va) in enumerate(folds):
+    bar = tqdm(list(enumerate(folds)), desc="[B2 kinematic] folds", unit="fold", leave=False)
+    for fold_i, (tr, va) in bar:
         rf_k = s01.fit_eval("RF", kin[tr], y[tr], kin[va], seed + fold_i)
         oof_konly_rf[va] = rf_k; fold_krf.append(float(roc_auc_score(y[va], rf_k)))
 
@@ -193,6 +211,8 @@ def run_kinematic_condition(kin, y, prompt_idx, core_by_fold, folds, seed=SEED):
                                             y[tr], y[va], seed + fold_i)
         oof_fused_rf[va] = rf_f; fold_frf.append(float(roc_auc_score(y[va], rf_f)))
         oof_fused_lr[va] = lr_f; fold_flr.append(float(roc_auc_score(y[va], lr_f)))
+        bar.set_postfix_str(f"fold {fold_i+1}/{len(folds)} done")
+    bar.close()
 
     return {
         "kinematic_only": {"RF": summarize_oof(oof_konly_rf, y, prompt_idx, fold_krf, seed),
@@ -211,7 +231,8 @@ def run_repooling_ablation(S_concat, y, prompt_idx, vanilla_core_oof_rf, folds, 
     """S_concat: (n_beams, 9, 8192) = concat(S95, S05). Standalone comparison against the
     vanilla positive-max core (paired, same folds)."""
     summary, oof, core_by_fold = run_core_variant(S_concat, y, prompt_idx, folds,
-                                                    lambda X, tr: robust_scale_3d(X, tr), r_l, r_d, seed)
+                                                    lambda X, tr: robust_scale_3d(X, tr), r_l, r_d, seed,
+                                                    progress_label="B4 re-pooling")
     d_pooled = paired_bootstrap_delta(oof["RF"], vanilla_core_oof_rf, y, prompt_idx, seed=seed)
     d_wp = paired_bootstrap_delta(oof["RF"], vanilla_core_oof_rf, y, prompt_idx, seed=seed,
                                    within_prompt=True)
@@ -252,7 +273,8 @@ def run_combination(core_by_fold, extra_blocks_by_fold, y, prompt_idx, folds, se
 # ==============================================================================
 
 def run_readout_condition_stacking_fixed(scorer_fn, z_stream, offsets, y, prompt_idx, core_by_fold,
-                                          folds, seed=SEED, n_inner_splits=N_INNER_SPLITS):
+                                          folds, seed=SEED, n_inner_splits=N_INNER_SPLITS,
+                                          progress_label="Part C"):
     """Identical to 31_eval_session03.run_readout_condition's fused step, EXCEPT the training-fold
     beam aggregates are built from INNER GroupKFold(n_inner_splits) out-of-fold token scores,
     not in-sample scores from the model that was fit on those exact tokens. Validation path
@@ -262,7 +284,9 @@ def run_readout_condition_stacking_fixed(scorer_fn, z_stream, offsets, y, prompt
     oof_fused_lr = np.full(n_beams, np.nan)
     fold_fused_rf, fold_fused_lr = [], []
 
-    for fold_i, (tr_beam, va_beam) in enumerate(folds):
+    outer_bar = tqdm(list(enumerate(folds)), desc=f"[{progress_label}] outer folds", unit="fold", leave=False)
+    for fold_i, (tr_beam, va_beam) in outer_bar:
+        outer_bar.set_postfix_str("scaling + validation-path scoring")
         tr_tok, tr_off = s02.slice_tokens_for_beams(z_stream, offsets, tr_beam)
         va_tok, va_off = s02.slice_tokens_for_beams(z_stream, offsets, va_beam)
         scale_params = s02.fit_robust_scale(tr_tok) if tr_tok.shape[0] > 0 else None
@@ -279,8 +303,11 @@ def run_readout_condition_stacking_fixed(scorer_fn, z_stream, offsets, y, prompt
         tr_prompt_idx = prompt_idx[tr_beam]
         inner_gkf = GroupKFold(n_splits=n_inner_splits)
         tr_scores_oof = np.full(tr_tok.shape[0], np.nan)
-        for inner_i, (itr_local, iva_local) in enumerate(
-                inner_gkf.split(tr_beam, y[tr_beam], groups=tr_prompt_idx)):
+        inner_splits = list(inner_gkf.split(tr_beam, y[tr_beam], groups=tr_prompt_idx))
+        inner_bar = tqdm(list(enumerate(inner_splits)),
+                          desc=f"  [{progress_label}] outer {fold_i+1}/{len(folds)}: inner OOF",
+                          unit="inner-fold", leave=False)
+        for inner_i, (itr_local, iva_local) in inner_bar:
             itr_beam, iva_beam = tr_beam[itr_local], tr_beam[iva_local]
             i_tr_tok, i_tr_off = s02.slice_tokens_for_beams(z_stream, offsets, itr_beam)
             i_va_tok, i_va_off = s02.slice_tokens_for_beams(z_stream, offsets, iva_beam)
@@ -295,17 +322,22 @@ def run_readout_condition_stacking_fixed(scorer_fn, z_stream, offsets, y, prompt
                 s_, e_ = tr_off[beam_local_idx], tr_off[beam_local_idx + 1]
                 s2, e2 = i_va_off[local_j], i_va_off[local_j + 1]
                 tr_scores_oof[s_:e_] = i_va_scores[s2:e2]
+            inner_bar.set_postfix_str(f"inner {inner_i+1}/{n_inner_splits} done")
+        inner_bar.close()
 
         assert not np.isnan(tr_scores_oof).any(), \
             f"fold {fold_i}: some training tokens never received an inner-OOF score"
         agg_train = np.stack([s02.aggregate_beam(tr_scores_oof[tr_off[i]:tr_off[i + 1]])
                                for i in range(len(tr_beam))])
 
+        outer_bar.set_postfix_str("fusion RF/LR")
         core_this = core_by_fold[fold_i]
         rf_scores, lr_scores = residualize_fuse_eval(core_this[tr_beam], core_this[va_beam],
                                                        agg_train, agg_val, y[tr_beam], y[va_beam], seed + fold_i)
         oof_fused_rf[va_beam] = rf_scores; fold_fused_rf.append(float(roc_auc_score(y[va_beam], rf_scores)))
         oof_fused_lr[va_beam] = lr_scores; fold_fused_lr.append(float(roc_auc_score(y[va_beam], lr_scores)))
+        outer_bar.set_postfix_str(f"outer {fold_i+1}/{len(folds)} done, RF auroc={fold_fused_rf[-1]:.3f}")
+    outer_bar.close()
 
     return {
         "fused_RF": summarize_oof(oof_fused_rf, y, prompt_idx, fold_fused_rf, seed),
@@ -507,7 +539,8 @@ def main():
 
     core_results = hygiene_results["vanilla_mad"]
     _, _, core_by_fold = run_core_variant(X, y, prompt_idx, folds,
-                                           lambda Xr, tr: s01.mad_scale(Xr, tr), args.r_l, args.r_d, SEED)
+                                           lambda Xr, tr: s01.mad_scale(Xr, tr), args.r_l, args.r_d, SEED,
+                                           progress_label="core_by_fold (for fusion)")
 
     print(f"\n[3d] Canonical reference check (route {args.route}) ...")
     CANONICAL_RF_POOLED, CANONICAL_RF_WITHIN_PROMPT = 0.8347, 0.7365
@@ -593,10 +626,14 @@ def main():
     offsets = packed["offsets"]
 
     part_c = {}
-    for rname, scorer in (("linear", s03.linear_token_scorer), ("tokenRF", s03.rf_token_scorer)):
+    readouts_list = [("linear", s03.linear_token_scorer), ("tokenRF", s03.rf_token_scorer)]
+    for readout_num, (rname, scorer) in enumerate(readouts_list, start=1):
+        print(f"  Part C readout {readout_num}/{len(readouts_list)}: {rname} "
+              f"(tokenRF's inner-CV is the dominant cost of this whole script)")
         t0 = time.time()
         fixed = run_readout_condition_stacking_fixed(scorer, z_band_primary, offsets, y, prompt_idx,
-                                                       core_by_fold, folds, seed=SEED)
+                                                       core_by_fold, folds, seed=SEED,
+                                                       progress_label=f"Part C {rname}")
         d_wp = paired_bootstrap_delta(fixed["_oof"]["fused_RF"], hygiene_oofs["vanilla_mad"]["RF"],
                                        y, prompt_idx, within_prompt=True)
         d_pooled = paired_bootstrap_delta(fixed["_oof"]["fused_RF"], hygiene_oofs["vanilla_mad"]["RF"],
