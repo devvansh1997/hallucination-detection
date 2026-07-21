@@ -91,19 +91,29 @@ def verify_post_norm_route(model, tokenizer, sample_texts, device):
     h_last = out.hidden_states[-1].float()
     mask = inputs["attention_mask"].bool()
 
+    # nn.Linear requires input/weight dtypes to match exactly (unlike elementwise ops,
+    # which promote automatically) -- model.lm_head's weight is bf16 since the model is
+    # loaded in bf16, so compute the "in fp32" check via an explicit fp32-cast weight
+    # rather than calling the bf16 module directly on an fp32 input.
+    lm_head_w = model.lm_head.weight.float()
+    lm_head_b = model.lm_head.bias.float() if model.lm_head.bias is not None else None
+
+    def lm_head_fp32(h):
+        return torch.nn.functional.linear(h, lm_head_w, lm_head_b)
+
     def agreement(logits_check):
         pred_check = logits_check.argmax(dim=-1)
         pred_model = logits_model.argmax(dim=-1)
         agree = (pred_check == pred_model) & mask
         return float(agree.sum()) / float(mask.sum())
 
-    logits_direct = model.lm_head(h_last)
+    logits_direct = lm_head_fp32(h_last)
     frac_direct = agreement(logits_direct)
     if frac_direct >= 0.999:
         return "hidden_states[-1]", frac_direct
 
     h_normed = model.model.norm(h_last)
-    logits_normed = model.lm_head(h_normed)
+    logits_normed = lm_head_fp32(h_normed)
     frac_normed = agreement(logits_normed)
     if frac_normed >= 0.999:
         return "manual_norm", frac_normed
