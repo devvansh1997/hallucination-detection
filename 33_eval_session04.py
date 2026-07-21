@@ -450,8 +450,16 @@ def main():
     parser.add_argument("--pooled-suffix", type=str, default="_maxenergy_seeded")
     parser.add_argument("--manifest", type=str, default="data/manifest_seeded_v1.json")
     parser.add_argument("--velocity-meta", type=str, default=None,
-                         help="Path to 32_extract_velocity.py's *_meta.json, if it exists. "
-                              "B1/B2/B4 are skipped (not hard-failed) if omitted.")
+                         help="Path to 35_derive_streams.py's *_meta.json, if it exists. "
+                              "B1/B2/B4 (Part 3a/3b/3c) are skipped (not hard-failed) if omitted.")
+    parser.add_argument("--route", type=str, choices=["R", "N"], default="R",
+                         help="Which gate route produced the data being evaluated (Part 3d).")
+    parser.add_argument("--v3-pooled-pt", type=str, default=None,
+                         help="Route N only: path to the v3 pooled tensor (a fresh generation "
+                              "means a different core dataset, not the pinned v1/v2 one).")
+    parser.add_argument("--v3-band-meta", type=str, default=None,
+                         help="Route N only: path to 35_derive_streams.py's band_derived_v3 "
+                              "meta json, for the 3d linear band-vs-rand robustness check.")
     parser.add_argument("--r_l", type=int, default=5)
     parser.add_argument("--r_d", type=int, default=64)
     parser.add_argument("--output-json", type=str, default="results/session04_metrics.json")
@@ -465,12 +473,21 @@ def main():
     if not args.model_folder:
         print("ERROR: --model_folder required."); sys.exit(1)
 
-    manifest_path = os.path.join(HERE, args.manifest) if not os.path.isabs(args.manifest) else args.manifest
-    manifest = pin_mod.verify_manifest(manifest_path)
-    print(f"Manifest verified. Counts: {manifest['counts']}")
-
     import torch
-    pooled = torch.load(manifest["pooled_pt_path"], weights_only=False)
+    if args.route == "N":
+        if not args.v3_pooled_pt:
+            print("ERROR: --route N requires --v3-pooled-pt (a fresh generation is a different "
+                  "core dataset -- there is no v1/v2 manifest to fall back to)."); sys.exit(1)
+        print(f"Route N: loading v3 pooled tensor directly (no manifest -- v3 has its own hashes "
+              f"pinned by 34_gate_reconstruct_or_regenerate.py's Route N output): {args.v3_pooled_pt}")
+        pooled = torch.load(args.v3_pooled_pt, weights_only=False)
+        manifest = None
+    else:
+        manifest_path = os.path.join(HERE, args.manifest) if not os.path.isabs(args.manifest) else args.manifest
+        manifest = pin_mod.verify_manifest(manifest_path)
+        print(f"Manifest verified. Counts: {manifest['counts']}")
+        pooled = torch.load(manifest["pooled_pt_path"], weights_only=False)
+
     X = torch.stack(pooled["all_emb"]).float().numpy()
     y = np.array([int(f) for f in pooled["all_hallucination_flag"]], dtype=np.int64)
     prompt_idx = np.array(pooled["prompt_indices"], dtype=np.int64)
@@ -491,6 +508,48 @@ def main():
     core_results = hygiene_results["vanilla_mad"]
     _, _, core_by_fold = run_core_variant(X, y, prompt_idx, folds,
                                            lambda Xr, tr: s01.mad_scale(Xr, tr), args.r_l, args.r_d, SEED)
+
+    print(f"\n[3d] Canonical reference check (route {args.route}) ...")
+    CANONICAL_RF_POOLED, CANONICAL_RF_WITHIN_PROMPT = 0.8347, 0.7365
+    fresh_pooled = core_results["RF"]["pooled_oof_auroc"]
+    fresh_wp = core_results["RF"]["within_prompt"]["within_prompt_auroc"]
+    if args.route == "R":
+        d_pooled = abs(fresh_pooled - CANONICAL_RF_POOLED)
+        d_wp = abs(fresh_wp - CANONICAL_RF_WITHIN_PROMPT)
+        ok = d_pooled <= 0.01 and d_wp <= 0.01
+        print(f"  Route R: fresh core-only RF pooled={fresh_pooled:.4f} within-prompt={fresh_wp:.4f} "
+              f"vs canonical 0.8347/0.7365 (deltas {d_pooled:.4f}/{d_wp:.4f}) -- "
+              f"{'within tolerance, references carry over unchanged' if ok else '[WARN] outside 0.01 tolerance'}")
+        part_3d = {"route": "R", "canonical_reference_pooled": CANONICAL_RF_POOLED,
+                   "canonical_reference_within_prompt": CANONICAL_RF_WITHIN_PROMPT,
+                   "fresh_pooled": fresh_pooled, "fresh_within_prompt": fresh_wp,
+                   "delta_pooled": d_pooled, "delta_within_prompt": d_wp, "within_tolerance": ok}
+    else:
+        print(f"  Route N: v3 canonical references recomputed fresh: RF pooled={fresh_pooled:.4f} "
+              f"within-prompt={fresh_wp:.4f}  (v2 reference for context: 0.8347/0.7365, "
+              f"delta={fresh_pooled-CANONICAL_RF_POOLED:+.4f}/{fresh_wp-CANONICAL_RF_WITHIN_PROMPT:+.4f})")
+        part_3d = {"route": "N", "v3_pooled": fresh_pooled, "v3_within_prompt": fresh_wp,
+                   "v2_reference_pooled": CANONICAL_RF_POOLED,
+                   "v2_reference_within_prompt": CANONICAL_RF_WITHIN_PROMPT,
+                   "delta_pooled": fresh_pooled - CANONICAL_RF_POOLED,
+                   "delta_within_prompt": fresh_wp - CANONICAL_RF_WITHIN_PROMPT}
+
+        if args.v3_band_meta and os.path.exists(args.v3_band_meta):
+            print("  Route N: running the one-command linear band-vs-rand robustness check on v3 ...")
+            packed_v3, _ = s02.load_band_npz(args.v3_band_meta)
+            z_band_v3 = s02.slice_band(packed_v3["z_band"], *s03.PRIMARY_BAND_SLICE)
+            res_band_v3 = s03.run_readout_condition(s03.linear_token_scorer, z_band_v3, packed_v3["offsets"],
+                                                      y, prompt_idx, core_by_fold, folds)
+            res_rand_v3 = s03.run_readout_condition(s03.linear_token_scorer, packed_v3["z_rand"],
+                                                      packed_v3["offsets"], y, prompt_idx, core_by_fold, folds)
+            d_bvr_wp = paired_bootstrap_delta(res_band_v3["_oof"]["band"], res_rand_v3["_oof"]["band"],
+                                               y, prompt_idx, within_prompt=True)
+            print(f"    v3 band-vs-rand within-prompt delta = {d_bvr_wp['mean_delta']:.4f} "
+                  f"CI={d_bvr_wp['ci95']} excludes_zero={d_bvr_wp['excludes_zero']}  "
+                  f"(session03 v2 null for comparison: 0.0016, CI=[-0.028, 0.034])")
+            part_3d["v3_band_vs_rand_robustness_check"] = d_bvr_wp
+        else:
+            print("  Route N: --v3-band-meta not provided -- skipping the band-vs-rand robustness check.")
 
     b1_result, b1_delta = None, None
     b2_result, b2_delta = None, None
@@ -520,7 +579,13 @@ def main():
 
     print("\n[Part C] Stacking fix: re-running band linear-fused and band tokenRF-fused with "
           "inner GroupKFold(3) out-of-fold train aggregates ...")
-    band_meta_path = os.path.join(os.path.dirname(manifest["pooled_pt_path"]), f"{args.dataset}_band_meta.json")
+    if args.route == "N":
+        if not args.v3_band_meta:
+            print("ERROR: --route N requires --v3-band-meta for Part C (no v2 band data applies "
+                  "to a v3 dataset)."); sys.exit(1)
+        band_meta_path = args.v3_band_meta
+    else:
+        band_meta_path = os.path.join(os.path.dirname(manifest["pooled_pt_path"]), f"{args.dataset}_band_meta.json")
     packed, _ = s02.load_band_npz(band_meta_path)
     if not np.array_equal(packed["label"], y):
         raise ValueError("Band npz labels != pooled labels -- refusing to proceed.")
@@ -544,7 +609,8 @@ def main():
               f"excludes_zero={d_wp['excludes_zero']}  [{time.time()-t0:.0f}s]")
 
     output = {
-        "part0_reference": manifest["references"]["core_only_grouped"],
+        "part0_reference": None if manifest is None else manifest["references"]["core_only_grouped"],
+        "part_3d_canonical_check": part_3d,
         "b3_hygiene_ladder": hygiene_results, "b3_paired_deltas": hygiene_deltas,
         "b1_velocity": None if b1_result is None else {k: v for k, v in b1_result.items() if k != "_oof"},
         "b1_paired_delta": b1_delta,
@@ -552,7 +618,7 @@ def main():
         "b2_paired_delta": b2_delta,
         "b4_repooling": b4_result, "b4_paired_delta": b4_delta,
         "part_c_stacking_fix": part_c,
-        "config": {"seed": SEED, "n_splits": N_SPLITS, "r_l": args.r_l, "r_d": args.r_d},
+        "config": {"seed": SEED, "n_splits": N_SPLITS, "r_l": args.r_l, "r_d": args.r_d, "route": args.route},
     }
     os.makedirs(os.path.dirname(args.output_json) or ".", exist_ok=True)
     with open(args.output_json, "w") as f:
