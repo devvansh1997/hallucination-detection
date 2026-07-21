@@ -1,0 +1,226 @@
+{
+  "core_only": {
+    "RF": {
+      "per_fold_auroc": [
+        0.7635429171668668,
+        0.7447483505649788,
+        0.7397810864784247,
+        0.7138171073717949,
+        0.7454219795085048
+      ],
+      "mean_auroc": 0.741462288218114,
+      "std_auroc": 0.016006960979214023,
+      "pooled_oof_auroc": 0.7433671290448087,
+      "ci95": [
+        0.718717408658176,
+        0.7669981453995284
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.6776662484316186,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.6304606112450734,
+          0.7194906339594782
+        ]
+      }
+    },
+    "LR": {
+      "per_fold_auroc": [
+        0.7755852340936373,
+        0.7496397785586086,
+        0.7223387851057913,
+        0.7290414663461539,
+        0.7231894586537739
+      ],
+      "mean_auroc": 0.7399589445515931,
+      "std_auroc": 0.020365795148453367,
+      "pooled_oof_auroc": 0.7438857166861199,
+      "ci95": [
+        0.7177652174171347,
+        0.767461580329644
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.6670012547051443,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.6180977885742149,
+          0.7117281027165034
+        ]
+      }
+    }
+  },
+  "band": {
+    "band_only": {
+      "per_fold_auroc": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_auroc": 1.0,
+      "std_auroc": 0.0,
+      "pooled_oof_auroc": 1.0,
+      "ci95": [
+        0.9999999999999999,
+        1.0
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 1.0,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "fused_RF": {
+      "per_fold_auroc": [
+        0.9953856542617047,
+        0.9985338355367932,
+        0.9984327207462271,
+        0.9979717548076923,
+        0.9998246449059345
+      ],
+      "mean_auroc": 0.9980297220516704,
+      "std_auroc": 0.0014582689111247822,
+      "pooled_oof_auroc": 0.9981076801979535,
+      "ci95": [
+        0.9969735717734564,
+        0.9990041843385613
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.9993726474278545,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.9978560891891152,
+          1.0
+        ]
+      }
+    },
+    "fused_LR": {
+      "per_fold_auroc": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_auroc": 1.0,
+      "std_auroc": 0.0,
+      "pooled_oof_auroc": 1.0,
+      "ci95": [
+        0.9999999999999999,
+        1.0
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 1.0,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "token_lr_last_channel_weight_share_mean": 0.005069378228739994
+  },
+  "rand_control": {
+    "band_only": {
+      "per_fold_auroc": [
+        0.5215086034413766,
+        0.49450188326297434,
+        0.5017568694860841,
+        0.46138822115384615,
+        0.5098825120869761
+      ],
+      "mean_auroc": 0.4978076178862515,
+      "std_auroc": 0.0202999345525723,
+      "pooled_oof_auroc": 0.4978301332925264,
+      "ci95": [
+        0.4723686443691739,
+        0.5228870067560746
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.5141781681304893,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.46333329022052255,
+          0.5644001526682197
+        ]
+      }
+    },
+    "fused_RF": {
+      "per_fold_auroc": [
+        0.7583658463385354,
+        0.7461892363305442,
+        0.720897899340226,
+        0.7000075120192307,
+        0.6979508504722063
+      ],
+      "mean_auroc": 0.7246822689001485,
+      "std_auroc": 0.024227533297338,
+      "pooled_oof_auroc": 0.7274664418286689,
+      "ci95": [
+        0.7018536989507497,
+        0.751844219390233
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.6618569636135508,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.6146618317131056,
+          0.7047789198179648
+        ]
+      }
+    },
+    "fused_LR": {
+      "per_fold_auroc": [
+        0.7772358943577431,
+        0.7462524330746481,
+        0.7165752420435298,
+        0.7137169471153845,
+        0.7217114657180791
+      ],
+      "mean_auroc": 0.7350983964618769,
+      "std_auroc": 0.023997769905493127,
+      "pooled_oof_auroc": 0.7385708184683213,
+      "ci95": [
+        0.7122625995867564,
+        0.7618298436023555
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.6682559598494354,
+        "n_mixed_prompts": 195,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 3985,
+        "ci95": [
+          0.6183725582351223,
+          0.7107740740820608
+        ]
+      }
+    },
+    "token_lr_last_channel_weight_share_mean": 0.027234156407781845
+  }
+}
