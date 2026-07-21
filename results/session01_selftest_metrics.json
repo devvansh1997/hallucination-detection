@@ -1,0 +1,162 @@
+{
+  "counts": {
+    "n_prompts": 200,
+    "n_beams": 2000,
+    "class_balance_hallucinated_pct": 49.35,
+    "n_mixed_prompts": 195,
+    "n_all_truthful_prompts": 3,
+    "n_all_hallucinated_prompts": 2
+  },
+  "audit_flags": {
+    "split_type_found": "prompt-grouped (HARP known/unknown, 75/25), NOT beam-level leakage",
+    "tucker_factors_fit_on": "train-only, consistently across the whole repo (no fit-on-all leak found)",
+    "prompt_tokens_in_pooling_window": false,
+    "class_balance_in_repo_brief_vs_actual": "brief said ~62pct truthful; cached data shows 61.18pct hallucinated",
+    "0.8094_origin": "346-dim core+raw-geometric variant (V2/V3), not pure r_l*r_d core; sklearn-version sensitive"
+  },
+  "E1": {
+    "auroc_original_orientation": 0.7497295454882258,
+    "auroc_canonical_orientation": 0.7497295454882258,
+    "orientation_note": "identical: all_hallucination_flag is already coded 1=hallucination",
+    "ci95": [
+      0.7013663827280888,
+      0.7933145529607208
+    ],
+    "n_train": 1480,
+    "n_valid": 520,
+    "feature_dim": 100,
+    "target_reference_auroc": 0.8094,
+    "note": "Target 0.8094 traces to a 346-dim variant (core + raw geometric features), not the pure r_l*r_d core reproduced here -- see A5. sklearn-version-dependent by ~0.005-0.01 AUROC even on the exact same feature set/seed/split."
+  },
+  "E2": {
+    "RF": {
+      "per_fold_auroc": [
+        0.7635429171668668,
+        0.7447483505649788,
+        0.7397810864784247,
+        0.7138171073717949,
+        0.7454219795085048
+      ],
+      "mean_auroc": 0.741462288218114,
+      "std_auroc": 0.016006960979214023,
+      "pooled_oof_auroc": 0.7433671290448087,
+      "ci95": [
+        0.718717408658176,
+        0.7669981453995284
+      ]
+    },
+    "LR": {
+      "per_fold_auroc": [
+        0.7755852340936373,
+        0.7496397785586086,
+        0.7223387851057913,
+        0.7290414663461539,
+        0.7231894586537739
+      ],
+      "mean_auroc": 0.7399589445515931,
+      "std_auroc": 0.020365795148453367,
+      "pooled_oof_auroc": 0.7438857166861199,
+      "ci95": [
+        0.7177652174171347,
+        0.767461580329644
+      ]
+    },
+    "n_splits": 5
+  },
+  "E3": {
+    "within_prompt_auroc": 0.6776662484316186,
+    "n_mixed_prompts": 195,
+    "n_all_truthful_prompts": 3,
+    "n_all_hallucinated_prompts": 2,
+    "n_pairs": 3985
+  },
+  "E3_LR": {
+    "within_prompt_auroc": 0.6670012547051443,
+    "n_mixed_prompts": 195,
+    "n_all_truthful_prompts": 3,
+    "n_all_hallucinated_prompts": 2,
+    "n_pairs": 3985
+  },
+  "E4a_centroid_only": {
+    "RF": {
+      "per_fold_auroc": [
+        0.6663165266106442,
+        0.6384008695871989,
+        0.6335979170353143,
+        0.6499899839743589,
+        0.6238758485934016
+      ],
+      "mean_auroc": 0.6424362291601836,
+      "std_auroc": 0.01460284515427608,
+      "pooled_oof_auroc": 0.6489001641277377,
+      "ci95": [
+        0.6183912945935837,
+        0.6796586444972537
+      ]
+    },
+    "LR": {
+      "per_fold_auroc": [
+        0.6605642256902762,
+        0.6075608584645719,
+        0.6361257867994641,
+        0.6259515224358975,
+        0.5479721435907713
+      ],
+      "mean_auroc": 0.6156349073961962,
+      "std_auroc": 0.03791673034138464,
+      "pooled_oof_auroc": 0.6189651051027623,
+      "ci95": [
+        0.5871684888784484,
+        0.6518569362505765
+      ]
+    }
+  },
+  "E4b_delta_only": {
+    "RF": {
+      "per_fold_auroc": [
+        0.6460459183673469,
+        0.641762936373518,
+        0.6743218989357668,
+        0.6306715745192308,
+        0.6664370349958668
+      ],
+      "mean_auroc": 0.6518478726383459,
+      "std_auroc": 0.016135239267945863,
+      "pooled_oof_auroc": 0.644223873834678,
+      "ci95": [
+        0.6210822301223214,
+        0.6666523957608109
+      ]
+    },
+    "LR": {
+      "per_fold_auroc": [
+        0.6731192476990797,
+        0.6518364973836548,
+        0.6380090497737557,
+        0.6216195913461537,
+        0.6579573636614144
+      ],
+      "mean_auroc": 0.6485083499728117,
+      "std_auroc": 0.017545924637482616,
+      "pooled_oof_auroc": 0.6484085810501974,
+      "ci95": [
+        0.6250008123048829,
+        0.6700343717483263
+      ]
+    },
+    "within_prompt_auroc": {
+      "within_prompt_auroc": 0.6851944792973651,
+      "n_mixed_prompts": 195,
+      "n_all_truthful_prompts": 3,
+      "n_all_hallucinated_prompts": 2,
+      "n_pairs": 3985
+    }
+  },
+  "config": {
+    "r_l": 5,
+    "r_d": 20,
+    "seed_new_evals": 0,
+    "seed_original_split": 42,
+    "self_test": true
+  }
+}
