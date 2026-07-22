@@ -152,6 +152,7 @@ def run_velocity_condition(V_concat, y, prompt_idx, core_by_fold, folds, r_l=4, 
     oof_vonly_rf = np.full(n_beams, np.nan); oof_vonly_lr = np.full(n_beams, np.nan)
     oof_fused_rf = np.full(n_beams, np.nan); oof_fused_lr = np.full(n_beams, np.nan)
     fold_vrf, fold_vlr, fold_frf, fold_flr = [], [], [], []
+    vcore_by_fold = []
 
     bar = tqdm(list(enumerate(folds)), desc="[B1 velocity-core] folds", unit="fold", leave=False)
     for fold_i, (tr, va) in bar:
@@ -159,6 +160,7 @@ def run_velocity_condition(V_concat, y, prompt_idx, core_by_fold, folds, r_l=4, 
         Vs = s01.mad_scale(V_concat, tr)
         U_L, U_D = s01.compute_ul_ud(Vs[tr], r_l, r_d)
         vcore = s01.project_core(Vs, U_L, U_D)      # (n_beams, r_l*r_d) = 256-dim
+        vcore_by_fold.append(vcore)
 
         bar.set_postfix_str("velocity-only RF/LR")
         rf_v = s01.fit_eval("RF", vcore[tr], y[tr], vcore[va], seed + fold_i)
@@ -181,6 +183,7 @@ def run_velocity_condition(V_concat, y, prompt_idx, core_by_fold, folds, r_l=4, 
         "fused": {"RF": summarize_oof(oof_fused_rf, y, prompt_idx, fold_frf, seed),
                   "LR": summarize_oof(oof_fused_lr, y, prompt_idx, fold_flr, seed)},
         "_oof": {"velocity_only_RF": oof_vonly_rf, "fused_RF": oof_fused_rf},
+        "_core_by_fold": vcore_by_fold,
     }
 
 
@@ -458,7 +461,7 @@ def self_test():
         json.dump({
             "core_only": core_results, "hygiene_ladder": hygiene_results,
             "hygiene_deltas": hygiene_deltas,
-            "velocity": {k: v for k, v in vel_result.items() if k != "_oof"},
+            "velocity": {k: v for k, v in vel_result.items() if k not in ("_oof", "_core_by_fold")},
             "kinematic": {k: v for k, v in kin_result.items() if k != "_oof"},
             "repooling": repool_summary, "repooling_delta": repool_delta,
             "b5_selected": selected,
@@ -587,6 +590,7 @@ def main():
     b1_result, b1_delta = None, None
     b2_result, b2_delta = None, None
     b4_result, b4_delta = None, None
+    b5_result, b5_selected = None, []
     if args.velocity_meta and os.path.exists(args.velocity_meta):
         print("\n[B1/B2/B4] Loading velocity artifacts ...")
         with open(args.velocity_meta) as f:
@@ -603,10 +607,35 @@ def main():
                                            y, prompt_idx, within_prompt=True)
 
         S_concat = np.concatenate([vel_data["S95"], vel_data["S05"]], axis=2)
-        b4_result, b4_delta, _ = run_repooling_ablation(S_concat, y, prompt_idx,
-                                                          hygiene_oofs["vanilla_mad"]["RF"], folds, seed=SEED)
+        b4_result, b4_delta, repool_core_by_fold = run_repooling_ablation(
+            S_concat, y, prompt_idx, hygiene_oofs["vanilla_mad"]["RF"], folds, seed=SEED)
+
+        print("\n[B5] Combining components individually non-negative on the within-prompt paired delta ...")
+        component_deltas = {
+            "velocity": {"within_prompt": b1_delta},
+            "kinematic": {"within_prompt": b2_delta},
+            "repooling": {"within_prompt": b4_delta["within_prompt"]},
+        }
+        b5_selected = select_nonnegative_components(component_deltas)
+        print(f"  Components passing the filter: {b5_selected if b5_selected else '(none)'}")
+        if b5_selected:
+            combined_blocks_by_fold = []
+            for fold_i in range(len(folds)):
+                parts = []
+                if "velocity" in b5_selected:
+                    parts.append(b1_result["_core_by_fold"][fold_i])
+                if "kinematic" in b5_selected:
+                    parts.append(vel_data["kinematic"])
+                if "repooling" in b5_selected:
+                    parts.append(repool_core_by_fold[fold_i])
+                combined_blocks_by_fold.append(np.concatenate(parts, axis=1))
+            b5_result = run_combination(core_by_fold, combined_blocks_by_fold, y, prompt_idx, folds, SEED)
+            print(f"  B5 combination RF pooled={b5_result['RF']['pooled_oof_auroc']:.4f}  "
+                  f"within-prompt={b5_result['RF']['within_prompt']['within_prompt_auroc']:.4f}")
+        else:
+            print("  Nothing to combine -- no component individually cleared the non-negative bar.")
     else:
-        print("\n[B1/B2/B4] SKIPPED: no --velocity-meta provided (32_extract_velocity.py blocked "
+        print("\n[B1/B2/B4/B5] SKIPPED: no --velocity-meta provided (32_extract_velocity.py blocked "
               "this session -- see Deviations in the handoff). Not hard-failing the whole run for "
               "this since B3/Part C don't depend on it.")
 
@@ -649,11 +678,12 @@ def main():
         "part0_reference": None if manifest is None else manifest["references"]["core_only_grouped"],
         "part_3d_canonical_check": part_3d,
         "b3_hygiene_ladder": hygiene_results, "b3_paired_deltas": hygiene_deltas,
-        "b1_velocity": None if b1_result is None else {k: v for k, v in b1_result.items() if k != "_oof"},
+        "b1_velocity": None if b1_result is None else {k: v for k, v in b1_result.items() if k not in ("_oof", "_core_by_fold")},
         "b1_paired_delta": b1_delta,
         "b2_kinematic": None if b2_result is None else {k: v for k, v in b2_result.items() if k != "_oof"},
         "b2_paired_delta": b2_delta,
         "b4_repooling": b4_result, "b4_paired_delta": b4_delta,
+        "b5_selected_components": b5_selected, "b5_combination": b5_result,
         "part_c_stacking_fix": part_c,
         "config": {"seed": SEED, "n_splits": N_SPLITS, "r_l": args.r_l, "r_d": args.r_d, "route": args.route},
     }
@@ -678,7 +708,8 @@ def main():
         row(f"B3 {vname} (RF)", hygiene_results[vname]["RF"], hygiene_deltas[vname]["within_prompt"])
     if b1_result: row("B1 velocity fused (RF)", b1_result["fused"]["RF"], b1_delta)
     if b2_result: row("B2 kinematic fused (RF)", b2_result["fused"]["RF"], b2_delta)
-    if b4_result: row("B4 re-pooled core (RF)", b4_result["RF"], b4_delta)
+    if b4_result: row("B4 re-pooled core (RF)", b4_result["RF"], b4_delta["within_prompt"])
+    if b5_result: row("B5 combination (RF)", b5_result["RF"], None)
     for rname in ("linear", "tokenRF"):
         row(f"C {rname} fused-RF (stacking-fixed)", part_c[rname]["fused_RF"],
             part_c[rname]["paired_delta_vs_core_within_prompt"])
