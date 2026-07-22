@@ -1,0 +1,232 @@
+{
+  "core_max": {
+    "RF": {
+      "per_fold_auroc": [
+        0.7994294883223392,
+        0.7531249999999999,
+        0.7574029343353015,
+        0.7261048304213771,
+        0.7419642857142857
+      ],
+      "mean_auroc": 0.7556053077586606,
+      "std_auroc": 0.02443889455563537,
+      "pooled_oof_auroc": 0.7561626589897561,
+      "ci95": [
+        0.7300899872488366,
+        0.7808301492613343
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.7057544329207093,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          0.6509900977781637,
+          0.7570884873747695
+        ]
+      }
+    }
+  },
+  "q_velocity": {
+    "RF": {
+      "per_fold_auroc": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_auroc": 1.0,
+      "std_auroc": 0.0,
+      "pooled_oof_auroc": 1.0,
+      "ci95": [
+        0.9999999999999999,
+        1.0
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 1.0,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  },
+  "q_static": {
+    "RF": {
+      "per_fold_auroc": [
+        0.5129702264218221,
+        0.5509821428571429,
+        0.4774557165861513,
+        0.571138120559453,
+        0.5111830357142857
+      ],
+      "mean_auroc": 0.524745848427771,
+      "std_auroc": 0.03286200782317041,
+      "pooled_oof_auroc": 0.517300610442424,
+      "ci95": [
+        0.493883398860319,
+        0.5420471721658934
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.523084643693543,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          0.47450976955356994,
+          0.5764877398418657
+        ]
+      }
+    }
+  },
+  "joint": {
+    "RF": {
+      "per_fold_auroc": [
+        1.0,
+        0.9999999999999999,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_auroc": 1.0,
+      "std_auroc": 4.965068306494546e-17,
+      "pooled_oof_auroc": 1.0,
+      "ci95": [
+        0.9999999999999999,
+        1.0
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 1.0,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  },
+  "core_concat": {
+    "RF": {
+      "per_fold_auroc": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_auroc": 1.0,
+      "std_auroc": 0.0,
+      "pooled_oof_auroc": 0.9999999999999999,
+      "ci95": [
+        0.9999999999999999,
+        1.0
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 1.0,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  },
+  "kinematic_standalone": {
+    "RF": {
+      "per_fold_auroc": [
+        0.5613968621857728,
+        0.4505357142857143,
+        0.4513106101270352,
+        0.43621252066669647,
+        0.4895982142857143
+      ],
+      "mean_auroc": 0.4778107843101866,
+      "std_auroc": 0.04539202602832808,
+      "pooled_oof_auroc": 0.47060078701373986,
+      "ci95": [
+        0.44100041406358453,
+        0.5008054280722061
+      ],
+      "within_prompt": {
+        "within_prompt_auroc": 0.4640347942455671,
+        "n_mixed_prompts": 145,
+        "n_all_truthful_prompts": 3,
+        "n_all_hallucinated_prompts": 2,
+        "n_pairs": 2989,
+        "ci95": [
+          0.41119066031133206,
+          0.5178849979162047
+        ]
+      }
+    }
+  },
+  "b2a_delta": {
+    "mean_delta": 0.2925394440253147,
+    "ci95": [
+      0.25032829250489363,
+      0.3459281490461934
+    ],
+    "excludes_zero": true
+  },
+  "c1_vel_repeated": {
+    "per_repeat_pooled_auroc_RF": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mean_pooled_auroc_RF": 1.0,
+    "std_pooled_auroc_RF": 0.0,
+    "all_25_fold_aurocs_RF": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mean_across_25_folds_RF": 1.0,
+    "std_across_25_folds_RF": 0.0
+  },
+  "c1_aggregated_delta": {
+    "mean_delta": 0.2934953691991156,
+    "ci95": [
+      0.2543183829999258,
+      0.34162425510788813
+    ],
+    "excludes_zero": true
+  },
+  "c2_harp": {
+    "core": {
+      "auroc": 0.7842105263157895,
+      "n_train": 1110,
+      "n_valid": 390
+    },
+    "velocity": {
+      "auroc": 0.9999999999999999,
+      "n_train": 1110,
+      "n_valid": 390
+    }
+  }
+}
