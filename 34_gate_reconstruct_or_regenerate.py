@@ -256,8 +256,12 @@ def pack_and_save_raw_store(per_beam_raw, prompt_ids, beam_idxs, labels, V_R, V_
         b0 = b1; shard_i += 1
 
     bases_path = os.path.join(out_dir, "bases.npz")
-    np.savez_compressed(bases_path, V_R=V_R.numpy().astype(np.float32),
-                         V_rand=V_rand.numpy().astype(np.float32))
+    # defensive .detach().cpu() regardless of what device the caller's tensors are on --
+    # compute_bases() returns V_band on whatever device lm_head.weight lives on (GPU, once a
+    # model is loaded), so callers passing straight through without an explicit .cpu() call
+    # crash here otherwise (exactly what happened on the first real run).
+    np.savez_compressed(bases_path, V_R=V_R.detach().cpu().numpy().astype(np.float32),
+                         V_rand=V_rand.detach().cpu().numpy().astype(np.float32))
 
     meta = {
         "checkpoint_id": checkpoint_id, "seed": seed, "git_commit": git_commit,
@@ -432,6 +436,83 @@ def run_route_n(model_folder, dataset, gen_seed, out_dir, batch_size=8):
     shard_paths, bases_path, meta_path = pack_and_save_raw_store(
         per_beam_raw, prompt_ids, beam_idxs, labels, V_R, V_rand, out_dir,
         model_id, gen_seed, decoding_config, git_commit_hash())
+
+    return {"seq_path": seq_path, "shard_paths": shard_paths, "bases_path": bases_path,
+            "meta_path": meta_path, "n_beams": n_beams, "decoding_config": decoding_config}
+
+
+# ==============================================================================
+# RECOVERY: resume raw-state-store extraction from an already-saved sequences file, without
+# redoing generation/judging. Only needed because of the V_R/V_rand device bug above -- the
+# sequences file is already complete and correct once it exists.
+# ==============================================================================
+
+def resume_route_n_raw_state(seq_path, model_folder, out_dir, batch_size=8):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    with open(os.path.join(HERE, "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    model_id = next(m["id"] for m in cfg["models"] if m["folder"] == model_folder)
+
+    print(f"Loading saved sequences: {seq_path}")
+    data = torch.load(seq_path, weights_only=False)
+    input_ids_list = data["input_ids"]
+    prompt_lens = data["prompt_len"]
+    prompt_ids = data["prompt_id"]
+    labels = data["all_hallucination_flag"]
+    decoding_config = data["decoding_config"]
+    n_beams = len(input_ids_list)
+    print(f"  {n_beams} beams loaded, generation/judging NOT re-run")
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA required.")
+    device = torch.device("cuda")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16,
+                                                  device_map=device, trust_remote_code=True)
+    model.eval()
+
+    print("Computing bases from lm_head.weight (fp32 SVD) ...")
+    V_R, V_rand, spectrum = band_mod.compute_bases(model)
+    V_R, V_rand = V_R.detach().cpu(), V_rand.detach().cpu()   # the fix -- always CPU before saving
+    route, agreement = band_mod.verify_post_norm_route(
+        model, tokenizer, ["The capital of France is", "Water boils at a temperature of"], device)
+    apply_norm_manually = (route == "manual_norm")
+    print(f"A2 post-norm route: {route}  agreement={agreement:.4f}")
+
+    per_beam_raw = []
+    batch_starts = list(range(0, n_beams, batch_size))
+    batch_bar = tqdm(batch_starts, desc="[Resume] re-forwarding saved sequences", unit="batch")
+    for start in batch_bar:
+        end = min(start + batch_size, n_beams)
+        lengths = [len(input_ids_list[i]) for i in range(start, end)]
+        T_max = max(lengths)
+        padded = torch.zeros((end - start, T_max), dtype=torch.long)
+        attn = torch.zeros((end - start, T_max), dtype=torch.long)
+        for j, i in enumerate(range(start, end)):
+            ids = input_ids_list[i]
+            padded[j, :len(ids)] = ids
+            attn[j, :len(ids)] = 1
+        padded, attn = padded.to(device), attn.to(device)
+        with torch.no_grad():
+            out = model(input_ids=padded, attention_mask=attn, use_cache=False, output_hidden_states=True)
+
+        for j, i in enumerate(range(start, end)):
+            p_len = prompt_lens[i]
+            comp_start, comp_end = p_len, lengths[j]
+            h_by_layer = {l: out.hidden_states[l + 1][j, comp_start:comp_end, :].float()
+                          for l in range(W_START, W_END)}
+            h_final = out.hidden_states[-1][j, comp_start:comp_end, :].float()
+            if apply_norm_manually:
+                h_final = model.model.norm(h_final)
+            h_by_layer["final_norm"] = h_final
+            per_beam_raw.append(pack_raw_state_beam(h_by_layer))
+        batch_bar.set_postfix_str(f"{end}/{n_beams} beams")
+    batch_bar.close()
+
+    shard_paths, bases_path, meta_path = pack_and_save_raw_store(
+        per_beam_raw, prompt_ids, list(range(n_beams)), labels, V_R, V_rand, out_dir,
+        model_id, decoding_config.get("gen_seed", 0), decoding_config, git_commit_hash())
 
     return {"seq_path": seq_path, "shard_paths": shard_paths, "bases_path": bases_path,
             "meta_path": meta_path, "n_beams": n_beams, "decoding_config": decoding_config}
@@ -676,6 +757,11 @@ def main():
     parser.add_argument("--manifest", type=str, default="data/manifest_seeded_v1.json")
     parser.add_argument("--mode", type=str, default="auto", choices=["auto"])
     parser.add_argument("--authorize-new-pass", action="store_true")
+    parser.add_argument("--resume-raw-state", type=str, default=None,
+                         help="Recovery: path to an already-saved {dataset}_v3_sequences.pt "
+                              "(from a Route N run that crashed after saving sequences but "
+                              "before finishing the raw-state store). Re-forwards the saved "
+                              "sequences directly -- does NOT re-run generation/judging.")
     parser.add_argument("--gen-seed", type=int, default=0)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -691,6 +777,19 @@ def main():
         cfg = yaml.safe_load(f)
     data_dir = cfg["output"]["data_dir"]
     out_dir = os.path.join(data_dir, args.model_folder, "raw_state_store")
+
+    if args.resume_raw_state:
+        print("=" * 70)
+        print("  RESUME: rebuilding the raw-state store from already-saved sequences")
+        print("=" * 70)
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA required.")
+        result = resume_route_n_raw_state(args.resume_raw_state, args.model_folder, out_dir)
+        print(f"\nResume complete. n_beams={result['n_beams']}")
+        print(f"Raw-state store: {result['shard_paths']}")
+        print("Next: run 35_derive_streams.py with --route N, then update the manifest to v3 "
+              "and recompute canonical references per Part 3d.")
+        return
 
     if args.authorize_new_pass:
         print("=" * 70)
