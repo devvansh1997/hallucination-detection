@@ -468,6 +468,8 @@ def resume_route_n_raw_state(seq_path, model_folder, out_dir, batch_size=8):
         raise RuntimeError("CUDA required.")
     device = torch.device("cuda")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16,
                                                   device_map=device, trust_remote_code=True)
     model.eval()
