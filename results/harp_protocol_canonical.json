@@ -1,0 +1,84 @@
+{
+  "old_reference": {
+    "name": "core-max (old, pre-canonical)",
+    "auroc": 0.796,
+    "source": "baseline_report.tex Results table, 'HOSVD (ours)' row, LLaMA-3.1-8B / TruthfulQA column = 79.6%, captioned 'known/unknown split, zero leakage ... 320-dimensional compressed core features and Random Forest' -- the identical recipe, run before the v2/v3 canonical pipeline existed.",
+    "cross_check_session01_E1": 0.7951670341801554
+  },
+  "results": {
+    "core_max": {
+      "n_train": 3870,
+      "n_valid": 4300,
+      "RF": {
+        "auroc": 0.8537563035371708,
+        "ci95": [
+          0.8208792343030615,
+          0.8822470103181134
+        ]
+      },
+      "LR": {
+        "auroc": 0.7953270939799426,
+        "ci95": [
+          0.7587531613067944,
+          0.8323291024599391
+        ]
+      }
+    },
+    "q_static": {
+      "n_train": 3870,
+      "n_valid": 4300,
+      "RF": {
+        "auroc": 0.8436090929987569,
+        "ci95": [
+          0.8101113348169191,
+          0.8741786912213839
+        ]
+      },
+      "LR": {
+        "auroc": 0.7956126981844432,
+        "ci95": [
+          0.7544443904040784,
+          0.835801469164892
+        ]
+      }
+    },
+    "q_velocity": {
+      "n_train": 3870,
+      "n_valid": 4300,
+      "RF": {
+        "auroc": 0.8654511874634825,
+        "ci95": [
+          0.833099264290915,
+          0.894587953404519
+        ]
+      },
+      "LR": {
+        "auroc": 0.8609310878633283,
+        "ci95": [
+          0.8293740615446039,
+          0.8887662412491658
+        ]
+      }
+    }
+  },
+  "config": {
+    "seed": 42,
+    "n_boot": 1000,
+    "feature_dims": {
+      "core_max": [
+        5,
+        64
+      ],
+      "q_static": [
+        5,
+        64
+      ],
+      "q_velocity": [
+        4,
+        64
+      ]
+    },
+    "core_pooled_pt": "../data/llama-3.1-8b-instruct/raw_state_store/truthfulqa_v3_pooled.pt",
+    "velocity_meta": "../data/llama-3.1-8b-instruct/raw_state_store/velocity_kinematic_repooling_meta.json"
+  }
+}
