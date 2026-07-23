@@ -117,6 +117,13 @@ def check_window(seq_data, eos_ids_set):
 # ==============================================================================
 
 def check_roundtrip(seq_data, tokenizer, n_samples=100, seed=0):
+    """Decodes each beam's PINNED ids fresh (no .strip()) rather than trusting
+    seq_data["decoded_text"], which 39_generate_dataset.py saves .strip()'d for
+    readability. Llama's tokenizer bakes a leading space into word-initial tokens
+    (" Paris" vs "Paris" are different token ids), so re-encoding the stripped text
+    silently shifts the first token almost every time -- a validation-script
+    artifact, not a real drift in the pinned ids (which Assert D already verifies
+    independently via fresh regeneration)."""
     n_beams = len(seq_data["input_ids"])
     rng = random.Random(seed)
     idx = rng.sample(range(n_beams), min(n_samples, n_beams))
@@ -128,7 +135,7 @@ def check_roundtrip(seq_data, tokenizer, n_samples=100, seed=0):
         if not pinned_comp_ids:
             continue
         n_checked += 1
-        text = seq_data["decoded_text"][i]
+        text = tokenizer.decode(pinned_comp_ids, skip_special_tokens=True)
         retok_ids = tokenizer.encode(text, add_special_tokens=False)
         if retok_ids == pinned_comp_ids:
             n_exact += 1
@@ -287,6 +294,19 @@ def self_test():
     c_result = check_roundtrip(seq_data, tok, n_samples=50, seed=0)
     assert c_result["exact_match_rate"] == 1.0, "fake tokenizer's encode/decode is a perfect inverse by construction"
     print(f"  [PASS] C round-trip: {c_result['n_exact_match']}/{c_result['n_checked']} exact")
+
+    # regression test for the real bug found on TriviaQA's first cluster run: check_roundtrip
+    # must decode pinned ids fresh, NOT trust seq_data["decoded_text"] (which
+    # 39_generate_dataset.py saves .strip()'d -- stripping a leading-space-bearing first
+    # token before re-encoding silently shifted the first token on ~100% of real beams).
+    # Corrupt decoded_text here and confirm check_roundtrip is unaffected.
+    corrupted = dict(seq_data)
+    corrupted["decoded_text"] = ["<corrupted>"] * len(seq_data["decoded_text"])
+    c_result_corrupted = check_roundtrip(corrupted, tok, n_samples=50, seed=0)
+    assert c_result_corrupted["exact_match_rate"] == 1.0, \
+        "check_roundtrip must decode pinned ids independently, not read seq_data['decoded_text']"
+    print("  [PASS] C round-trip ignores seq_data['decoded_text'] (decodes pinned ids fresh) "
+          "-- regression test for the real TriviaQA-run bug")
 
     e_result = check_labels(seq_data)
     assert e_result["no_nan"]
