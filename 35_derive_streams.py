@@ -61,7 +61,12 @@ def h_by_layer_from_raw(raw_beam):
     return d
 
 
-def derive_all_streams(raw_store_dir, route):
+def derive_all_streams(raw_store_dir, route, canonical_lengths=None):
+    """canonical_lengths: optional array, len == total n_beams in shard-sequential order (per
+    session05b's window forensics) -- if given, each beam's raw per-token tensor is truncated to
+    canonical_lengths[global_i] tokens BEFORE any pooling, so every derived stream (velocity,
+    kinematic, re-pooling) is computed on the canonical window instead of whatever window the
+    raw-state store happened to capture."""
     meta_path = os.path.join(raw_store_dir, "raw_state_meta.json")
     with open(meta_path) as f:
         meta = json.load(f)
@@ -72,6 +77,11 @@ def derive_all_streams(raw_store_dir, route):
     band_final_list = []   # for route N's 2d, kept in beam order
 
     n_beams_total = meta.get("n_beams")
+    if canonical_lengths is not None and len(canonical_lengths) != n_beams_total:
+        raise ValueError(f"canonical_lengths has {len(canonical_lengths)} entries, expected "
+                          f"{n_beams_total} (must be in the same shard-sequential beam order).")
+
+    global_i = 0
     bar = tqdm(total=n_beams_total, desc="[Part 2] deriving velocity/kinematic/re-pooling", unit="beam")
     for shard_i, shard_path in enumerate(shard_paths):
         bar.set_postfix_str(f"shard {shard_i+1}/{len(shard_paths)}")
@@ -80,6 +90,9 @@ def derive_all_streams(raw_store_dir, route):
         for i in range(n_beams_shard):
             s, e = offsets[i], offsets[i + 1]
             raw_beam = raw[s:e]
+            if canonical_lengths is not None:
+                keep = min(int(canonical_lengths[global_i]), raw_beam.shape[0])
+                raw_beam = raw_beam[:keep]
             h = h_by_layer_from_raw(raw_beam)
 
             v95, v05 = vel_mod.compute_velocity_streams(h)
@@ -93,6 +106,7 @@ def derive_all_streams(raw_store_dir, route):
 
             prompt_ids.append(int(pid[i])); beam_idxs.append(int(bidx[i])); labels.append(int(lab[i]))
             bar.update(1)
+            global_i += 1
     bar.close()
 
     packed = vel_mod.pack_velocity_dataset(v95_list, v05_list, kin_list, s95_list, s05_list,
@@ -108,11 +122,13 @@ def derive_all_streams(raw_store_dir, route):
     return packed, band_derived, meta
 
 
-def derive_positive_max_core(raw_store_dir):
+def derive_positive_max_core(raw_store_dir, canonical_lengths=None):
     """Route N only: reconstructs the {dataset}_pooled_maxenergy-equivalent 'all_emb' tensor
     (positive max-pool over completion tokens, layers 15-23 ONLY -- excludes the final_norm
     slice) from the raw-state store, since Route N's run_route_n() never produced this file on
-    its own. Route R does not need this -- it reuses the existing pinned pooled .pt unchanged."""
+    its own. Route R does not need this -- it reuses the existing pinned pooled .pt unchanged.
+    canonical_lengths: optional, see derive_all_streams()'s docstring -- same truncate-before-pool
+    convention, in the same shard-sequential beam order."""
     meta_path = os.path.join(raw_store_dir, "raw_state_meta.json")
     with open(meta_path) as f:
         meta = json.load(f)
@@ -120,11 +136,16 @@ def derive_positive_max_core(raw_store_dir):
     n_mid_layers = W_END - W_START
 
     all_emb, prompt_ids, beam_idxs, labels = [], [], [], []
+    global_i = 0
     for shard_path in shard_paths:
         raw, offsets, pid, bidx, lab = gate_mod.load_raw_state_shard(shard_path)
         for i in range(len(pid)):
             s, e = offsets[i], offsets[i + 1]
             raw_beam = raw[s:e].float()
+            if canonical_lengths is not None:
+                keep = min(int(canonical_lengths[global_i]), raw_beam.shape[0])
+                raw_beam = raw_beam[:keep]
+            global_i += 1
             if raw_beam.shape[0] == 0:
                 D = raw_beam.shape[2]
                 H_pooled = torch.zeros(n_mid_layers, D)
@@ -231,6 +252,28 @@ def self_test():
         assert torch.allclose(v95_expected, torch.tensor(packed["V95"][0]), atol=1e-4)
         print("  [PASS] beam-0 velocity matches a direct hand-computed check")
 
+    # -- session05b: canonical-window truncation (--canonical-lengths) --
+    original_lengths = []
+    for sp in shard_paths:
+        _, sp_offsets, _, _, _ = gate_mod.load_raw_state_shard(sp)
+        original_lengths.extend((sp_offsets[1:] - sp_offsets[:-1]).tolist())
+    canonical_lengths = [max(0, int(l) - 1) for l in original_lengths]
+    canonical_packed, _, _ = derive_all_streams(out_dir, route="R", canonical_lengths=canonical_lengths)
+    assert canonical_packed["V95"].shape == (n_beams, 8, D)
+    # beam-0 check: truncating by 1 token should generally change the pooled value unless T_i<=1
+    T0 = raw0.shape[0]
+    if T0 > 1:
+        truncated_raw0 = raw0[: canonical_lengths[0]]
+        h0_trunc = {l: truncated_raw0[:, i, :] for i, l in enumerate(range(W_START, W_END))}
+        v95_trunc_expected, _ = vel_mod.compute_velocity_streams(h0_trunc)
+        assert torch.allclose(v95_trunc_expected, torch.tensor(canonical_packed["V95"][0]), atol=1e-4)
+        print(f"  [PASS] canonical-window truncation: beam-0 (T={T0} -> {canonical_lengths[0]}) "
+              f"matches a hand-computed truncated-then-pooled check")
+
+    canonical_core = derive_positive_max_core(out_dir, canonical_lengths)
+    assert len(canonical_core["all_emb"]) == n_beams
+    print(f"  [PASS] derive_positive_max_core with canonical_lengths: {len(canonical_core['all_emb'])} beams")
+
     print("\n[PASS] All self-test assertions passed.")
 
 
@@ -243,6 +286,12 @@ def main():
     parser.add_argument("--raw-state-dir", type=str, default=None)
     parser.add_argument("--route", type=str, choices=["R", "N"], default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--canonical-lengths", type=str, default=None,
+                         help="Path to 38_window_forensics.py's canonical-lengths JSON "
+                              "(session05b). If given, every stream is truncated to the "
+                              "canonical per-beam window before pooling, and outputs are "
+                              "suffixed '_canonical' so they don't clobber the non-canonical "
+                              "files from the original derivation run.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -253,11 +302,20 @@ def main():
     if not args.raw_state_dir or not args.route:
         print("ERROR: --raw-state-dir and --route required."); sys.exit(1)
 
+    canonical_lengths = None
+    suffix = ""
+    if args.canonical_lengths:
+        with open(args.canonical_lengths) as f:
+            canonical_lengths = json.load(f)["canonical_lengths"]
+        suffix = "_canonical"
+        print(f"Using canonical per-beam windows from {args.canonical_lengths} "
+              f"({len(canonical_lengths)} beams).")
+
     print(f"Deriving streams from {args.raw_state_dir} (route {args.route}) ...")
-    packed, band_derived, meta = derive_all_streams(args.raw_state_dir, args.route)
+    packed, band_derived, meta = derive_all_streams(args.raw_state_dir, args.route, canonical_lengths)
 
     out_dir = args.output_dir or args.raw_state_dir
-    out_path = os.path.join(out_dir, "velocity_kinematic_repooling.npz")
+    out_path = os.path.join(out_dir, f"velocity_kinematic_repooling{suffix}.npz")
     decoding_config = meta.get("decoding_config", {})
     vel_mod.save_velocity_dataset(packed, out_path, meta.get("checkpoint_id", "unknown"),
                                    meta.get("seed", 0), decoding_config)
@@ -265,18 +323,19 @@ def main():
 
     if band_derived is not None:
         band_packed, band_meta = band_derived
-        band_out_path = os.path.join(out_dir, "band_derived_v3.npz")
+        band_out_path = os.path.join(out_dir, f"band_derived_v3{suffix}.npz")
         shard_paths, band_meta_path = band_mod.save_packed(band_packed, band_meta, band_out_path)
         print(f"Saved Route N-derived band npz: {shard_paths}")
 
     if args.route == "N":
         # run_route_n() never produced a pooled 'all_emb' core tensor on its own -- reconstruct
         # it here from the raw-state store (positive max-pool, layers 15-23 only) so
-        # 33_eval_session04.py --v3-pooled-pt has something real to point at.
-        core_data = derive_positive_max_core(args.raw_state_dir)
-        core_out_path = os.path.join(out_dir, "truthfulqa_v3_pooled.pt")
+        # 33_eval_session04.py --v3-pooled-pt / 37_eval_session05.py --core-pooled-pt has
+        # something real to point at.
+        core_data = derive_positive_max_core(args.raw_state_dir, canonical_lengths)
+        core_out_path = os.path.join(out_dir, f"truthfulqa_v3_pooled{suffix}.pt")
         torch.save(core_data, core_out_path)
-        print(f"Saved Route N pooled core tensor (--v3-pooled-pt target): {core_out_path}")
+        print(f"Saved Route N pooled core tensor (--core-pooled-pt target): {core_out_path}")
 
 
 if __name__ == "__main__":

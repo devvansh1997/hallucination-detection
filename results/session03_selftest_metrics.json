@@ -147,23 +147,23 @@
     "fold_diagnostics": [
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.21175384521484375
+        "total_fold_time_s": 0.21686339378356934
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.19502925872802734
+        "total_fold_time_s": 0.20105695724487305
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.21001315116882324
+        "total_fold_time_s": 0.21190476417541504
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.21300649642944336
+        "total_fold_time_s": 0.21568965911865234
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.22049975395202637
+        "total_fold_time_s": 0.22334861755371094
       }
     ]
   },
@@ -259,23 +259,23 @@
     "fold_diagnostics": [
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.15899896621704102
+        "total_fold_time_s": 0.16441750526428223
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.15911459922790527
+        "total_fold_time_s": 0.16768097877502441
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.14949846267700195
+        "total_fold_time_s": 0.1512312889099121
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.14949941635131836
+        "total_fold_time_s": 0.16270709037780762
       },
       {
         "pca_k": 32,
-        "total_fold_time_s": 0.16649985313415527
+        "total_fold_time_s": 0.16835522651672363
       }
     ]
   },
@@ -371,33 +371,33 @@
     "fold_diagnostics": [
       {
         "subsampled": false,
-        "fit_time_s": 1.7000939846038818,
+        "fit_time_s": 1.851963996887207,
         "n_fit_tokens": 15051,
-        "total_fold_time_s": 1.810746431350708
+        "total_fold_time_s": 1.9630687236785889
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.7192599773406982,
+        "fit_time_s": 1.8630359172821045,
         "n_fit_tokens": 15064,
-        "total_fold_time_s": 1.812959909439087
+        "total_fold_time_s": 1.9733810424804688
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.7193706035614014,
+        "fit_time_s": 1.8361787796020508,
         "n_fit_tokens": 15067,
-        "total_fold_time_s": 1.8287053108215332
+        "total_fold_time_s": 1.9469828605651855
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.719421148300171,
+        "fit_time_s": 1.8969252109527588,
         "n_fit_tokens": 14970,
-        "total_fold_time_s": 1.8142359256744385
+        "total_fold_time_s": 2.0080411434173584
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.6745350360870361,
+        "fit_time_s": 1.8378276824951172,
         "n_fit_tokens": 15036,
-        "total_fold_time_s": 1.784257411956787
+        "total_fold_time_s": 1.9486024379730225
       }
     ]
   },
@@ -493,33 +493,33 @@
     "fold_diagnostics": [
       {
         "subsampled": false,
-        "fit_time_s": 1.5798149108886719,
+        "fit_time_s": 1.7262439727783203,
         "n_fit_tokens": 15051,
-        "total_fold_time_s": 1.6739635467529297
+        "total_fold_time_s": 1.8368802070617676
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.5798683166503906,
+        "fit_time_s": 1.7569715976715088,
         "n_fit_tokens": 15064,
-        "total_fold_time_s": 1.6895411014556885
+        "total_fold_time_s": 1.8691060543060303
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.5339555740356445,
+        "fit_time_s": 1.6641223430633545,
         "n_fit_tokens": 15067,
-        "total_fold_time_s": 1.6435952186584473
+        "total_fold_time_s": 1.7757525444030762
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.5493125915527344,
+        "fit_time_s": 1.6951000690460205,
         "n_fit_tokens": 14970,
-        "total_fold_time_s": 1.659747838973999
+        "total_fold_time_s": 1.8058710098266602
       },
       {
         "subsampled": false,
-        "fit_time_s": 1.4894194602966309,
+        "fit_time_s": 1.632650375366211,
         "n_fit_tokens": 15036,
-        "total_fold_time_s": 1.5856246948242188
+        "total_fold_time_s": 1.7422966957092285
       }
     ]
   },

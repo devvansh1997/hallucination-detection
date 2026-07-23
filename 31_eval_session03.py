@@ -616,7 +616,7 @@ def main():
         return best
 
     print(f"\n{'Row':32s} {'pooled':>8s} {'pooled CI':>16s} {'within-p':>9s} "
-          f"{'wp CI':>16s} {'pairedΔ(wp)':>12s} {'Δ CI':>16s} {'excl0':>6s}")
+          f"{'wp CI':>16s} {'pairedDelta(wp)':>12s} {'Delta CI':>16s} {'excl0':>6s}")
 
     def row(name, d, delta=None):
         ci = d["ci95"]; wci = d["within_prompt"]["ci95"]
@@ -631,7 +631,7 @@ def main():
               f" {d['within_prompt']['within_prompt_auroc']:9.4f} [{wci[0]:.3f},{wci[1]:.3f}]".ljust(28) +
               f" {dstr} {dcistr:>16s} {excl:>6s}")
 
-    print("  (paired Δ column: for *-only rows it is band-vs-rand; for fused rows it is fused-vs-core-only)")
+    print("  (paired delta column: for *-only rows it is band-vs-rand; for fused rows it is fused-vs-core-only)")
     row("core-only (RF)", core_results["RF"])
     for rname in primary_readouts:
         d_bvr = part_a_results[rname]["paired_delta_band_vs_rand_within_prompt"]
@@ -663,7 +663,7 @@ def main():
     for rname in primary_readouts:
         d = part_a_results[rname]["paired_delta_band_vs_rand_within_prompt"]
         verdict = "REAL SIGNAL (band > rand)" if (d["excludes_zero"] and d["mean_delta"] > 0) else \
-                  "band ≈ rand or band < rand" if not d["excludes_zero"] or d["mean_delta"] <= 0 else "?"
+                  "band ~= rand or band < rand" if not d["excludes_zero"] or d["mean_delta"] <= 0 else "?"
         print(f"  {rname}: band-vs-rand within-prompt delta = {d['mean_delta']:.4f} "
               f"CI={d['ci95']} excludes_zero={d['excludes_zero']}  -> {verdict}")
     d = delta_contrast_wp

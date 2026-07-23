@@ -480,7 +480,7 @@ def main():
         json.dump(leaderboard, f, indent=2)
     print(f"Wrote: {args.leaderboard}")
 
-    print(f"\n{'Row':30s} {'pooled':>8s} {'within-p':>9s} {'pairedΔ(wp) vs core':>20s} {'excl0':>6s}")
+    print(f"\n{'Row':30s} {'pooled':>8s} {'within-p':>9s} {'pairedDelta(wp) vs core':>20s} {'excl0':>6s}")
     for name in ("core_max", "q_static", "q_velocity", "joint", "core_concat"):
         summary = conditions[name][0]
         d = c1_deltas.get(name)

@@ -693,7 +693,7 @@ def main():
     print(f"\nWrote: {args.output_json}")
 
     print(f"\n{'Row':38s} {'pooled':>8s} {'pooled CI':>16s} {'within-p':>9s} {'wp CI':>16s} "
-          f"{'pairedΔ(wp)':>12s} {'excl0':>6s}")
+          f"{'pairedDelta(wp)':>12s} {'excl0':>6s}")
 
     def row(name, d, delta=None):
         ci = d["ci95"]; wci = d["within_prompt"]["ci95"]
