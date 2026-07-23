@@ -31,6 +31,7 @@ import json
 import os
 import random
 import sys
+import time
 
 import numpy as np
 import torch
@@ -421,10 +422,16 @@ def main():
     if not args.manifest or not args.dataset:
         print("ERROR: --manifest and --dataset required (or use --combine)."); sys.exit(1)
 
+    t_start = time.time()
+
+    def elapsed(label):
+        print(f"  [{label}: {time.time()-t_start:.1f}s elapsed since start]")
+
     with open(args.manifest) as f:
         manifest = json.load(f)
     seq_path = args.sequences or manifest["sequences_path"]
     seq_data = torch.load(seq_path, weights_only=False)
+    elapsed("sequences loaded")
 
     import yaml
     from transformers import AutoTokenizer
@@ -434,6 +441,7 @@ def main():
     model_id = next(m["id"] for m in cfg["models"] if m["folder"] == args.model_folder)
     print(f"Loading tokenizer only (CPU-safe): {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    elapsed("tokenizer loaded")
 
     import importlib.util
 
@@ -452,42 +460,51 @@ def main():
     source_lookup = {s["prompt_id"]: s for s in source_samples}
     a_result = check_structure(seq_data, ds_cfg, sample_source_lookup=source_lookup.get, tokenizer=tokenizer)
     print(f"  {'PASS' if a_result['pass'] else 'FAIL'}: {a_result}")
+    elapsed("A done (source split load + spot-check dominates this step)")
 
     print("\n[B] Window/termination ...")
     b_result = check_window(seq_data, eos_ids_set)
     print(f"  {'PASS' if b_result['pass'] else 'FAIL'}: violations={b_result['n_window_violations']}, "
           f"empty={b_result['empty_pct']:.2f}%")
+    elapsed("B done")
 
     print("\n[C] Round-trip ...")
     c_result = check_roundtrip(seq_data, tokenizer)
     print(f"  {'PASS' if c_result['pass'] else 'FAIL'}: {c_result['n_exact_match']}/{c_result['n_checked']} exact")
+    elapsed("C done")
 
     print("\n[E] Labels ...")
     e_result = check_labels(seq_data)
     print(f"  {'PASS' if e_result['pass'] else 'FAIL'}: hallucination_rate={e_result['hallucination_rate_pct']:.1f}%")
     if not e_result["in_5_95_band"]:
         print(f"  [WARN] hallucination rate {e_result['hallucination_rate_pct']:.1f}% is outside [5%,95%]")
+    elapsed("E done")
 
     print("\n[F] Manifest reload-verify ...")
     f_result = check_manifest(seq_data, manifest)
     print(f"  {'PASS' if f_result['pass'] else 'FAIL'}: {f_result}")
+    elapsed("F done")
 
     print("\nComputing eyeball examples (recomputes ROUGE-L/BLEURT for 10 examples only) ...")
     import evaluate
     rouge = evaluate.load("rouge")
     bleurt = evaluate.load("bleurt", config_name=cfg["judge"]["bleurt_model"])
+    elapsed("rouge/bleurt libraries loaded")
     examples = eyeball_examples(seq_data, source_lookup.get, rouge, bleurt,
                                  cfg["judge"]["rouge_threshold"], cfg["judge"]["sen_sim_threshold"])
     for ex in examples:
         print(f"  [{ex['label']}] beam {ex['beam']} (rougeL={ex['rouge_l']}, bleurt_max={ex['bleurt_max']}): "
               f"{ex['text'][:100]!r}")
+    elapsed("eyeball examples done")
 
+    total_s = time.time() - t_start
     d_pass = manifest.get("assert_d_determinism_pass")
     results = {"a": a_result, "b": b_result, "c": c_result, "e": e_result, "f": f_result,
-               "d_pass": d_pass, "examples": examples, "decoding_config": manifest.get("decoding_config", {})}
+               "d_pass": d_pass, "examples": examples, "decoding_config": manifest.get("decoding_config", {}),
+               "timing_seconds": total_s}
     overall_pass = all([a_result["pass"], b_result["pass"], c_result["pass"], e_result["pass"],
                          f_result["pass"], bool(d_pass)])
-    print(f"\n{'='*70}\nOVERALL: {'PASS' if overall_pass else 'FAIL'}\n{'='*70}")
+    print(f"\n{'='*70}\nOVERALL: {'PASS' if overall_pass else 'FAIL'}  ({total_s:.1f}s total)\n{'='*70}")
 
     out_json = args.output_json or f"results/session06_{args.dataset}.json"
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
