@@ -8,10 +8,12 @@ decoded text, and labels this time, which is why this is far cheaper than 34_gat
 regenerate.py's run_route_n).
 
 Dataset loading (Step 1 audit): reuses 01_generate_full_beams.py's loader logic verbatim
-(TriviaQA dedup by question_id lines ~80-93, NQ-Open lines ~94-100, TyDiQA-GP English-filter +
-context handling lines ~101-110) -- re-implemented here rather than imported, since that file is
-a top-level script with argparse.parse_args() at import time (same reuse constraint as every
-other numbered script this project). Labeling uses the SIMPLE two-threshold formula that actually
+(TriviaQA dedup by question_id, NQ-Open, TyDiQA-GP English-filter + context handling) --
+re-implemented here rather than imported, since that file is a top-level script with
+argparse.parse_args() at import time (same reuse constraint as every other numbered script this
+project). Cross-checked against 01_generate_full_beams.py:60-69: both loaders read the SAME
+config.yaml hf_path/hf_config entries (neither hardcodes a different source), confirmed by
+inspection, not just assumption. Labeling uses the SIMPLE two-threshold formula that actually
 produced the TruthfulQA v3 data (21_generate_maxpool_datasets.py / 29_generate_extract_band.py /
 34_gate_reconstruct_or_regenerate.py's run_route_n), NOT 01_generate_full_beams.py's more complex
 contrastive judge -- per this session's explicit instruction.
@@ -26,6 +28,22 @@ that was never actually used -- see Deviations.
 Fixes the window bug session05b diagnosed: completion token ids are truncated to the CANONICAL
 window (content through the first stop-token inclusive) at save time, not v2's buggy
 literal-eos_token_id-only filter.
+
+*** ADDENDUM 2 (full validation splits, no subsampling): supersedes the original 2,000-prompt
+cap. Every dataset now uses its FULL standard validation split -- no apply_cap, no subsample
+seed. Raw HF split length is hard-asserted for triviaqa (17,944) and nq_open (3,610) as a
+config/version sanity check (catches loading the wrong hf_config/split silently); tydiqa_gp has
+no fixed expected raw length (multi-language split), so its English-filtered count is reported
+only, informally checked against ~440. TriviaQA's existing question_id dedup (inherited from
+01_generate_full_beams.py, confirmed identical config source) is KEPT: it reduces the raw 17,944
+rows to ~9,960 unique questions (multiple rows share a question_id across different evidence
+documents even in the "nocontext" config). This means the actual generation N is ~9,960, not
+17,944 -- the addendum's "~22x TruthfulQA" figure (17,944/817) appears to assume the undeduped
+raw count. Flagging this explicitly rather than silently picking a side: both the raw (asserted)
+and post-dedup (actual) counts are printed and pinned in the manifest so this is never ambiguous
+after the fact. Alias-max scoring: TriviaQA's correct_answers now includes the full
+answer.aliases list (deduped, value first), not just answer.value -- NQ-Open and TyDiQA-GP
+already used their full multi-answer fields and are unchanged.
 
 Usage:
   python 39_generate_dataset.py --self-test
@@ -71,18 +89,60 @@ find_canonical_length = window_mod.find_canonical_length
 # quoted in reports/session05_extraction_forensics.md) -- asserted against, not silently accepted.
 EXPECTED_VERSIONS = {"transformers": "5.13.0", "torch": "2.13.0+cu126", "cuda": "12.6"}
 GEN_SEED_DEFAULT = 0
-CAP_DEFAULT = 2000
-EMPIRICAL_S_PER_PROMPT = 2.55   # from the real v3 TruthfulQA run: 2080s / 817 prompts
+
+# Empirically measured per-prompt generation rates (real cluster runs, same decoding config).
+# TruthfulQA's open-ended answers are much longer than TriviaQA/NQ-Open/TyDiQA-GP's short
+# factoid answers, so 2.55 is a conservative upper bound for the latter three, not a good
+# central estimate -- both are shown when printing resource estimates rather than picking one.
+EMPIRICAL_S_PER_PROMPT_LONG_ANSWER = 2.55    # TruthfulQA v3 real run: 2080s / 817 prompts
+EMPIRICAL_S_PER_PROMPT_SHORT_ANSWER = 1.29   # TriviaQA real run: 2581s / 2000 prompts
+
+# Raw HF validation-split length, hard-asserted at load time as a config/version sanity check
+# (session06 Phase-1 addendum). tydiqa_gp has no fixed expected value (multi-language split;
+# its English-filtered count is reported informally instead -- see load_dataset_samples).
+EXPECTED_SPLIT_LENGTH = {"triviaqa": 17944, "nq_open": 3610}
 
 
 # ==============================================================================
-# DATASET LOADING (Step 1) -- verbatim re-implementation of 01_generate_full_beams.py's loader
+# SMALL PURE HELPERS (independently self-testable, no network)
+# ==============================================================================
+
+def assert_split_length(name, raw_len):
+    """Hard-fails if the raw loaded HF split doesn't match the expected, pinned length -- catches
+    silently loading the wrong hf_config/split/dataset version. No expected value -> info-only."""
+    expected = EXPECTED_SPLIT_LENGTH.get(name)
+    if expected is not None:
+        assert raw_len == expected, (
+            f"{name}: raw HF validation split length {raw_len} != expected {expected}. This "
+            f"likely means a different hf_config/split/dataset version is being loaded than "
+            f"intended -- check config.yaml's hf_path/hf_config for '{name}'.")
+        print(f"  [PASS] {name} raw validation split length == {expected} (asserted)")
+    else:
+        print(f"  [INFO] {name} raw validation split length = {raw_len} (no fixed expected value; reported only)")
+    return raw_len
+
+
+def dedup_preserve_order(items):
+    seen = set()
+    out = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+# ==============================================================================
+# DATASET LOADING (Step 1) -- verbatim re-implementation of 01_generate_full_beams.py's loader,
+# extended per the Phase-1 addendum: full split (no cap), alias-max for TriviaQA.
 # ==============================================================================
 
 def load_dataset_samples(ds_cfg):
     from datasets import load_dataset
     name = ds_cfg["name"]
     ds = load_dataset(ds_cfg["hf_path"], ds_cfg["hf_config"], split="validation")
+    raw_split_len = len(ds)
+    assert_split_length(name, raw_split_len)
     template = ds_cfg["prompt_template"]
     samples = []
 
@@ -94,9 +154,15 @@ def load_dataset_samples(ds_cfg):
             if qid in seen:
                 continue
             seen.add(qid)
+            aliases = ex["answer"].get("aliases", [])
+            correct_answers = dedup_preserve_order([str(ex["answer"]["value"])] + [str(a) for a in aliases])
             samples.append({"prompt_id": i, "prompt_text": template.format(question=ex["question"]),
-                             "correct_answers": [str(ex["answer"]["value"])], "incorrect_answers": []})
+                             "correct_answers": correct_answers, "incorrect_answers": []})
             i += 1
+        print(f"  [INFO] triviaqa: {raw_split_len} raw rows -> {len(samples)} unique questions "
+              f"after question_id dedup (inherited from 01_generate_full_beams.py's loader; "
+              f"multiple rows per question exist even in 'rc.nocontext' since it strips context "
+              f"text only, not the per-evidence-document row structure)")
     elif name == "nq_open":
         for i, ex in enumerate(ds):
             samples.append({"prompt_id": i, "prompt_text": template.format(question=ex["question"]),
@@ -112,20 +178,12 @@ def load_dataset_samples(ds_cfg):
                              "correct_answers": [str(a) for a in ex["answers"]["text"] if a],
                              "incorrect_answers": []})
             i += 1
+        print(f"  [INFO] tydiqa_gp: {raw_split_len} raw (all-language) rows -> {len(samples)} "
+              f"English-filtered questions (expected ~440 per Phase-1 addendum; informal check, not asserted)")
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
-    return samples
-
-
-def apply_cap(samples, cap, seed=0):
-    """Deterministic seed-0 subsample if over cap; full set (re-indexed) otherwise."""
-    if len(samples) <= cap:
-        return samples, False
-    rng = random.Random(seed)
-    shuffled = samples[:]
-    rng.shuffle(shuffled)
-    return shuffled[:cap], True
+    return samples, raw_split_len
 
 
 # ==============================================================================
@@ -145,6 +203,8 @@ def prompt_seed(global_seed, prompt_id):
 
 def is_correct_simple(gen_text, correct, incorrect, rouge, bleurt, rouge_threshold=0.7,
                        sen_sim_threshold=0.5):
+    """correct may now be a multi-alias list (TriviaQA) -- ROUGE-L and BLEURT are each computed
+    against every reference and the MAX is taken, per the alias-max scoring rule."""
     r = rouge.compute(predictions=[gen_text] * len(correct), references=correct) if correct else {"rougeL": 0.0}
     rl = r["rougeL"]
     all_refs = correct + incorrect
@@ -180,36 +240,45 @@ def check_versions(force=False):
 
 
 # ==============================================================================
+# RESOURCE ESTIMATE -- printed BEFORE launching generation (Step 1 spec requirement), shared by
+# both --audit-only and the real run (so it's satisfied even in a single combined invocation).
+# ==============================================================================
+
+def print_resource_estimate(name, n_final):
+    est_s_short = n_final * EMPIRICAL_S_PER_PROMPT_SHORT_ANSWER
+    est_s_long = n_final * EMPIRICAL_S_PER_PROMPT_LONG_ANSWER
+    est_disk_mb = n_final * 10 * 0.002   # ~2KB/beam empirically for token ids + decoded text
+    print(f"  N (full validation split, no subsampling): {n_final}")
+    print(f"  Estimated GPU time: {est_s_short/3600:.2f}-{est_s_long/3600:.2f} hours "
+          f"({n_final} prompts x 1.29-2.55 s/prompt -- 1.29 is TriviaQA's real measured rate for "
+          f"short factoid answers, 2.55 is TruthfulQA's real measured rate for longer open-ended "
+          f"answers; NQ-Open/TyDiQA-GP are structurally closer to TriviaQA's short-answer style)")
+    print(f"  Estimated disk: ~{est_disk_mb:.0f} MB (sequences+text+labels only -- no hidden "
+          f"states captured this session)")
+    return est_s_short, est_s_long, est_disk_mb
+
+
+# ==============================================================================
 # STEP 1 -- AUDIT-ONLY PREVIEW (CPU, no model)
 # ==============================================================================
 
-def run_audit(ds_cfg, cap, seed):
+def run_audit(ds_cfg):
     print(f"[Step 1 audit] {ds_cfg['name']}: loading from {ds_cfg['hf_path']} "
           f"(config={ds_cfg['hf_config']}) ...")
-    samples = load_dataset_samples(ds_cfg)
-    n_before_cap = len(samples)
-    samples, was_capped = apply_cap(samples, cap, seed)
+    print(f"  [Cross-check] 01_generate_full_beams.py:60-69 reads the SAME config.yaml entry "
+          f"(hf_path={ds_cfg['hf_path']}, hf_config={ds_cfg['hf_config']}) -- confirmed identical "
+          f"by inspection, not independently hardcoded elsewhere.")
+    samples, raw_split_len = load_dataset_samples(ds_cfg)
     n_final = len(samples)
-
-    est_gpu_seconds = n_final * EMPIRICAL_S_PER_PROMPT
-    est_gpu_hours = est_gpu_seconds / 3600
-    # no hidden-state capture this session -- disk is just ids/text/labels, small
-    est_disk_mb = n_final * 10 * 0.002   # ~2KB/beam empirically for token ids + decoded text
-
-    print(f"  N before cap: {n_before_cap}  |  N after cap: {n_final}  |  capped: {was_capped}")
-    print(f"  Estimated GPU time: {est_gpu_hours:.2f} hours ({est_gpu_seconds:.0f}s, "
-          f"based on the real TruthfulQA v3 run's {EMPIRICAL_S_PER_PROMPT}s/prompt)")
-    print(f"  Estimated disk: ~{est_disk_mb:.0f} MB (sequences+text+labels only -- no hidden "
-          f"states captured this session)")
-    return {"n_before_cap": n_before_cap, "n_final": n_final, "was_capped": was_capped,
-            "est_gpu_hours": est_gpu_hours, "est_disk_mb": est_disk_mb}
+    print_resource_estimate(ds_cfg["name"], n_final)
+    return {"raw_split_len": raw_split_len, "n_final": n_final}
 
 
 # ==============================================================================
 # STEP 2 -- GENERATE + LABEL + PIN (GPU)
 # ==============================================================================
 
-def run_generation(ds_cfg, model_folder, cap, global_seed, out_dir, force_versions=False,
+def run_generation(ds_cfg, model_folder, global_seed, out_dir, force_versions=False,
                     n_determinism_check=5):
     import evaluate
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -225,11 +294,13 @@ def run_generation(ds_cfg, model_folder, cap, global_seed, out_dir, force_versio
     else:
         print(f"  Version check PASSED: {versions}")
 
-    samples = load_dataset_samples(ds_cfg)
-    n_before_cap = len(samples)
-    samples, was_capped = apply_cap(samples, cap, global_seed)
-    print(f"[Step 2] {ds_cfg['name']}: {len(samples)} prompts (before cap: {n_before_cap}, "
-          f"capped: {was_capped})")
+    print(f"  [Cross-check] 01_generate_full_beams.py:60-69 reads the SAME config.yaml entry "
+          f"(hf_path={ds_cfg['hf_path']}, hf_config={ds_cfg['hf_config']}) -- confirmed identical "
+          f"by inspection, not independently hardcoded elsewhere.")
+    samples, raw_split_len = load_dataset_samples(ds_cfg)
+    print(f"[Step 2] {ds_cfg['name']}: {len(samples)} prompts (full validation split, no subsampling; "
+          f"raw split length {raw_split_len})")
+    print_resource_estimate(ds_cfg["name"], len(samples))
 
     rouge = evaluate.load("rouge")
     bleurt = evaluate.load("bleurt", config_name=cfg["judge"]["bleurt_model"])
@@ -346,7 +417,7 @@ def run_generation(ds_cfg, model_folder, cap, global_seed, out_dir, force_versio
 
     return {"seq_path": seq_path, "n_prompts": len(samples), "n_beams": n_beams,
             "n_empty": n_empty, "decoding_config": decoding_config, "assert_d": d_results,
-            "assert_d_pass": d_pass}
+            "assert_d_pass": d_pass, "raw_split_len": raw_split_len}
 
 
 # ==============================================================================
@@ -362,6 +433,11 @@ def build_manifest(gen_result, ds_cfg, out_dir):
 
     manifest = {
         "dataset": ds_cfg["name"], "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "repo": ds_cfg["hf_path"], "subset": ds_cfg["hf_config"], "split": "validation",
+        "split_length": gen_result["raw_split_len"],
+        "sampling": "full validation split",
+        "sampling_note": ("HARP does not report per-dataset sample counts; we evaluate on the "
+                           "full standard validation split of each dataset."),
         "n_prompts": gen_result["n_prompts"], "n_beams": gen_result["n_beams"],
         "n_empty_completions": gen_result["n_empty"],
         "sequences_path": os.path.abspath(gen_result["seq_path"]),
@@ -383,7 +459,7 @@ def build_manifest(gen_result, ds_cfg, out_dir):
 
 def self_test():
     print("=" * 70)
-    print("  SELF-TEST: prompt seeding, cap logic, manifest building (no model/GPU/network)")
+    print("  SELF-TEST: prompt seeding, split-length assert, manifest building (no model/GPU/network)")
     print("=" * 70)
 
     s1 = prompt_seed(0, 42)
@@ -396,17 +472,20 @@ def self_test():
     assert 0 <= s1 < 2 ** 31
     print(f"  [PASS] prompt_seed deterministic and seed/prompt-sensitive: {s1}, {s3}, {s4}")
 
-    fake_samples = [{"prompt_id": i, "x": i} for i in range(5000)]
-    capped, was_capped = apply_cap(fake_samples, cap=2000, seed=0)
-    assert was_capped and len(capped) == 2000
-    capped2, _ = apply_cap(fake_samples, cap=2000, seed=0)
-    assert [s["prompt_id"] for s in capped] == [s["prompt_id"] for s in capped2], \
-        "apply_cap must be deterministic given the same seed"
-    print(f"  [PASS] apply_cap: 5000 -> {len(capped)} (capped={was_capped}), deterministic across calls")
+    assert dedup_preserve_order(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
+    assert dedup_preserve_order([]) == []
+    print("  [PASS] dedup_preserve_order: order-preserving, duplicates removed")
 
-    uncapped, was_capped_u = apply_cap(fake_samples[:100], cap=2000, seed=0)
-    assert not was_capped_u and len(uncapped) == 100
-    print(f"  [PASS] apply_cap: under-cap set (100 < 2000) returned unchanged")
+    assert_split_length("triviaqa", 17944)   # must not raise
+    try:
+        assert_split_length("triviaqa", 12345)
+        raise AssertionError("assert_split_length should have raised on a length mismatch")
+    except AssertionError as e:
+        assert "17944" in str(e) or "12345" in str(e)
+    assert_split_length("nq_open", 3610)
+    assert_split_length("tydiqa_gp", 999)   # no fixed expected value -- must not raise (info-only)
+    print("  [PASS] assert_split_length: raises on mismatch for pinned datasets, "
+          "info-only (no raise) for datasets with no fixed expected length")
 
     # -- fabricate a minimal generation result and build a manifest from it --
     tmp_dir = os.path.join(HERE, "results", "_selftest_gen_dataset")
@@ -428,14 +507,25 @@ def self_test():
 
     gen_result = {"seq_path": seq_path, "n_prompts": 2, "n_beams": n_beams, "n_empty": 0,
                   "decoding_config": seq_data["decoding_config"], "assert_d": [{"prompt_id": 0, "match": True}],
-                  "assert_d_pass": True}
-    manifest, manifest_path = build_manifest(gen_result, {"name": "faketest"}, tmp_dir)
+                  "assert_d_pass": True, "raw_split_len": 17944}
+    manifest, manifest_path = build_manifest(gen_result, {"name": "faketest", "hf_path": "fake/path",
+                                                            "hf_config": "fake_config"}, tmp_dir)
     assert os.path.exists(manifest_path)
     assert manifest["n_beams"] == n_beams
+    assert manifest["split_length"] == 17944
+    assert manifest["sampling"] == "full validation split"
+    assert "HARP does not report" in manifest["sampling_note"]
+    assert manifest["repo"] == "fake/path" and manifest["subset"] == "fake_config"
     with open(manifest_path) as f:
         reloaded = json.load(f)
     assert reloaded["labels_sha256"] == manifest["labels_sha256"]
-    print(f"  [PASS] build_manifest: wrote and reloaded {manifest_path}, hashes consistent")
+    print(f"  [PASS] build_manifest: wrote and reloaded {manifest_path}, hashes consistent, "
+          f"repo/subset/split_length/sampling/sampling_note fields present")
+
+    est_short, est_long, est_disk = print_resource_estimate("faketest", 1000)
+    assert est_short < est_long, "short-answer estimate should be less than the long-answer estimate"
+    assert est_disk > 0
+    print(f"  [PASS] print_resource_estimate: short={est_short:.0f}s < long={est_long:.0f}s, disk={est_disk:.0f}MB")
 
     mismatched_versions, mismatches = check_versions(force=True)
     # this environment almost certainly does NOT match EXPECTED_VERSIONS -- confirms the check fires
@@ -460,7 +550,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, choices=["triviaqa", "nq_open", "tydiqa_gp"], default=None)
     parser.add_argument("--model_folder", type=str, default="llama-3.1-8b-instruct")
-    parser.add_argument("--cap", type=int, default=CAP_DEFAULT)
     parser.add_argument("--global-seed", type=int, default=GEN_SEED_DEFAULT)
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--force-version-mismatch", action="store_true")
@@ -480,14 +569,14 @@ def main():
     ds_cfg = next(d for d in cfg["datasets"] if d["name"] == args.dataset)
 
     if args.audit_only:
-        run_audit(ds_cfg, args.cap, args.global_seed)
+        run_audit(ds_cfg)
         return
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required for generation (only --audit-only is CPU-only).")
 
     out_dir = args.output_dir or os.path.join(cfg["output"]["data_dir"], args.model_folder)
-    gen_result = run_generation(ds_cfg, args.model_folder, args.cap, args.global_seed, out_dir,
+    gen_result = run_generation(ds_cfg, args.model_folder, args.global_seed, out_dir,
                                  force_versions=args.force_version_mismatch)
     manifest, manifest_path = build_manifest(gen_result, ds_cfg, out_dir)
     print(f"\nWrote manifest: {manifest_path}")

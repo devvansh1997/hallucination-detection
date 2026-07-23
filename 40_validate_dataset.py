@@ -448,10 +448,8 @@ def main():
 
     print("\n[A] Structure (incl. 20-prompt source alignment spot-check) ...")
     gen_mod = _load("s06_gen", "39_generate_dataset.py")
-    global_seed = manifest["decoding_config"]["global_seed"]
-    source_samples = gen_mod.load_dataset_samples(ds_cfg)
-    capped_samples, _ = gen_mod.apply_cap(source_samples, cap=manifest["n_prompts"], seed=global_seed)
-    source_lookup = {s["prompt_id"]: s for s in capped_samples}
+    source_samples, _raw_split_len = gen_mod.load_dataset_samples(ds_cfg)
+    source_lookup = {s["prompt_id"]: s for s in source_samples}
     a_result = check_structure(seq_data, ds_cfg, sample_source_lookup=source_lookup.get, tokenizer=tokenizer)
     print(f"  {'PASS' if a_result['pass'] else 'FAIL'}: {a_result}")
 
