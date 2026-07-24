@@ -132,6 +132,19 @@ def dedup_preserve_order(items):
     return out
 
 
+def extract_tydiqa_language(example_id):
+    """TyDiQA's secondary_task config has NO 'language' field (real schema, confirmed by
+    inspection: answers/context/id/question/title only) -- language is encoded as the prefix of
+    'id' instead (e.g. "arabic-2387335860751143628-1" -> "arabic"). The originally inherited
+    filter (ex.get("language", "english") != "english", copied verbatim from
+    01_generate_full_beams.py) was a silent no-op: since the key never exists, .get()'s default
+    always won and every row passed through regardless of actual language -- caught only after
+    a real cluster run's eyeball examples showed Arabic/Korean/Telugu/Finnish/Swahili/Indonesian
+    text in what was supposed to be an English-only dataset. This is a real, pre-existing bug in
+    the old loader too; fixed here (39_*) only, per the additive-only rule against 01-25."""
+    return example_id.split("-")[0]
+
+
 # ==============================================================================
 # DATASET LOADING (Step 1) -- verbatim re-implementation of 01_generate_full_beams.py's loader,
 # extended per the Phase-1 addendum: full split (no cap), alias-max for TriviaQA.
@@ -170,7 +183,7 @@ def load_dataset_samples(ds_cfg):
     elif name == "tydiqa_gp":
         i = 0
         for ex in ds:
-            if ex.get("language", "english") != "english":
+            if extract_tydiqa_language(ex["id"]) != "english":
                 continue
             ctx = ex["context"][0] if isinstance(ex["context"], list) else ex["context"]
             samples.append({"prompt_id": i,
@@ -475,6 +488,15 @@ def self_test():
     assert dedup_preserve_order(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
     assert dedup_preserve_order([]) == []
     print("  [PASS] dedup_preserve_order: order-preserving, duplicates removed")
+
+    # regression test for the real TyDiQA-GP bug found on the first cluster run: the language
+    # filter must actually filter (the old ex.get("language","english") approach was a silent
+    # no-op since that key doesn't exist in the real schema).
+    assert extract_tydiqa_language("arabic-2387335860751143628-1") == "arabic"
+    assert extract_tydiqa_language("english-12345-1") == "english"
+    assert extract_tydiqa_language("korean-999-3") == "korean"
+    print("  [PASS] extract_tydiqa_language: correctly parses language from the real id format "
+          "(regression test for the real TyDiQA-GP no-op-filter bug)")
 
     assert_split_length("triviaqa", 17944)   # must not raise
     try:
