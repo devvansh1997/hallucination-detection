@@ -1,0 +1,165 @@
+{
+  "dataset": "tydiqa_gp",
+  "overall_pass": true,
+  "results": {
+    "a": {
+      "n_prompts": 440,
+      "exactly_10_per_prompt": true,
+      "n_prompts_not_10": 0,
+      "zero_duplicate_prompts": true,
+      "n_duplicate_prompts": 0,
+      "spot_check_n": 20,
+      "spot_check_n_matched": 20,
+      "spot_check_pass": true,
+      "pass": true
+    },
+    "b": {
+      "n_beams": 4400,
+      "n_window_violations": 0,
+      "zero_violations": true,
+      "completion_length_stats": {
+        "mean": 11.132727272727273,
+        "std": 8.275490747226899,
+        "min": 2,
+        "max": 64,
+        "median": 9.0
+      },
+      "n_empty_completions": 0,
+      "empty_pct": 0.0,
+      "empty_under_threshold": true,
+      "pass": true
+    },
+    "c": {
+      "n_checked": 100,
+      "n_exact_match": 99,
+      "exact_match_rate": 0.99,
+      "sample_mismatches": [
+        {
+          "beam": 3669,
+          "pinned_len": 64,
+          "retok_len": 63
+        }
+      ],
+      "pass": true
+    },
+    "e": {
+      "n_nan_or_missing": 0,
+      "no_nan": true,
+      "hallucination_rate_pct": 47.02272727272727,
+      "in_5_95_band": true,
+      "n_mixed_prompts": 292,
+      "n_all_truthful_prompts": 79,
+      "n_all_hallucinated_prompts": 69,
+      "n_pairs": 5323,
+      "pass": true
+    },
+    "f": {
+      "labels_match": true,
+      "text_match": true,
+      "ids_match": true,
+      "pass": true
+    },
+    "d_pass": true,
+    "examples": [
+      {
+        "beam": 3035,
+        "prompt_id": 303,
+        "text": "Solid, liquid, gas, and plasma.",
+        "label": "truthful",
+        "rouge_l": 1.0,
+        "bleurt_max": 0.9458
+      },
+      {
+        "beam": 3286,
+        "prompt_id": 328,
+        "text": "Answer:\n15 November 1877.",
+        "label": "truthful",
+        "rouge_l": 0.8571,
+        "bleurt_max": 0.8394
+      },
+      {
+        "beam": 295,
+        "prompt_id": 29,
+        "text": "The radius and the ulna.",
+        "label": "truthful",
+        "rouge_l": 0.8889,
+        "bleurt_max": 0.8066
+      },
+      {
+        "beam": 2022,
+        "prompt_id": 202,
+        "text": "At Tower Hill, London.",
+        "label": "truthful",
+        "rouge_l": 0.8571,
+        "bleurt_max": 0.7435
+      },
+      {
+        "beam": 3966,
+        "prompt_id": 396,
+        "text": "8,850km (5,500mi)\nB: 6,259km (3,889mi)\nC: 21,196km (13,171mi)\nD: 13,171mi",
+        "label": "truthful",
+        "rouge_l": 0.2105,
+        "bleurt_max": 0.5771
+      },
+      {
+        "beam": 4216,
+        "prompt_id": 421,
+        "text": "Jamal Julani was beaten unconscious and was in a critical condition.",
+        "label": "hallucinated",
+        "rouge_l": 0.0,
+        "bleurt_max": 0.0649
+      },
+      {
+        "beam": 3458,
+        "prompt_id": 345,
+        "text": "1848 and rebuilt in 1922.",
+        "label": "hallucinated",
+        "rouge_l": 0.3333,
+        "bleurt_max": 0.2577
+      },
+      {
+        "beam": 2631,
+        "prompt_id": 263,
+        "text": "There is no information in the passage about the founding of Major League Baseball.",
+        "label": "hallucinated",
+        "rouge_l": 0.0,
+        "bleurt_max": 0.1382
+      },
+      {
+        "beam": 4124,
+        "prompt_id": 412,
+        "text": "Over 3.",
+        "label": "hallucinated",
+        "rouge_l": 0.2857,
+        "bleurt_max": 0.3418
+      },
+      {
+        "beam": 3057,
+        "prompt_id": 305,
+        "text": "The best answer is: 1597.",
+        "label": "hallucinated",
+        "rouge_l": 0.2222,
+        "bleurt_max": 0.3603
+      }
+    ],
+    "decoding_config": {
+      "do_sample": true,
+      "num_beams": 10,
+      "temperature": 0.5,
+      "top_p": 0.99,
+      "top_k": 5,
+      "max_new_tokens": 64,
+      "global_seed": 0,
+      "prompt_seed_scheme": "sha256(global_seed:prompt_id)",
+      "chat_template": null,
+      "prompt_template": "Concisely answer the following question based on the information in the given passage:\nPassage:\n{context}\nQ: {question}\nA:",
+      "rouge_threshold": 0.7,
+      "sen_sim_threshold": 0.5,
+      "bleurt_model": "BLEURT-20",
+      "transformers": "5.13.0",
+      "torch": "2.13.0+cu126",
+      "cuda": "12.6"
+    },
+    "timing_seconds": 24.194432020187378
+  }
+}

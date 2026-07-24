@@ -1,0 +1,159 @@
+{
+  "dataset": "triviaqa",
+  "overall_pass": true,
+  "results": {
+    "a": {
+      "n_prompts": 9960,
+      "exactly_10_per_prompt": true,
+      "n_prompts_not_10": 0,
+      "zero_duplicate_prompts": true,
+      "n_duplicate_prompts": 0,
+      "spot_check_n": 20,
+      "spot_check_n_matched": 20,
+      "spot_check_pass": true,
+      "pass": true
+    },
+    "b": {
+      "n_beams": 99600,
+      "n_window_violations": 0,
+      "zero_violations": true,
+      "completion_length_stats": {
+        "mean": 7.666214859437751,
+        "std": 7.936616575132172,
+        "min": 2,
+        "max": 64,
+        "median": 5.0
+      },
+      "n_empty_completions": 0,
+      "empty_pct": 0.0,
+      "empty_under_threshold": true,
+      "pass": true
+    },
+    "c": {
+      "n_checked": 100,
+      "n_exact_match": 100,
+      "exact_match_rate": 1.0,
+      "sample_mismatches": [],
+      "pass": true
+    },
+    "e": {
+      "n_nan_or_missing": 0,
+      "no_nan": true,
+      "hallucination_rate_pct": 53.49698795180723,
+      "in_5_95_band": true,
+      "n_mixed_prompts": 7458,
+      "n_all_truthful_prompts": 1049,
+      "n_all_hallucinated_prompts": 1453,
+      "n_pairs": 138541,
+      "pass": true
+    },
+    "f": {
+      "labels_match": true,
+      "text_match": true,
+      "ids_match": true,
+      "pass": true
+    },
+    "d_pass": true,
+    "examples": [
+      {
+        "beam": 53481,
+        "prompt_id": 5348,
+        "text": "The Crimea forms part of Ukraine.",
+        "label": "truthful",
+        "rouge_l": 0.0492,
+        "bleurt_max": 0.5324
+      },
+      {
+        "beam": 58776,
+        "prompt_id": 5877,
+        "text": "The violin",
+        "label": "truthful",
+        "rouge_l": 0.8667,
+        "bleurt_max": 0.8301
+      },
+      {
+        "beam": 6074,
+        "prompt_id": 607,
+        "text": "Martin Clunes.",
+        "label": "truthful",
+        "rouge_l": 0.3333,
+        "bleurt_max": 0.9029
+      },
+      {
+        "beam": 36662,
+        "prompt_id": 3666,
+        "text": "Terence Rattigan.",
+        "label": "truthful",
+        "rouge_l": 0.7048,
+        "bleurt_max": 0.9191
+      },
+      {
+        "beam": 71874,
+        "prompt_id": 7187,
+        "text": "The answer is Nuuk.",
+        "label": "truthful",
+        "rouge_l": 0.0564,
+        "bleurt_max": 0.63
+      },
+      {
+        "beam": 59863,
+        "prompt_id": 5986,
+        "text": "Josep Borrell",
+        "label": "hallucinated",
+        "rouge_l": 0.0,
+        "bleurt_max": 0.1448
+      },
+      {
+        "beam": 50058,
+        "prompt_id": 5005,
+        "text": "Genus and Species",
+        "label": "hallucinated",
+        "rouge_l": 0.1722,
+        "bleurt_max": 0.4884
+      },
+      {
+        "beam": 95244,
+        "prompt_id": 9524,
+        "text": "William Wordsworth was buried in Grasmere churchyard in 1850.",
+        "label": "hallucinated",
+        "rouge_l": 0.1473,
+        "bleurt_max": 0.4029
+      },
+      {
+        "beam": 37038,
+        "prompt_id": 3703,
+        "text": "Pontiac",
+        "label": "hallucinated",
+        "rouge_l": 0.0,
+        "bleurt_max": 0.1614
+      },
+      {
+        "beam": 58801,
+        "prompt_id": 5880,
+        "text": "The ocean or deep water",
+        "label": "hallucinated",
+        "rouge_l": 0.2589,
+        "bleurt_max": 0.4995
+      }
+    ],
+    "decoding_config": {
+      "do_sample": true,
+      "num_beams": 10,
+      "temperature": 0.5,
+      "top_p": 0.99,
+      "top_k": 5,
+      "max_new_tokens": 64,
+      "global_seed": 0,
+      "prompt_seed_scheme": "sha256(global_seed:prompt_id)",
+      "chat_template": null,
+      "prompt_template": "Q: {question}\nA:",
+      "rouge_threshold": 0.7,
+      "sen_sim_threshold": 0.5,
+      "bleurt_model": "BLEURT-20",
+      "transformers": "5.13.0",
+      "torch": "2.13.0+cu126",
+      "cuda": "12.6"
+    },
+    "timing_seconds": 569.8500418663025
+  }
+}
