@@ -6,7 +6,13 @@ instruction -- does NOT reimplement the forward-pass/hook logic:
   - 34_gate_reconstruct_or_regenerate.py's resume_route_n_raw_state(): the same hook
     convention (out.hidden_states[l+1] post-block residual for layers 15..23, optional
     manual final-norm application decided by verify_post_norm_route()) used to build
-    TruthfulQA v3's raw-state store.
+    TruthfulQA v3's raw-state store. *** EXCEPT: a real GPU-memory-accumulation bug in
+    that function (confirmed via a real TriviaQA OOM crash at 95,664/99,600 beams -- see
+    reforward_and_extract_raw_state()'s docstring below) is fixed here in a local copy of
+    just the batch loop, since 34_gate_reconstruct_or_regenerate.py is a pre-existing file
+    this project doesn't modify. Same hook convention, same math, same helper functions
+    (pack_raw_state_beam, pack_and_save_raw_store, compute_bases, verify_post_norm_route
+    all reused unchanged) -- only the device-management bug differs.
   - 35_derive_streams.py's derive_all_streams() / derive_positive_max_core(): the same
     pooling math (q95/q05 quantile pooling over tokens, inter-layer deltas, positive
     max-pool) used to derive TruthfulQA v3's velocity/kinematic/static/core features.
@@ -31,6 +37,7 @@ Usage:
 """
 
 import argparse
+import gc
 import hashlib
 import importlib.util
 import json
@@ -42,6 +49,8 @@ import time
 
 import numpy as np
 import torch
+import yaml
+from tqdm import tqdm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
@@ -61,10 +70,120 @@ def _load(name, filename):
 gate_mod = _load("s04_gate", "34_gate_reconstruct_or_regenerate.py")
 derive_mod = _load("s04_derive", "35_derive_streams.py")
 vel_mod = _load("s04_vel", "32_extract_velocity.py")
+band_mod = _load("s02_extract", "27_extract_band.py")
 pin_mod = _load("s03_pin", "30_pin_manifest.py")
 
 sha256_file = pin_mod.sha256_file
 sha256_array = pin_mod.sha256_array
+
+W_START, W_END = gate_mod.W_START, gate_mod.W_END
+
+
+# ==============================================================================
+# GPU-MEMORY-SAFE RE-FORWARD -- fixes a confirmed OOM bug in the reused
+# resume_route_n_raw_state(), without modifying 34_gate_reconstruct_or_regenerate.py
+# ==============================================================================
+#
+# Real crash (TriviaQA, N=99,600 beams, H100 80GB): torch.OutOfMemoryError at 95,664/99,600
+# beams (96% through), GPU at 79.17/79.18 GiB used while trying to allocate 2 MiB -- a slow
+# accumulation, not a spike. Root cause: resume_route_n_raw_state()'s per_beam_raw list
+# never moves each batch's extracted hidden-state slices off the GPU before appending --
+# pack_raw_state_beam()'s ".to(torch.bfloat16)" only changes dtype, not device, so the list
+# holds GPU tensors for the entire dataset for the whole run. TriviaQA's real math:
+# 99,600 beams x ~7.67 tokens avg x 10 layers x 4096 dim x 2 bytes (bf16) = ~81.6 GB --
+# matches the observed near-exact exhaustion. TyDiQA-GP (4,400 beams) and NQ-Open
+# (36,100 beams) stay under 80GB in total, which is why only TriviaQA hit this.
+#
+# This is a genuine, pre-existing bug in the reused function, not a config issue --
+# 34_gate_reconstruct_or_regenerate.py is a pre-existing file this project doesn't modify,
+# so the fix lives here instead: an EXACT copy of the same hook convention and math (same
+# layer slicing, same post-norm-route handling, same packing/saving helpers, reused
+# unchanged), with only the device-management bug fixed -- each beam's packed tensor is
+# moved to CPU immediately, and the GPU forward-pass output is explicitly freed every batch.
+
+def reforward_and_extract_raw_state(seq_path, model_folder, out_dir, batch_size=16):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    with open(os.path.join(HERE, "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    model_id = next(m["id"] for m in cfg["models"] if m["folder"] == model_folder)
+
+    print(f"Loading saved sequences: {seq_path}")
+    data = torch.load(seq_path, weights_only=False)
+    input_ids_list = data["input_ids"]
+    prompt_lens = data["prompt_len"]
+    prompt_ids = data["prompt_id"]
+    labels = data["all_hallucination_flag"]
+    decoding_config = data["decoding_config"]
+    n_beams = len(input_ids_list)
+    print(f"  {n_beams} beams loaded, generation/judging NOT re-run")
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA required.")
+    device = torch.device("cuda")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16,
+                                                  device_map=device, trust_remote_code=True)
+    model.eval()
+
+    print("Computing bases from lm_head.weight (fp32 SVD) ...")
+    V_R, V_rand, spectrum = band_mod.compute_bases(model)
+    V_R, V_rand = V_R.detach().cpu(), V_rand.detach().cpu()
+    route, agreement = band_mod.verify_post_norm_route(
+        model, tokenizer, ["The capital of France is", "Water boils at a temperature of"], device)
+    apply_norm_manually = (route == "manual_norm")
+    print(f"A2 post-norm route: {route}  agreement={agreement:.4f}")
+
+    per_beam_raw = []
+    batch_starts = list(range(0, n_beams, batch_size))
+    batch_bar = tqdm(batch_starts, desc="[Fixed re-forward] extracting (CPU-offloaded per batch)",
+                      unit="batch")
+    for start in batch_bar:
+        end = min(start + batch_size, n_beams)
+        lengths = [len(input_ids_list[i]) for i in range(start, end)]
+        T_max = max(lengths)
+        padded = torch.zeros((end - start, T_max), dtype=torch.long)
+        attn = torch.zeros((end - start, T_max), dtype=torch.long)
+        for j, i in enumerate(range(start, end)):
+            ids = input_ids_list[i]
+            padded[j, :len(ids)] = ids
+            attn[j, :len(ids)] = 1
+        padded, attn = padded.to(device), attn.to(device)
+        with torch.no_grad():
+            out = model(input_ids=padded, attention_mask=attn, use_cache=False, output_hidden_states=True)
+
+        for j, i in enumerate(range(start, end)):
+            p_len = prompt_lens[i]
+            comp_start, comp_end = p_len, lengths[j]
+            h_by_layer = {l: out.hidden_states[l + 1][j, comp_start:comp_end, :].float()
+                          for l in range(W_START, W_END)}
+            h_final = out.hidden_states[-1][j, comp_start:comp_end, :].float()
+            if apply_norm_manually:
+                h_final = model.model.norm(h_final)
+            h_by_layer["final_norm"] = h_final
+            # THE FIX: .cpu() here, immediately -- everything else is identical to
+            # resume_route_n_raw_state(). Without this, per_beam_raw accumulates GPU
+            # tensors for the entire dataset.
+            per_beam_raw.append(gate_mod.pack_raw_state_beam(h_by_layer).cpu())
+
+        del out
+        torch.cuda.empty_cache()
+        if start % (batch_size * 50) == 0:
+            gc.collect()
+        batch_bar.set_postfix_str(f"{end}/{n_beams} beams")
+    batch_bar.close()
+
+    shard_paths, bases_path, meta_path = gate_mod.pack_and_save_raw_store(
+        per_beam_raw, prompt_ids, list(range(n_beams)), labels, V_R, V_rand, out_dir,
+        model_id, decoding_config.get("gen_seed", 0), decoding_config, gate_mod.git_commit_hash())
+
+    del model
+    torch.cuda.empty_cache()
+
+    return {"seq_path": seq_path, "shard_paths": shard_paths, "bases_path": bases_path,
+            "meta_path": meta_path, "n_beams": n_beams, "decoding_config": decoding_config}
 
 
 # ==============================================================================
@@ -185,8 +304,8 @@ def run_extraction(dataset, model_folder, data_dir, batch_size=16):
     raw_store_dir = os.path.join(data_dir, model_folder, f"{dataset}_raw_state_store")
     print(f"\n[Extraction] Teacher-forced re-forward -> raw-state store: {raw_store_dir}")
     t0 = time.time()
-    gate_result = gate_mod.resume_route_n_raw_state(seq_path, model_folder, raw_store_dir,
-                                                      batch_size=batch_size)
+    gate_result = reforward_and_extract_raw_state(seq_path, model_folder, raw_store_dir,
+                                                    batch_size=batch_size)
     print(f"[Extraction] Re-forward complete: {gate_result['n_beams']} beams "
           f"({time.time()-t0:.0f}s total)")
 
