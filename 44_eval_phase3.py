@@ -40,6 +40,21 @@ from sklearn.model_selection import GroupKFold
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Wall-clock reference for every "elapsed since process start" print in this script -- lets you
+# tail the .out/.err file and see real progress/ETA rather than long silent stretches, per the
+# explicit ask to make these long CPU jobs easy to watch.
+_PROCESS_START = time.time()
+
+
+def since_start():
+    return time.time() - _PROCESS_START
+
+
+def fmt_elapsed(seconds):
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -133,6 +148,8 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
     n_beams = len(y)
     oof_rf = np.full(n_beams, np.nan); oof_lr = np.full(n_beams, np.nan)
     fold_rf, fold_lr = [], []
+    fold_times = []
+    n_folds = len(folds)
     for fold_i, (tr, va) in enumerate(folds):
         t0 = time.time()
         core = core_builder(tr, seed + fold_i)
@@ -141,9 +158,12 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
         lr_scores = fit_eval("LR", core[tr], y[tr], core[va], seed + fold_i)
         oof_lr[va] = lr_scores; fold_lr.append(float(roc_auc_score(y[va], lr_scores)))
         elapsed = time.time() - t0
-        if fold_i == 0:
-            print(f"  [{label}] fold 0: {elapsed:.1f}s -- extrapolated total for {len(folds)} "
-                  f"folds: ~{elapsed*len(folds):.0f}s")
+        fold_times.append(elapsed)
+        avg = sum(fold_times) / len(fold_times)
+        eta = avg * (n_folds - fold_i - 1)
+        print(f"  [{label}] fold {fold_i+1}/{n_folds} done in {elapsed:.1f}s (RF={fold_rf[-1]:.4f}, "
+              f"LR={fold_lr[-1]:.4f})  -- ETA this condition: {eta:.0f}s  "
+              f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
     return ({"RF": summarize_oof(oof_rf, y, prompt_idx, fold_rf, seed),
              "LR": summarize_oof(oof_lr, y, prompt_idx, fold_lr, seed)},
             {"RF": oof_rf, "LR": oof_lr})
@@ -152,17 +172,23 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
 def run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_prefix=""):
     n_beams = len(y)
     per_seed = {name: [] for name in builders}
-    for seed in seeds:
+    n_seeds = len(seeds)
+    n_conditions = len(builders)
+    for seed_i, seed in enumerate(seeds):
         t_idx, v_idx = original_harp_split(is_known, prompt_idx, n_beams, seed=seed)
         assert set(prompt_idx[t_idx].tolist()).isdisjoint(set(prompt_idx[v_idx].tolist()))
-        print(f"  [{label_prefix}] HARP seed={seed}: n_train={len(t_idx)}  n_valid={len(v_idx)}")
-        for name, builder in builders.items():
+        print(f"  [{label_prefix}] HARP seed {seed_i+1}/{n_seeds} (seed={seed}): n_train={len(t_idx)}  "
+              f"n_valid={len(v_idx)}  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
+        for cond_i, (name, builder) in enumerate(builders.items()):
+            t0 = time.time()
             core = builder(t_idx, seed)
             row = {"seed": seed, "n_train": int(len(t_idx)), "n_valid": int(len(v_idx))}
             for clf in ("RF", "LR"):
                 scores = fit_eval(clf, core[t_idx], y[t_idx], core[v_idx], seed)
                 row[clf] = float(roc_auc_score(y[v_idx], scores))
             per_seed[name].append(row)
+            print(f"    [{label_prefix}] seed {seed_i+1}/{n_seeds}, condition {cond_i+1}/{n_conditions} "
+                  f"({name}): RF={row['RF']:.4f} LR={row['LR']:.4f}  ({time.time()-t0:.1f}s)", flush=True)
     summary = {}
     for name, rows in per_seed.items():
         summary[name] = {"per_seed": rows,
@@ -185,13 +211,19 @@ def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
 
     all_conditions = ["core_max", "q_velocity"] + NEW_CONDITIONS
     grouped, oofs = {}, {}
-    for name in all_conditions:
-        print(f"\n[{dataset_name}] Part A grouped: {name} ...")
+    print(f"\n[{dataset_name}] composition: {comp['n_prompts']} prompts, {comp['n_beams']} beams, "
+          f"{comp['hallucination_rate_pct']:.1f}% hallucinated  [job elapsed {fmt_elapsed(since_start())}]")
+    for cond_i, name in enumerate(all_conditions):
+        print(f"\n[{dataset_name}] Part A grouped: condition {cond_i+1}/{len(all_conditions)} = {name} "
+              f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
         t_cond0 = time.time()
         builder = make_grouped_builder(CONDITION_SPECS[name], feats)
         summary, oof = run_grouped_generic(builder, y, prompt_idx, folds, SEED, f"{dataset_name}/{name}")
         grouped[name] = summary
         oofs[name] = oof
+        print(f"  [{dataset_name}] condition {cond_i+1}/{len(all_conditions)} ({name}) complete: "
+              f"pooled RF AUROC={summary['RF']['pooled_oof_auroc']:.4f}  "
+              f"({time.time()-t_cond0:.0f}s)  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
         if name == "core_max":
             cond_elapsed = time.time() - t_cond0
             est_grouped_total = cond_elapsed * TOTAL_COST_WEIGHT / CONDITION_COST_WEIGHTS["core_max"]
@@ -203,7 +235,10 @@ def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
                   f"not a tight bound.")
 
     paired_deltas = {}
+    print(f"\n[{dataset_name}] Computing paired bootstrap deltas ({N_BOOTSTRAP} reps x 4 conditions "
+          f"x 2 baselines x 2 metrics)  [job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
     for name in NEW_CONDITIONS:
+        t_delta0 = time.time()
         paired_deltas[name] = {
             "vs_core_max": {
                 "pooled": paired_bootstrap_delta(oofs[name]["RF"], oofs["core_max"]["RF"], y, prompt_idx,
@@ -221,11 +256,17 @@ def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
         print(f"  [{dataset_name}] {name} vs core-max: pooled={paired_deltas[name]['vs_core_max']['pooled']['mean_delta']:.4f} "
               f"within-p={paired_deltas[name]['vs_core_max']['within_prompt']['mean_delta']:.4f}")
         print(f"  [{dataset_name}] {name} vs q-velocity: pooled={paired_deltas[name]['vs_q_velocity']['pooled']['mean_delta']:.4f} "
-              f"within-p={paired_deltas[name]['vs_q_velocity']['within_prompt']['mean_delta']:.4f}")
+              f"within-p={paired_deltas[name]['vs_q_velocity']['within_prompt']['mean_delta']:.4f}  "
+              f"({time.time()-t_delta0:.1f}s)", flush=True)
 
-    print(f"\n[{dataset_name}] Part A HARP protocol, {len(HARP_SEEDS)} seeds, {len(all_conditions)} conditions ...")
+    print(f"\n[{dataset_name}] Part A HARP protocol: {len(HARP_SEEDS)} seeds x {len(all_conditions)} conditions "
+          f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
+    t_harp0 = time.time()
     builders = {name: make_grouped_builder(CONDITION_SPECS[name], feats) for name in all_conditions}
     harp = run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_prefix=dataset_name)
+    print(f"[{dataset_name}] Part A HARP protocol complete ({time.time()-t_harp0:.0f}s)  "
+          f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
+    print(f"\n[{dataset_name}] Part A COMPLETE  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
 
     return {"dataset": dataset_name, "composition": comp, "grouped": grouped,
             "paired_deltas": paired_deltas, "harp": harp}
@@ -252,17 +293,24 @@ def determine_best_condition(part_a_results):
 def run_part_b(dataset_name, feats, y, prompt_idx, best_condition):
     folds = list(GroupKFold(n_splits=N_SPLITS).split(feats["core"], y, groups=prompt_idx))
     results = {}
-    for cond_name in ("core_max", best_condition):
+    conds = ("core_max", best_condition)
+    total_runs = len(conds) * (1 + len(RANK_PROBE_RDS))
+    run_i = 0
+    for cond_name in conds:
         base_spec = CONDITION_SPECS[cond_name]
         base_builder = make_grouped_builder(base_spec, feats)
-        print(f"\n[{dataset_name}] Part B baseline r_d=64: {cond_name} ...")
+        run_i += 1
+        print(f"\n[{dataset_name}] Part B run {run_i}/{total_runs}: {cond_name} baseline r_d=64 "
+              f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
         base_summary, base_oof = run_grouped_generic(base_builder, y, prompt_idx, folds, SEED,
                                                        f"{dataset_name}/{cond_name}/r_d=64")
         cond_results = {"r_d_64": base_summary}
         for new_rd in RANK_PROBE_RDS:
             scaled_spec = [(key, r_l, new_rd) for (key, r_l, r_d) in base_spec]
             builder = make_grouped_builder(scaled_spec, feats)
-            print(f"[{dataset_name}] Part B r_d={new_rd}: {cond_name} ...")
+            run_i += 1
+            print(f"\n[{dataset_name}] Part B run {run_i}/{total_runs}: {cond_name} r_d={new_rd} "
+                  f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
             summary, oof = run_grouped_generic(builder, y, prompt_idx, folds, SEED,
                                                 f"{dataset_name}/{cond_name}/r_d={new_rd}")
             delta_pooled = paired_bootstrap_delta(oof["RF"], base_oof["RF"], y, prompt_idx, N_BOOTSTRAP, SEED, False)
@@ -272,6 +320,7 @@ def run_part_b(dataset_name, feats, y, prompt_idx, best_condition):
             print(f"  [{dataset_name}] {cond_name} r_d={new_rd} vs r_d=64: pooled delta="
                   f"{delta_pooled['mean_delta']:.4f} excl0={delta_pooled['excludes_zero']}")
         results[cond_name] = cond_results
+    print(f"\n[{dataset_name}] Part B COMPLETE  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
     return {"dataset": dataset_name, "results": results}
 
 
@@ -337,24 +386,32 @@ def run_part_c(all_feats, all_y, condition_name, seed=SEED):
     by design, matching HARP's own published convention where the diagonal is each row's best
     entry)."""
     matrix_rf, matrix_lr = {}, {}
-    for src in DATASETS:
-        print(f"  [Part C] fitting {condition_name} on {src} (full dataset, no held-out split) ...")
+    for src_i, src in enumerate(DATASETS):
+        t_src0 = time.time()
+        print(f"  [Part C] source {src_i+1}/{len(DATASETS)}: fitting {condition_name} on {src} "
+              f"(full dataset, no held-out split)  [job elapsed {fmt_elapsed(since_start())}] ...",
+              flush=True)
         transform = build_transfer_transform(condition_name, all_feats[src], seed)
         core_src_all = transform(all_feats[src])
         y_src = all_y[src]
         row_rf, row_lr = {}, {}
         # fit classifiers once on the full source core, per spec ("scaler + Tucker + readout ...
         # on dataset A's entire data")
-        for tgt in DATASETS:
+        for tgt_i, tgt in enumerate(DATASETS):
+            t_tgt0 = time.time()
             core_tgt = transform(all_feats[tgt]) if tgt != src else core_src_all
             y_tgt = all_y[tgt]
             rf_scores = fit_eval("RF", core_src_all, y_src, core_tgt, seed)
             lr_scores = fit_eval("LR", core_src_all, y_src, core_tgt, seed)
             row_rf[tgt] = float(roc_auc_score(y_tgt, rf_scores))
             row_lr[tgt] = float(roc_auc_score(y_tgt, lr_scores))
+            print(f"    [{condition_name}] {src} -> {tgt} ({tgt_i+1}/{len(DATASETS)}): "
+                  f"RF={row_rf[tgt]:.4f} LR={row_lr[tgt]:.4f}  ({time.time()-t_tgt0:.1f}s)", flush=True)
         matrix_rf[src] = row_rf
         matrix_lr[src] = row_lr
-        print(f"  [{condition_name}] {src} -> " + "  ".join(f"{t}={row_rf[t]:.3f}" for t in DATASETS))
+        print(f"  [{condition_name}] {src} row complete ({time.time()-t_src0:.0f}s)  -> "
+              + "  ".join(f"{t}={row_rf[t]:.3f}" for t in DATASETS)
+              + f"  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
     return {"RF": matrix_rf, "LR": matrix_lr}
 
 
@@ -695,17 +752,21 @@ def main():
             best_condition = json.load(f)["best_condition"]
         print(f"Part C: transfer matrix for core_max and {best_condition} (best Part A condition)")
         all_feats, all_y = {}, {}
-        for ds in DATASETS:
-            print(f"Loading {ds} ...")
+        for ds_i, ds in enumerate(DATASETS):
+            t_load0 = time.time()
+            print(f"Loading {ds_i+1}/{len(DATASETS)}: {ds} ...  [job elapsed {fmt_elapsed(since_start())}]",
+                  flush=True)
             if ds == "truthfulqa":
                 feats, y, _, _ = load_truthfulqa(args.core_pooled_pt, args.velocity_meta)
             else:
                 feats, y, _, _ = load_new_dataset(ds, get_data_dir(), args.model_folder)
             all_feats[ds] = feats
             all_y[ds] = y
+            print(f"  loaded {ds}: {len(y)} beams  ({time.time()-t_load0:.1f}s)", flush=True)
         part_c_results = {}
-        for cond_name in ("core_max", best_condition):
-            print(f"\n[Part C] Transfer matrix: {cond_name}")
+        for cond_i, cond_name in enumerate(("core_max", best_condition)):
+            print(f"\n[Part C] Transfer matrix {cond_i+1}/2: {cond_name}  "
+                  f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
             part_c_results[cond_name] = run_part_c(all_feats, all_y, cond_name, seed=SEED)
             print_transfer_matrix(cond_name, part_c_results[cond_name]["RF"])
         out_path = os.path.join(args.results_dir, "session06_phase3_partC.json")
