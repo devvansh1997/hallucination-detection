@@ -97,6 +97,16 @@ CONDITION_SPECS = {
 }
 NEW_CONDITIONS = ["q_static", "core_concat", "joint_tensor", "triple_concat"]
 
+# Which raw tensor(s) each condition actually touches -- used to avoid loading/building the
+# other 1-3 tensor types when a --condition job only needs a subset. "joint" needs both static
+# and velocity's underlying npz fields to construct (concat), even though the condition itself
+# only uses the resulting stacked tensor, not static/velocity individually.
+CONDITION_RAW_NEEDS = {
+    "core_max": {"core"}, "q_static": {"static"}, "q_velocity": {"velocity"},
+    "core_concat": {"core", "velocity"}, "joint_tensor": {"joint"},
+    "triple_concat": {"core", "static", "velocity"},
+}
+
 # Rough relative Tucker-fitting cost per condition, relative to a single-tensor fit like
 # core_max (=1): core_concat/triple_concat do 2/3 separate sub-fits; joint_tensor is one fit
 # but over a bigger stacked tensor (L=17 vs 8-9), so roughly ~2x a single condition's cost.
@@ -203,40 +213,66 @@ def run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_
 # PART A -- COMBINATION GRID
 # ==============================================================================
 
-def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
-    comp = composition_line(dataset_name, y, prompt_idx)
+ALL_CONDITIONS = ["core_max", "q_velocity"] + NEW_CONDITIONS
+
+
+def compute_folds(feats, y, prompt_idx):
+    """GroupKFold's split only depends on `groups` (prompt_idx) and the array LENGTH, never on
+    feature values -- so this is byte-identical whether computed once in a sequential run or
+    independently in N separate parallel condition-jobs, as long as y/prompt_idx match (which
+    they do, since every job loads the same saved dataset)."""
     folds = list(GroupKFold(n_splits=N_SPLITS).split(feats["core"], y, groups=prompt_idx))
     for tr, va in folds:
         assert set(prompt_idx[tr].tolist()).isdisjoint(set(prompt_idx[va].tolist()))
+    return folds
 
-    all_conditions = ["core_max", "q_velocity"] + NEW_CONDITIONS
-    grouped, oofs = {}, {}
-    print(f"\n[{dataset_name}] composition: {comp['n_prompts']} prompts, {comp['n_beams']} beams, "
-          f"{comp['hallucination_rate_pct']:.1f}% hallucinated  [job elapsed {fmt_elapsed(since_start())}]")
-    for cond_i, name in enumerate(all_conditions):
-        print(f"\n[{dataset_name}] Part A grouped: condition {cond_i+1}/{len(all_conditions)} = {name} "
-              f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
-        t_cond0 = time.time()
-        builder = make_grouped_builder(CONDITION_SPECS[name], feats)
-        summary, oof = run_grouped_generic(builder, y, prompt_idx, folds, SEED, f"{dataset_name}/{name}")
-        grouped[name] = summary
-        oofs[name] = oof
-        print(f"  [{dataset_name}] condition {cond_i+1}/{len(all_conditions)} ({name}) complete: "
-              f"pooled RF AUROC={summary['RF']['pooled_oof_auroc']:.4f}  "
-              f"({time.time()-t_cond0:.0f}s)  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
-        if name == "core_max":
-            cond_elapsed = time.time() - t_cond0
-            est_grouped_total = cond_elapsed * TOTAL_COST_WEIGHT / CONDITION_COST_WEIGHTS["core_max"]
-            print(f"\n  [{dataset_name}] core_max (all 5 folds) took {cond_elapsed:.0f}s -- rough "
-                  f"estimate for ALL 6 conditions' grouped-CV phase: ~{est_grouped_total:.0f}s "
-                  f"({est_grouped_total/3600:.1f}h). HARP's 5-seed phase runs after this and adds "
-                  f"roughly comparable additional time. Weights are approximate (see "
-                  f"CONDITION_COST_WEIGHTS) -- treat as an order-of-magnitude planning number, "
-                  f"not a tight bound.")
 
-    paired_deltas = {}
+def run_condition_only(dataset_name, cond_name, feats, y, prompt_idx, is_known, folds):
+    """The unit of work for running Part A's 6 conditions as separate parallel jobs instead of
+    one long sequential run: grouped-CV + HARP for exactly ONE condition, nothing else. Each
+    condition fits its own Tucker basis + classifiers on the same read-only feature tensors, and
+    HARP's per-seed splits are a pure function of (is_known, prompt_idx, seed) -- no state is
+    shared across conditions, so this is safe to run concurrently in as many separate processes
+    as you have allocations for, with results identical to a sequential run."""
+    print(f"[{dataset_name}/{cond_name}] grouped-CV (5 folds)  [job elapsed {fmt_elapsed(since_start())}] ...",
+          flush=True)
+    t0 = time.time()
+    builder = make_grouped_builder(CONDITION_SPECS[cond_name], feats)
+    grouped_summary, oof = run_grouped_generic(builder, y, prompt_idx, folds, SEED, f"{dataset_name}/{cond_name}")
+    print(f"[{dataset_name}/{cond_name}] grouped-CV complete: pooled RF AUROC="
+          f"{grouped_summary['RF']['pooled_oof_auroc']:.4f}  ({time.time()-t0:.0f}s)  "
+          f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
+
+    print(f"[{dataset_name}/{cond_name}] HARP protocol ({len(HARP_SEEDS)} seeds)  "
+          f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
+    t1 = time.time()
+    harp_one = run_harp_generic({cond_name: builder}, y, prompt_idx, is_known, seeds=HARP_SEEDS,
+                                 label_prefix=f"{dataset_name}/{cond_name}")[cond_name]
+    print(f"[{dataset_name}/{cond_name}] HARP complete ({time.time()-t1:.0f}s)  "
+          f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
+
+    return {"dataset": dataset_name, "condition": cond_name, "grouped_summary": grouped_summary,
+            "oof_rf": oof["RF"].tolist(), "oof_lr": oof["LR"].tolist(), "harp": harp_one}
+
+
+def combine_conditions(dataset_name, per_condition, y, prompt_idx):
+    """per_condition: dict cond_name -> a run_condition_only() result (freshly computed or
+    reloaded from disk -- doesn't matter which). Assembles the exact schema a sequential Part A
+    run produces, so --combine-part-a downstream doesn't care whether Part A ran as one job or
+    six parallel condition-jobs."""
+    comp = composition_line(dataset_name, y, prompt_idx)
+    missing = [c for c in ALL_CONDITIONS if c not in per_condition]
+    if missing:
+        raise ValueError(f"Missing condition results for {dataset_name}: {missing}")
+
+    grouped = {name: per_condition[name]["grouped_summary"] for name in ALL_CONDITIONS}
+    oofs = {name: {"RF": np.asarray(per_condition[name]["oof_rf"]),
+                    "LR": np.asarray(per_condition[name]["oof_lr"])} for name in ALL_CONDITIONS}
+    harp = {name: per_condition[name]["harp"] for name in ALL_CONDITIONS}
+
     print(f"\n[{dataset_name}] Computing paired bootstrap deltas ({N_BOOTSTRAP} reps x 4 conditions "
-          f"x 2 baselines x 2 metrics)  [job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
+          f"x 2 baselines x 2 metrics) ...", flush=True)
+    paired_deltas = {}
     for name in NEW_CONDITIONS:
         t_delta0 = time.time()
         paired_deltas[name] = {
@@ -259,17 +295,38 @@ def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
               f"within-p={paired_deltas[name]['vs_q_velocity']['within_prompt']['mean_delta']:.4f}  "
               f"({time.time()-t_delta0:.1f}s)", flush=True)
 
-    print(f"\n[{dataset_name}] Part A HARP protocol: {len(HARP_SEEDS)} seeds x {len(all_conditions)} conditions "
-          f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
-    t_harp0 = time.time()
-    builders = {name: make_grouped_builder(CONDITION_SPECS[name], feats) for name in all_conditions}
-    harp = run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_prefix=dataset_name)
-    print(f"[{dataset_name}] Part A HARP protocol complete ({time.time()-t_harp0:.0f}s)  "
-          f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
-    print(f"\n[{dataset_name}] Part A COMPLETE  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
-
     return {"dataset": dataset_name, "composition": comp, "grouped": grouped,
             "paired_deltas": paired_deltas, "harp": harp}
+
+
+def run_part_a(dataset_name, feats, y, prompt_idx, is_known):
+    """Sequential convenience path (unchanged behavior/output from before this refactor) -- runs
+    all 6 conditions one after another in this single process via the same run_condition_only()/
+    combine_conditions() building blocks the parallel per-condition CLI mode uses."""
+    comp = composition_line(dataset_name, y, prompt_idx)
+    print(f"\n[{dataset_name}] composition: {comp['n_prompts']} prompts, {comp['n_beams']} beams, "
+          f"{comp['hallucination_rate_pct']:.1f}% hallucinated  [job elapsed {fmt_elapsed(since_start())}]")
+    folds = compute_folds(feats, y, prompt_idx)
+
+    per_condition = {}
+    for cond_i, name in enumerate(ALL_CONDITIONS):
+        print(f"\n[{dataset_name}] Part A grouped: condition {cond_i+1}/{len(ALL_CONDITIONS)} = {name} "
+              f"[job elapsed {fmt_elapsed(since_start())}] ...", flush=True)
+        t_cond0 = time.time()
+        per_condition[name] = run_condition_only(dataset_name, name, feats, y, prompt_idx, is_known, folds)
+        if name == "core_max":
+            cond_elapsed = time.time() - t_cond0
+            est_grouped_total = cond_elapsed * TOTAL_COST_WEIGHT / CONDITION_COST_WEIGHTS["core_max"]
+            print(f"\n  [{dataset_name}] core_max (grouped+HARP) took {cond_elapsed:.0f}s -- rough "
+                  f"estimate for ALL 6 conditions run sequentially: ~{est_grouped_total:.0f}s "
+                  f"({est_grouped_total/3600:.1f}h). Weights are approximate (see "
+                  f"CONDITION_COST_WEIGHTS) -- treat as an order-of-magnitude planning number, "
+                  f"not a tight bound. Consider running conditions in parallel instead (see "
+                  f"--condition in the CLI help) if this is too long.")
+
+    result = combine_conditions(dataset_name, per_condition, y, prompt_idx)
+    print(f"\n[{dataset_name}] Part A COMPLETE  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
+    return result
 
 
 def determine_best_condition(part_a_results):
@@ -431,30 +488,67 @@ def print_transfer_matrix(name, matrix_rf):
 # LOADING
 # ==============================================================================
 
-def load_new_dataset(dataset, data_dir, model_folder):
+def _needed_raw_types(condition):
+    """None (default) -> everything, for run_part_a()'s sequential all-conditions path, which
+    genuinely needs all four. A specific condition name -> only what that condition's spec
+    touches -- the memory-saving path for a --condition parallel job. For TriviaQA, loading
+    everything is ~35GB+ per process; a lone core_max job only needs ~7GB of that."""
+    if condition is None:
+        return {"core", "static", "velocity", "joint"}
+    return CONDITION_RAW_NEEDS[condition]
+
+
+def load_new_dataset(dataset, data_dir, model_folder, condition=None):
     out_dir = os.path.join(data_dir, model_folder)
     npz_path = os.path.join(out_dir, f"{dataset}_phase2_features.npz")
-    d = dict(np.load(npz_path))
-    core_raw = d["static_max"].astype(np.float32)
-    feats = build_feats(core_raw, d["static_q95"].astype(np.float32), d["static_q05"].astype(np.float32),
-                         d["velocity_q95"].astype(np.float32), d["velocity_q05"].astype(np.float32))
+    d = np.load(npz_path)   # lazy NpzFile -- does not materialize an array until indexed by key
+    need = _needed_raw_types(condition)
+    need_static = "static" in need or "joint" in need
+    need_velocity = "velocity" in need or "joint" in need
+
+    feats = {}
+    if "core" in need:
+        feats["core"] = d["static_max"].astype(np.float32)
+    if need_static:
+        feats["static"] = np.concatenate([d["static_q95"].astype(np.float32),
+                                           d["static_q05"].astype(np.float32)], axis=2)
+    if need_velocity:
+        feats["velocity"] = np.concatenate([d["velocity_q95"].astype(np.float32),
+                                             d["velocity_q05"].astype(np.float32)], axis=2)
+    if "joint" in need:
+        feats["joint"] = np.concatenate([feats["static"], feats["velocity"]], axis=1)
+
     y = d["label"].astype(np.int64)
     prompt_idx = d["prompt_id"].astype(np.int64)
     is_known, _ = derive_is_known(y, prompt_idx)
     return feats, y, prompt_idx, is_known
 
 
-def load_truthfulqa(core_pooled_pt, velocity_meta):
+def load_truthfulqa(core_pooled_pt, velocity_meta, condition=None):
     import torch
+    need = _needed_raw_types(condition)
+    need_static = "static" in need or "joint" in need
+    need_velocity = "velocity" in need or "joint" in need
+
     pooled = torch.load(core_pooled_pt, weights_only=False)
-    core_raw = torch.stack(pooled["all_emb"]).float().numpy()
     y = np.array([int(f) for f in pooled["all_hallucination_flag"]], dtype=np.int64)
     prompt_idx = np.array(pooled["prompt_indices"], dtype=np.int64)
 
-    vel_npz_path = os.path.splitext(velocity_meta)[0].replace("_meta", "") + ".npz"
-    vel_data = dict(np.load(vel_npz_path))
-    feats = build_feats(core_raw, vel_data["S95"].astype(np.float32), vel_data["S05"].astype(np.float32),
-                         vel_data["V95"].astype(np.float32), vel_data["V05"].astype(np.float32))
+    feats = {}
+    if "core" in need:
+        feats["core"] = torch.stack(pooled["all_emb"]).float().numpy()
+    if need_static or need_velocity:
+        vel_npz_path = os.path.splitext(velocity_meta)[0].replace("_meta", "") + ".npz"
+        vel_data = np.load(vel_npz_path)   # lazy
+        if need_static:
+            feats["static"] = np.concatenate([vel_data["S95"].astype(np.float32),
+                                               vel_data["S05"].astype(np.float32)], axis=2)
+        if need_velocity:
+            feats["velocity"] = np.concatenate([vel_data["V95"].astype(np.float32),
+                                                 vel_data["V05"].astype(np.float32)], axis=2)
+    if "joint" in need:
+        feats["joint"] = np.concatenate([feats["static"], feats["velocity"]], axis=1)
+
     is_known, _ = derive_is_known(y, prompt_idx)
     return feats, y, prompt_idx, is_known
 
@@ -573,6 +667,36 @@ def self_test():
     assert feats["joint"].shape == (n_beams, 17, 2 * D)
     print("  [PASS] build_feats: static/velocity/joint shapes correct")
 
+    # -- selective loading: a --condition job must load ONLY the raw tensors its own condition
+    # needs, not all four -- the memory-saving path for running Part A's 6 conditions as
+    # separate parallel jobs. Verified against a real (fabricated) npz file, not just the pure
+    # CONDITION_RAW_NEEDS mapping, so this actually exercises load_new_dataset()'s branching.
+    tmp_dir_load = os.path.join(HERE, "results", "_selftest_phase3")
+    os.makedirs(tmp_dir_load, exist_ok=True)
+    fake_npz_path = os.path.join(tmp_dir_load, "selftest_phase2_features.npz")
+    np.savez_compressed(fake_npz_path, static_max=core_raw.astype(np.float16),
+                         static_q95=static_q95.astype(np.float16), static_q05=static_q05.astype(np.float16),
+                         velocity_q95=velocity_q95.astype(np.float16), velocity_q05=velocity_q05.astype(np.float16),
+                         kinematic=np.zeros((n_beams, 30), dtype=np.float32),
+                         prompt_id=prompt_idx, beam_idx=np.arange(n_beams), label=y)
+    feats_core_only, y_l, prompt_idx_l, is_known_l = load_new_dataset(
+        "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition="core_max")
+    assert set(feats_core_only.keys()) == {"core"}, \
+        f"condition='core_max' should load ONLY 'core', got {set(feats_core_only.keys())}"
+    feats_joint_only, _, _, _ = load_new_dataset(
+        "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition="joint_tensor")
+    assert set(feats_joint_only.keys()) == {"static", "velocity", "joint"}, \
+        (f"condition='joint_tensor' should load static+velocity (to build joint) plus joint "
+         f"itself, not 'core' -- got {set(feats_joint_only.keys())}")
+    feats_all, _, _, _ = load_new_dataset(
+        "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition=None)
+    assert set(feats_all.keys()) == {"core", "static", "velocity", "joint"}
+    assert np.array_equal(feats_all["core"], feats_core_only["core"]), \
+        "selective and full loading must produce identical values for the tensors they share"
+    print("  [PASS] load_new_dataset(condition=...): loads exactly the raw tensors each "
+          "condition needs (core_max->{core}, joint_tensor->{static,velocity,joint}, "
+          "None->everything), with identical values to full loading for shared tensors")
+
     for name, spec in CONDITION_SPECS.items():
         builder = make_grouped_builder(spec, feats)
         tr = np.arange(n_beams)
@@ -672,6 +796,29 @@ def self_test():
     print("  [PASS] rank_probe_verdict: correctly blocks adoption when TruthfulQA regresses "
           "significantly (r_d=96), and correctly adopts when it doesn't (r_d=128)")
 
+    # -- the real correctness claim behind running Part A's 6 conditions as separate parallel
+    # jobs: run_part_a() (sequential) and run_condition_only()+combine_conditions() (split,
+    # simulating 6 independent jobs whose results get merged after the fact) must produce
+    # BYTE-IDENTICAL numbers on the same data -- not just similar.
+    sequential = run_part_a("splitcheck", feats, y, prompt_idx, is_known)
+    folds_split = compute_folds(feats, y, prompt_idx)
+    per_condition_split = {name: run_condition_only("splitcheck", name, feats, y, prompt_idx, is_known, folds_split)
+                            for name in ["core_max", "q_velocity"] + NEW_CONDITIONS}
+    combined = combine_conditions("splitcheck", per_condition_split, y, prompt_idx)
+    for name in ["core_max", "q_velocity"] + NEW_CONDITIONS:
+        assert (sequential["grouped"][name]["RF"]["pooled_oof_auroc"]
+                == combined["grouped"][name]["RF"]["pooled_oof_auroc"]), \
+            f"{name}: sequential and split-then-combined grouped AUROC diverged"
+        assert (sequential["harp"][name]["RF_mean"] == combined["harp"][name]["RF_mean"]), \
+            f"{name}: sequential and split-then-combined HARP AUROC diverged"
+    for name in NEW_CONDITIONS:
+        assert (sequential["paired_deltas"][name]["vs_core_max"]["pooled"]["mean_delta"]
+                == combined["paired_deltas"][name]["vs_core_max"]["pooled"]["mean_delta"]), \
+            f"{name}: paired delta diverged between sequential and split-then-combined runs"
+    print("  [PASS] run_part_a (sequential) and run_condition_only+combine_conditions (split, "
+          "as if run as 6 separate parallel jobs) produce byte-identical grouped AUROC, HARP "
+          "AUROC, and paired deltas for all 6 conditions")
+
     tmp_dir = os.path.join(HERE, "results", "_selftest_phase3")
     os.makedirs(tmp_dir, exist_ok=True)
     lb_path = os.path.join(tmp_dir, "leaderboard_v2_selftest.json")
@@ -701,6 +848,15 @@ def main():
     parser.add_argument("--core-pooled-pt", type=str, default=None, help="truthfulqa only")
     parser.add_argument("--velocity-meta", type=str, default=None, help="truthfulqa only")
     parser.add_argument("--part", type=str, choices=["a", "b"], default=None)
+    parser.add_argument("--condition", type=str, choices=ALL_CONDITIONS, default=None,
+                         help="With --part a: run ONLY this one condition instead of all 6 -- "
+                              "lets Part A's 6 conditions run as separate parallel jobs (they "
+                              "are mathematically independent). Follow up with "
+                              "--combine-conditions once all 6 per-condition jobs finish.")
+    parser.add_argument("--combine-conditions", action="store_true",
+                         help="Merge a dataset's 6 separately-run --condition jobs into the "
+                              "same session06_phase3_partA_{dataset}.json a sequential --part a "
+                              "run would have produced.")
     parser.add_argument("--combine-part-a", action="store_true")
     parser.add_argument("--part-c", action="store_true")
     parser.add_argument("--combine", action="store_true")
@@ -721,12 +877,34 @@ def main():
             cfg = yaml.safe_load(f)
         return cfg["output"]["data_dir"]
 
-    def load_dataset(ds):
+    def load_dataset(ds, condition=None):
         if ds == "truthfulqa":
             if not args.core_pooled_pt or not args.velocity_meta:
                 print("ERROR: --core-pooled-pt and --velocity-meta required for truthfulqa."); sys.exit(1)
-            return load_truthfulqa(args.core_pooled_pt, args.velocity_meta)
-        return load_new_dataset(ds, get_data_dir(), args.model_folder)
+            return load_truthfulqa(args.core_pooled_pt, args.velocity_meta, condition=condition)
+        return load_new_dataset(ds, get_data_dir(), args.model_folder, condition=condition)
+
+    if args.combine_conditions:
+        if not args.dataset:
+            print("ERROR: --dataset required with --combine-conditions."); sys.exit(1)
+        # only y/prompt_idx are needed here (for composition_line) -- "core_max" is the cheapest
+        # single tensor to load, avoids pulling in static/velocity/joint for no reason.
+        feats, y, prompt_idx, is_known = load_dataset(args.dataset, condition="core_max")
+        per_condition = {}
+        for cond_name in ALL_CONDITIONS:
+            p = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}_{cond_name}.json")
+            if not os.path.exists(p):
+                print(f"ERROR: missing {p} -- run `--dataset {args.dataset} --part a --condition "
+                      f"{cond_name}` first."); sys.exit(1)
+            with open(p) as f:
+                per_condition[cond_name] = json.load(f)
+        result = combine_conditions(args.dataset, per_condition, y, prompt_idx)
+        out_path = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}.json")
+        with open(out_path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        print(f"\nWrote: {out_path} (merged from {len(ALL_CONDITIONS)} per-condition runs)")
+        print("Next: after all 4 datasets, run --combine-part-a")
+        return
 
     if args.combine_part_a:
         part_a_results = {}
@@ -825,12 +1003,28 @@ def main():
     if not args.dataset or not args.part:
         print("ERROR: --dataset and --part required (or --combine-part-a / --part-c / --combine)."); sys.exit(1)
 
-    feats, y, prompt_idx, is_known = load_dataset(args.dataset)
+    # --condition (part a only) loads just that condition's raw tensors -- the memory-saving
+    # path for running Part A's 6 conditions as separate parallel jobs. Part b's rank probe
+    # needs core_max plus whatever the best condition turns out to be, so it always loads
+    # everything (condition=None).
+    load_condition = args.condition if (args.part == "a" and args.condition) else None
+    feats, y, prompt_idx, is_known = load_dataset(args.dataset, condition=load_condition)
 
     if args.part == "a":
+        os.makedirs(args.results_dir, exist_ok=True)
+        if args.condition:
+            folds = compute_folds(feats, y, prompt_idx)
+            result = run_condition_only(args.dataset, args.condition, feats, y, prompt_idx, is_known, folds)
+            out_path = os.path.join(args.results_dir,
+                                     f"session06_phase3_partA_{args.dataset}_{args.condition}.json")
+            with open(out_path, "w") as f:
+                json.dump(result, f, indent=2, default=str)
+            print(f"\nWrote: {out_path}")
+            print(f"Next: run the other 5 conditions (in parallel, if you like), then "
+                  f"--dataset {args.dataset} --combine-conditions")
+            return
         result = run_part_a(args.dataset, feats, y, prompt_idx, is_known)
         out_path = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}.json")
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2, default=str)
         print(f"\nWrote: {out_path}")
