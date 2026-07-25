@@ -503,20 +503,30 @@ def load_new_dataset(dataset, data_dir, model_folder, condition=None):
     npz_path = os.path.join(out_dir, f"{dataset}_phase2_features.npz")
     d = np.load(npz_path)   # lazy NpzFile -- does not materialize an array until indexed by key
     need = _needed_raw_types(condition)
-    need_static = "static" in need or "joint" in need
-    need_velocity = "velocity" in need or "joint" in need
+    # static/velocity are needed as scratch to build "joint" even when the condition itself
+    # (e.g. joint_tensor) never touches them directly -- built as local variables, only kept in
+    # the RETURNED feats dict if individually in `need`, so a joint_tensor-only job's resident
+    # memory during the actual (many-hour) Tucker/classifier fitting phase is just "joint", not
+    # static+velocity+joint all at once (~55GB vs ~111GB at TriviaQA scale).
+    need_static_raw = "static" in need or "joint" in need
+    need_velocity_raw = "velocity" in need or "joint" in need
 
     feats = {}
     if "core" in need:
         feats["core"] = d["static_max"].astype(np.float32)
-    if need_static:
-        feats["static"] = np.concatenate([d["static_q95"].astype(np.float32),
-                                           d["static_q05"].astype(np.float32)], axis=2)
-    if need_velocity:
-        feats["velocity"] = np.concatenate([d["velocity_q95"].astype(np.float32),
-                                             d["velocity_q05"].astype(np.float32)], axis=2)
+    static_tensor = velocity_tensor = None
+    if need_static_raw:
+        static_tensor = np.concatenate([d["static_q95"].astype(np.float32),
+                                         d["static_q05"].astype(np.float32)], axis=2)
+        if "static" in need:
+            feats["static"] = static_tensor
+    if need_velocity_raw:
+        velocity_tensor = np.concatenate([d["velocity_q95"].astype(np.float32),
+                                           d["velocity_q05"].astype(np.float32)], axis=2)
+        if "velocity" in need:
+            feats["velocity"] = velocity_tensor
     if "joint" in need:
-        feats["joint"] = np.concatenate([feats["static"], feats["velocity"]], axis=1)
+        feats["joint"] = np.concatenate([static_tensor, velocity_tensor], axis=1)
 
     y = d["label"].astype(np.int64)
     prompt_idx = d["prompt_id"].astype(np.int64)
@@ -527,8 +537,8 @@ def load_new_dataset(dataset, data_dir, model_folder, condition=None):
 def load_truthfulqa(core_pooled_pt, velocity_meta, condition=None):
     import torch
     need = _needed_raw_types(condition)
-    need_static = "static" in need or "joint" in need
-    need_velocity = "velocity" in need or "joint" in need
+    need_static_raw = "static" in need or "joint" in need
+    need_velocity_raw = "velocity" in need or "joint" in need
 
     pooled = torch.load(core_pooled_pt, weights_only=False)
     y = np.array([int(f) for f in pooled["all_hallucination_flag"]], dtype=np.int64)
@@ -537,17 +547,22 @@ def load_truthfulqa(core_pooled_pt, velocity_meta, condition=None):
     feats = {}
     if "core" in need:
         feats["core"] = torch.stack(pooled["all_emb"]).float().numpy()
-    if need_static or need_velocity:
+    static_tensor = velocity_tensor = None
+    if need_static_raw or need_velocity_raw:
         vel_npz_path = os.path.splitext(velocity_meta)[0].replace("_meta", "") + ".npz"
         vel_data = np.load(vel_npz_path)   # lazy
-        if need_static:
-            feats["static"] = np.concatenate([vel_data["S95"].astype(np.float32),
-                                               vel_data["S05"].astype(np.float32)], axis=2)
-        if need_velocity:
-            feats["velocity"] = np.concatenate([vel_data["V95"].astype(np.float32),
-                                                 vel_data["V05"].astype(np.float32)], axis=2)
+        if need_static_raw:
+            static_tensor = np.concatenate([vel_data["S95"].astype(np.float32),
+                                             vel_data["S05"].astype(np.float32)], axis=2)
+            if "static" in need:
+                feats["static"] = static_tensor
+        if need_velocity_raw:
+            velocity_tensor = np.concatenate([vel_data["V95"].astype(np.float32),
+                                               vel_data["V05"].astype(np.float32)], axis=2)
+            if "velocity" in need:
+                feats["velocity"] = velocity_tensor
     if "joint" in need:
-        feats["joint"] = np.concatenate([feats["static"], feats["velocity"]], axis=1)
+        feats["joint"] = np.concatenate([static_tensor, velocity_tensor], axis=1)
 
     is_known, _ = derive_is_known(y, prompt_idx)
     return feats, y, prompt_idx, is_known
@@ -685,17 +700,21 @@ def self_test():
         f"condition='core_max' should load ONLY 'core', got {set(feats_core_only.keys())}"
     feats_joint_only, _, _, _ = load_new_dataset(
         "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition="joint_tensor")
-    assert set(feats_joint_only.keys()) == {"static", "velocity", "joint"}, \
-        (f"condition='joint_tensor' should load static+velocity (to build joint) plus joint "
-         f"itself, not 'core' -- got {set(feats_joint_only.keys())}")
+    assert set(feats_joint_only.keys()) == {"joint"}, \
+        (f"condition='joint_tensor' should load ONLY 'joint' -- static/velocity are scratch used "
+         f"to build it but shouldn't be retained in the returned dict, got "
+         f"{set(feats_joint_only.keys())}")
     feats_all, _, _, _ = load_new_dataset(
         "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition=None)
     assert set(feats_all.keys()) == {"core", "static", "velocity", "joint"}
     assert np.array_equal(feats_all["core"], feats_core_only["core"]), \
         "selective and full loading must produce identical values for the tensors they share"
-    print("  [PASS] load_new_dataset(condition=...): loads exactly the raw tensors each "
-          "condition needs (core_max->{core}, joint_tensor->{static,velocity,joint}, "
-          "None->everything), with identical values to full loading for shared tensors")
+    assert np.array_equal(feats_all["joint"], feats_joint_only["joint"]), \
+        "joint tensor must be identical whether static/velocity are separately retained or not"
+    print("  [PASS] load_new_dataset(condition=...): retains exactly the raw tensors each "
+          "condition needs in the returned dict (core_max->{core}, joint_tensor->{joint} only, "
+          "static/velocity dropped once used as scratch; None->everything), with identical "
+          "values to full loading for shared tensors")
 
     for name, spec in CONDITION_SPECS.items():
         builder = make_grouped_builder(spec, feats)
