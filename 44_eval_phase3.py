@@ -220,8 +220,14 @@ def compute_folds(feats, y, prompt_idx):
     """GroupKFold's split only depends on `groups` (prompt_idx) and the array LENGTH, never on
     feature values -- so this is byte-identical whether computed once in a sequential run or
     independently in N separate parallel condition-jobs, as long as y/prompt_idx match (which
-    they do, since every job loads the same saved dataset)."""
-    folds = list(GroupKFold(n_splits=N_SPLITS).split(feats["core"], y, groups=prompt_idx))
+    they do, since every job loads the same saved dataset). Deliberately does NOT hardcode
+    feats["core"]: selective loading (see _needed_raw_types) means "core" is only present when
+    a condition actually needs it -- q_velocity/q_static/joint_tensor jobs never load it at all,
+    so indexing it here unconditionally is a real bug (this exact KeyError crashed a real
+    q_velocity job), not a hypothetical one. Any tensor in feats has the right length; which one
+    is arbitrary."""
+    any_tensor = next(iter(feats.values()))
+    folds = list(GroupKFold(n_splits=N_SPLITS).split(any_tensor, y, groups=prompt_idx))
     for tr, va in folds:
         assert set(prompt_idx[tr].tolist()).isdisjoint(set(prompt_idx[va].tolist()))
     return folds
@@ -348,7 +354,12 @@ def determine_best_condition(part_a_results):
 # ==============================================================================
 
 def run_part_b(dataset_name, feats, y, prompt_idx, best_condition):
-    folds = list(GroupKFold(n_splits=N_SPLITS).split(feats["core"], y, groups=prompt_idx))
+    # run_part_b always loads full feats (main() forces condition=None for --part b), so
+    # feats["core"] happens to be safe here in practice too -- routed through the same
+    # compute_folds() as everywhere else regardless, for one consistent code path rather than
+    # a second hardcoded reference that could silently break the same way if that assumption
+    # ever changes.
+    folds = compute_folds(feats, y, prompt_idx)
     results = {}
     conds = ("core_max", best_condition)
     total_runs = len(conds) * (1 + len(RANK_PROBE_RDS))
@@ -715,6 +726,27 @@ def self_test():
           "condition needs in the returned dict (core_max->{core}, joint_tensor->{joint} only, "
           "static/velocity dropped once used as scratch; None->everything), with identical "
           "values to full loading for shared tensors")
+
+    # -- regression test for the real bug that crashed a real q_velocity job: compute_folds()
+    # used to hardcode feats["core"], which KeyErrors for any condition whose selective load
+    # doesn't include "core" (q_velocity, q_static, joint_tensor). This runs the EXACT
+    # production path -- load_new_dataset(condition=X) followed by compute_folds() on its
+    # result -- for every one of the 6 conditions, not just the ones that happen to include
+    # "core" (which is what the previous test coverage effectively did, and why this slipped
+    # through).
+    for cond_name in ALL_CONDITIONS:
+        feats_selective, y_sel, prompt_idx_sel, is_known_sel = load_new_dataset(
+            "selftest", os.path.dirname(tmp_dir_load), os.path.basename(tmp_dir_load), condition=cond_name)
+        folds_selective = compute_folds(feats_selective, y_sel, prompt_idx_sel)
+        assert len(folds_selective) == N_SPLITS
+        # full run_condition_only() end to end on the selectively-loaded feats -- the actual
+        # code path a real --condition slurm job executes, not just the folds computation alone
+        one_result = run_condition_only("selftest", cond_name, feats_selective, y_sel, prompt_idx_sel,
+                                         is_known_sel, folds_selective)
+        assert 0.0 <= one_result["grouped_summary"]["RF"]["pooled_oof_auroc"] <= 1.0
+    print(f"  [PASS] compute_folds() + run_condition_only() work end to end on SELECTIVELY-loaded "
+          f"feats for all {len(ALL_CONDITIONS)} conditions, not just the ones that happen to "
+          f"include 'core' -- regression test for the real q_velocity KeyError")
 
     for name, spec in CONDITION_SPECS.items():
         builder = make_grouped_builder(spec, feats)
