@@ -18,6 +18,13 @@ sklearn.utils.extmath.randomized_svd directly on that, never materializing a D x
 matrix or the transposed copy at all. Applied uniformly to all four datasets (not just
 TriviaQA) and to both conditions, for one consistent code path across the whole table.
 
+compute_ul_ud_randomized()'s L-mode (channel-independent) step originally assumed L stays
+"tiny (8 or 9)" and built the (L, N*D) Gram-input array in one shot -- true for this phase's
+two conditions, but violated by Phase 3's joint_tensor, which concatenates static(L=9) and
+velocity(L=8) into L=17 and crashed a real TriviaQA job (82.7GB for that one array). Fixed
+by accumulating the (L,L) Gram matrix in chunks over N instead of materializing it whole;
+same result, peak memory now independent of N.
+
 Usage:
   python 43_eval_phase2.py --self-test
   python 43_eval_phase2.py --dataset triviaqa --model_folder llama-3.1-8b-instruct
@@ -73,12 +80,24 @@ HARP_PUBLISHED_LLAMA31_8B = {"nq_open": 89.4, "truthfulqa": 88.5, "triviaqa": 92
 # TUCKER CORE -- randomized/truncated SVD (channel-mode), required at TriviaQA scale
 # ==============================================================================
 
+L_MODE_CHUNK = 4096   # beams per chunk when accumulating the (L,L) Gram matrix below
+
+
 def compute_ul_ud_randomized(X_train, r_l, r_d, seed=SEED):
     N, L, D = X_train.shape
-    X_f = X_train.transpose(1, 0, 2).reshape(L, -1).astype(np.float64)   # L is tiny (8 or 9);
-    A_L = X_f @ X_f.T                                                    # exact eigh stays cheap
-    _, U_L = np.linalg.eigh(A_L)                                         # regardless of N.
-    U_L = np.flip(U_L[:, -r_l:], axis=1).copy()
+    # A_L[l,m] = sum_{n,d} X[n,l,d]*X[n,d,m] is only (L,L) -- tiny even when L=17 (joint_tensor's
+    # concatenated static(9)+velocity(8) layer axis, not just the single-tensor 8/9 case this was
+    # first written for). But building it via one X.transpose(1,0,2).reshape(L,-1) materializes a
+    # full (L, N*D) float64 COPY first -- at TriviaQA scale (N=99600) that's tens of GB regardless
+    # of how small L*L is, and crashed a real joint_tensor job (82.7GB for one array, L=17). Chunking
+    # over N accumulates the exact same sum with peak memory O(chunk*L*D) instead of O(N*L*D).
+    A_L = np.zeros((L, L), dtype=np.float64)
+    for start in range(0, N, L_MODE_CHUNK):
+        chunk = X_train[start:start + L_MODE_CHUNK].astype(np.float64)      # (n, L, D), small
+        chunk_f = chunk.transpose(1, 0, 2).reshape(L, -1)                   # (L, n*D), small
+        A_L += chunk_f @ chunk_f.T
+    _, U_L = np.linalg.eigh(A_L)                                         # exact eigh stays cheap
+    U_L = np.flip(U_L[:, -r_l:], axis=1).copy()                          # regardless of N.
 
     X_merged = X_train.reshape(N * L, D).astype(np.float32)   # merge axes 0,1 -- FREE reshape,
     _, _, Vt = randomized_svd(X_merged, n_components=r_d, random_state=seed)   # no transpose-copy
@@ -368,6 +387,28 @@ def self_test():
     comp = composition_line("selftest", y, prompt_idx)
     assert comp["n_beams"] == n_beams and comp["n_prompts"] == 150
     print(f"  [PASS] composition_line: {comp}")
+
+    # -- L-mode Gram accumulation: chunked-over-N must match a one-shot reference, at L=17
+    # (joint_tensor's real concatenated shape, not just this phase's tiny 8/9 conditions) and
+    # with N smaller than the chunk size so the "one chunk" and "multiple chunks" code paths
+    # both get exercised (N here straddles L_MODE_CHUNK via a small custom chunk override) --
+    rng = np.random.default_rng(0)
+    N_probe, L_probe, D_probe = 500, 17, 32
+    X_probe = rng.standard_normal((N_probe, L_probe, D_probe)).astype(np.float32)
+    X_f_ref = X_probe.transpose(1, 0, 2).reshape(L_probe, -1).astype(np.float64)
+    A_L_ref = X_f_ref @ X_f_ref.T
+    A_L_chunked = np.zeros((L_probe, L_probe), dtype=np.float64)
+    for start in range(0, N_probe, 37):   # deliberately not a divisor of N_probe or L_MODE_CHUNK
+        chunk = X_probe[start:start + 37].astype(np.float64)
+        chunk_f = chunk.transpose(1, 0, 2).reshape(L_probe, -1)
+        A_L_chunked += chunk_f @ chunk_f.T
+    assert np.allclose(A_L_ref, A_L_chunked, rtol=1e-10), \
+        "chunked Gram accumulation must equal the one-shot reference regardless of chunk boundaries"
+    U_L_ref, U_D_ref = compute_ul_ud_randomized(X_probe, 8, 10, seed=0)
+    assert U_L_ref.shape == (L_probe, 8) and U_D_ref.shape == (D_probe, 10), \
+        f"compute_ul_ud_randomized must handle L=17 (joint_tensor's shape), got U_L={U_L_ref.shape}"
+    print("  [PASS] compute_ul_ud_randomized: chunked L-mode Gram matches one-shot reference at L=17 "
+          "(joint_tensor's real shape, the case that OOM'd a real TriviaQA job pre-fix)")
 
     # -- randomized-SVD Tucker recovers a planted signal comparably to exact eigh --
     tr_idx = np.arange(n_beams)
