@@ -21,6 +21,13 @@ CLI stages (mirrors the established per-dataset-then-combine pattern, extended f
 cross-dataset "best condition" dependency that Parts B and C both need):
   --self-test
   --dataset {truthfulqa,triviaqa,nq_open,tydiqa_gp} --part a   [+ --core-pooled-pt/--velocity-meta for truthfulqa]
+    [+ --condition {one of 6}                                   (parallel-job mode; writes a summary JSON +
+                                                                  companion .npz per condition, not one big file)]
+  --dataset {ds} --backfill-deltas                              (optional, re-runnable: once core_max/q_velocity
+                                                                  are both on disk, backfills paired_deltas into
+                                                                  whichever other --condition results already
+                                                                  exist, without waiting for all 6)
+  --dataset {ds} --combine-conditions                           (merges a dataset's 6 --condition runs)
   --combine-part-a                                              (determines the best condition)
   --dataset {triviaqa,truthfulqa} --part b                      (rank probe, needs best-condition)
   --part c                                                       (transfer matrix, needs best-condition, loads all 4)
@@ -31,6 +38,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -283,6 +291,110 @@ def run_condition_only(dataset_name, cond_name, feats, y, prompt_idx, is_known, 
 
     return {"dataset": dataset_name, "condition": cond_name, "grouped_summary": grouped_summary,
             "oof_rf": oof["RF"].tolist(), "oof_lr": oof["LR"].tolist(), "harp": harp_one}
+
+
+def _oof_npz_filename(dataset_name, cond_name):
+    return f"session06_phase3_partA_{dataset_name}_{cond_name}_oof.npz"
+
+
+def write_condition_result(dataset_name, cond_name, result, results_dir):
+    """Splits run_condition_only()'s result into a small summary JSON + a companion .npz for the
+    per-beam OOF score vectors. A single condition's OOF arrays are one-per-beam (99,600 beams
+    for TriviaQA) -- embedded inline as JSON lists this bloated a single condition's result file
+    to ~3.3MB/199k lines (session06_phase3_partA_triviaqa_core_concat.json), unreadable as a
+    normal text file. Every consumer of these arrays (combine_conditions, backfill_paired_deltas)
+    only ever needs them as numpy arrays, never as JSON text, so there's no reason to pay the
+    JSON-list serialization cost at all -- .npz is both smaller and faster to load."""
+    oof_filename = _oof_npz_filename(dataset_name, cond_name)
+    oof_path = os.path.join(results_dir, oof_filename)
+    np.savez(oof_path, oof_rf=np.asarray(result["oof_rf"], dtype=np.float64),
+              oof_lr=np.asarray(result["oof_lr"], dtype=np.float64))
+    summary = {k: v for k, v in result.items() if k not in ("oof_rf", "oof_lr")}
+    summary["oof_npz"] = oof_filename
+    out_path = os.path.join(results_dir, f"session06_phase3_partA_{dataset_name}_{cond_name}.json")
+    with open(out_path, "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+    return out_path, oof_path
+
+
+def load_condition_result(dataset_name, cond_name, results_dir):
+    """Inverse of write_condition_result(): reads the summary JSON, reattaches oof_rf/oof_lr from
+    the companion .npz as numpy arrays. Returns (result_dict_with_oof_arrays, json_path) or
+    (None, json_path) if the condition hasn't been run yet.
+
+    Transparently migrates pre-fix files: real result JSONs already exist on disk (e.g. a real
+    TriviaQA core_concat run) written by the OLD code, with oof_rf/oof_lr embedded directly and
+    no "oof_npz" key -- 7+ hours of real compute already paid for. Re-splitting them here on
+    first load (write the npz, rewrite the JSON summary-only) means the fix applies without
+    forcing a wasteful recompute of anything already finished."""
+    p = os.path.join(results_dir, f"session06_phase3_partA_{dataset_name}_{cond_name}.json")
+    if not os.path.exists(p):
+        return None, p
+    with open(p) as f:
+        result = json.load(f)
+    if "oof_npz" not in result:
+        print(f"  [migrate] {p}: old format (OOF arrays embedded inline) -- splitting into "
+              f".npz now, no recompute needed", flush=True)
+        write_condition_result(dataset_name, cond_name, result, results_dir)
+        with open(p) as f:
+            result = json.load(f)
+    oof_path = os.path.join(results_dir, result["oof_npz"])
+    oof_npz = np.load(oof_path)
+    result["oof_rf"] = oof_npz["oof_rf"]
+    result["oof_lr"] = oof_npz["oof_lr"]
+    return result, p
+
+
+def backfill_paired_deltas(dataset_name, results_dir, y, prompt_idx):
+    """Every non-baseline condition's paired_deltas are measured vs core_max and vs q_velocity --
+    but Part A's 6 conditions run as independent parallel jobs with no fixed completion order, so
+    a condition (e.g. core_concat) routinely finishes and gets written to disk before one or both
+    baselines have. combine_conditions() requires all 6 present before computing any deltas at
+    all, which means an already-finished condition's result sits with no paired_deltas for as
+    long as its baselines are still running -- exactly what happened to TriviaQA's core_concat.
+
+    This re-scans whichever per-condition files exist, and as soon as BOTH baselines are present,
+    backfills vs_core_max/vs_q_velocity into every other available condition's own JSON (in
+    place) -- without waiting for all 6. Safe to call repeatedly as more conditions land; picks
+    up whatever's newly available each time. Purely an interim convenience for visibility while
+    jobs are still in flight -- combine_conditions() still recomputes paired_deltas from scratch
+    into the merged dataset-level file once all 6 exist, so this is never the source of truth."""
+    core_max, _ = load_condition_result(dataset_name, "core_max", results_dir)
+    q_velocity, _ = load_condition_result(dataset_name, "q_velocity", results_dir)
+    if core_max is None or q_velocity is None:
+        missing = [n for n, r in (("core_max", core_max), ("q_velocity", q_velocity)) if r is None]
+        print(f"[{dataset_name}] backfill-deltas: baseline(s) not on disk yet ({missing}) -- "
+              f"nothing to backfill.")
+        return {}
+
+    core_max_rf = np.asarray(core_max["oof_rf"])
+    q_velocity_rf = np.asarray(q_velocity["oof_rf"])
+    written = {}
+    for name in NEW_CONDITIONS:
+        cond_result, cond_path = load_condition_result(dataset_name, name, results_dir)
+        if cond_result is None:
+            print(f"[{dataset_name}] backfill-deltas: {name} not on disk yet -- skipping.")
+            continue
+        cond_rf = np.asarray(cond_result["oof_rf"])
+        deltas = {
+            "vs_core_max": {
+                "pooled": paired_bootstrap_delta(cond_rf, core_max_rf, y, prompt_idx, N_BOOTSTRAP, SEED, False),
+                "within_prompt": paired_bootstrap_delta(cond_rf, core_max_rf, y, prompt_idx, N_BOOTSTRAP, SEED, True),
+            },
+            "vs_q_velocity": {
+                "pooled": paired_bootstrap_delta(cond_rf, q_velocity_rf, y, prompt_idx, N_BOOTSTRAP, SEED, False),
+                "within_prompt": paired_bootstrap_delta(cond_rf, q_velocity_rf, y, prompt_idx, N_BOOTSTRAP, SEED, True),
+            },
+        }
+        cond_summary = {k: v for k, v in cond_result.items() if k not in ("oof_rf", "oof_lr")}
+        cond_summary["paired_deltas"] = deltas
+        with open(cond_path, "w") as f:
+            json.dump(cond_summary, f, indent=2, default=str)
+        written[name] = deltas
+        print(f"[{dataset_name}] backfill-deltas: wrote paired_deltas into {cond_path}  "
+              f"(vs core_max within-p={deltas['vs_core_max']['within_prompt']['mean_delta']:.4f}, "
+              f"vs q_velocity within-p={deltas['vs_q_velocity']['within_prompt']['mean_delta']:.4f})")
+    return written
 
 
 def combine_conditions(dataset_name, per_condition, y, prompt_idx):
@@ -894,6 +1006,80 @@ def self_test():
           "as if run as 6 separate parallel jobs) produce byte-identical grouped AUROC, HARP "
           "AUROC, and paired deltas for all 6 conditions")
 
+    # -- write_condition_result/load_condition_result: JSON must NOT embed OOF arrays (that's
+    # the whole point of this split -- a single condition's OOF vectors bloated one real
+    # TriviaQA result file to ~3.3MB/199k lines) -- and backfill_paired_deltas must produce
+    # deltas numerically IDENTICAL to combine_conditions()'s all-at-once computation.
+    backfill_dir = os.path.join(HERE, "results", "_selftest_phase3_backfill")
+    shutil.rmtree(backfill_dir, ignore_errors=True)
+    os.makedirs(backfill_dir, exist_ok=True)
+    for name in ["core_max", "q_velocity"] + NEW_CONDITIONS:
+        out_path, oof_path = write_condition_result("splitcheck", name, per_condition_split[name], backfill_dir)
+        with open(out_path) as f:
+            written_json = json.load(f)
+        assert "oof_rf" not in written_json and "oof_lr" not in written_json, \
+            f"{name}: result JSON must not embed OOF score arrays -- that's what bloated a real file"
+        assert written_json["oof_npz"] == os.path.basename(oof_path)
+        reloaded, _ = load_condition_result("splitcheck", name, backfill_dir)
+        assert np.array_equal(reloaded["oof_rf"], np.asarray(per_condition_split[name]["oof_rf"])), \
+            f"{name}: OOF scores must round-trip exactly through the .npz split"
+    print("  [PASS] write_condition_result/load_condition_result: JSON holds summaries only, OOF "
+          "score vectors round-trip exactly through the companion .npz")
+
+    # -- migration: a real pre-fix result file (old format, OOF arrays embedded, no "oof_npz"
+    # key) must load transparently and get split in place, no recompute, matching what
+    # write_condition_result would have produced from the same underlying result.
+    migrate_dir = os.path.join(HERE, "results", "_selftest_phase3_migrate")
+    shutil.rmtree(migrate_dir, ignore_errors=True)
+    os.makedirs(migrate_dir, exist_ok=True)
+    old_format_result = {"dataset": "splitcheck", "condition": "core_max",
+                          "grouped_summary": per_condition_split["core_max"]["grouped_summary"],
+                          "oof_rf": per_condition_split["core_max"]["oof_rf"],
+                          "oof_lr": per_condition_split["core_max"]["oof_lr"],
+                          "harp": per_condition_split["core_max"]["harp"]}
+    old_path = os.path.join(migrate_dir, "session06_phase3_partA_splitcheck_core_max.json")
+    with open(old_path, "w") as f:
+        json.dump(old_format_result, f, indent=2, default=str)
+    migrated, _ = load_condition_result("splitcheck", "core_max", migrate_dir)
+    assert np.array_equal(migrated["oof_rf"], np.asarray(old_format_result["oof_rf"])), \
+        "migrated OOF scores must match the pre-fix embedded values exactly"
+    with open(old_path) as f:
+        rewritten = json.load(f)
+    assert "oof_rf" not in rewritten and "oof_npz" in rewritten, \
+        "loading an old-format file must rewrite it in place to the new summary-only format"
+    print("  [PASS] load_condition_result: transparently migrates old-format (pre-fix) files "
+          "with embedded OOF arrays -- no recompute needed")
+
+    written = backfill_paired_deltas("splitcheck", backfill_dir, y, prompt_idx)
+    for name in NEW_CONDITIONS:
+        assert (written[name]["vs_core_max"]["pooled"]["mean_delta"]
+                == combined["paired_deltas"][name]["vs_core_max"]["pooled"]["mean_delta"]), \
+            f"{name}: backfilled delta must match combine_conditions()'s own computation exactly"
+        with open(os.path.join(backfill_dir, f"session06_phase3_partA_splitcheck_{name}.json")) as f:
+            persisted = json.load(f)
+        assert "paired_deltas" in persisted, f"{name}: backfill must persist paired_deltas into its own JSON"
+    print("  [PASS] backfill_paired_deltas: matches combine_conditions()'s deltas exactly, "
+          "persisted into each condition's own JSON")
+
+    # -- the actual scenario that motivated this: core_concat finishes, its baselines haven't
+    # yet (this is exactly what happened to real TriviaQA data). backfill must no-op cleanly
+    # (not crash) until both baselines exist, then pick up already-finished conditions.
+    partial_dir = os.path.join(HERE, "results", "_selftest_phase3_backfill_partial")
+    shutil.rmtree(partial_dir, ignore_errors=True)
+    os.makedirs(partial_dir, exist_ok=True)
+    write_condition_result("splitcheck", "core_concat", per_condition_split["core_concat"], partial_dir)
+    empty = backfill_paired_deltas("splitcheck", partial_dir, y, prompt_idx)
+    assert empty == {}, "backfill must no-op (not crash) when neither baseline is on disk yet"
+    write_condition_result("splitcheck", "core_max", per_condition_split["core_max"], partial_dir)
+    still_empty = backfill_paired_deltas("splitcheck", partial_dir, y, prompt_idx)
+    assert still_empty == {}, "backfill must still no-op with only ONE baseline (core_max) present"
+    write_condition_result("splitcheck", "q_velocity", per_condition_split["q_velocity"], partial_dir)
+    now_written = backfill_paired_deltas("splitcheck", partial_dir, y, prompt_idx)
+    assert set(now_written.keys()) == {"core_concat"}, \
+        "once both baselines land, backfill should pick up exactly the conditions already on disk"
+    print("  [PASS] backfill_paired_deltas: no-ops until both baselines exist, then correctly "
+          "picks up whichever conditions already finished (the real core_concat-finishes-first case)")
+
     tmp_dir = os.path.join(HERE, "results", "_selftest_phase3")
     os.makedirs(tmp_dir, exist_ok=True)
     lb_path = os.path.join(tmp_dir, "leaderboard_v2_selftest.json")
@@ -932,6 +1118,11 @@ def main():
                          help="Merge a dataset's 6 separately-run --condition jobs into the "
                               "same session06_phase3_partA_{dataset}.json a sequential --part a "
                               "run would have produced.")
+    parser.add_argument("--backfill-deltas", action="store_true",
+                         help="Interim, re-runnable: as soon as core_max and q_velocity are both "
+                              "on disk, backfill vs_core_max/vs_q_velocity paired_deltas into "
+                              "whichever other --condition results already exist, without waiting "
+                              "for all 6. Safe to call again each time a new condition finishes.")
     parser.add_argument("--combine-part-a", action="store_true")
     parser.add_argument("--part-c", action="store_true")
     parser.add_argument("--combine", action="store_true")
@@ -959,6 +1150,13 @@ def main():
             return load_truthfulqa(args.core_pooled_pt, args.velocity_meta, condition=condition)
         return load_new_dataset(ds, get_data_dir(), args.model_folder, condition=condition)
 
+    if args.backfill_deltas:
+        if not args.dataset:
+            print("ERROR: --dataset required with --backfill-deltas."); sys.exit(1)
+        _, y, prompt_idx, _ = load_dataset(args.dataset, condition="core_max")
+        backfill_paired_deltas(args.dataset, args.results_dir, y, prompt_idx)
+        return
+
     if args.combine_conditions:
         if not args.dataset:
             print("ERROR: --dataset required with --combine-conditions."); sys.exit(1)
@@ -967,12 +1165,11 @@ def main():
         feats, y, prompt_idx, is_known = load_dataset(args.dataset, condition="core_max")
         per_condition = {}
         for cond_name in ALL_CONDITIONS:
-            p = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}_{cond_name}.json")
-            if not os.path.exists(p):
+            cond_result, p = load_condition_result(args.dataset, cond_name, args.results_dir)
+            if cond_result is None:
                 print(f"ERROR: missing {p} -- run `--dataset {args.dataset} --part a --condition "
                       f"{cond_name}` first."); sys.exit(1)
-            with open(p) as f:
-                per_condition[cond_name] = json.load(f)
+            per_condition[cond_name] = cond_result
         result = combine_conditions(args.dataset, per_condition, y, prompt_idx)
         out_path = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}.json")
         with open(out_path, "w") as f:
@@ -1090,11 +1287,10 @@ def main():
         if args.condition:
             folds = compute_folds(feats, y, prompt_idx)
             result = run_condition_only(args.dataset, args.condition, feats, y, prompt_idx, is_known, folds)
-            out_path = os.path.join(args.results_dir,
-                                     f"session06_phase3_partA_{args.dataset}_{args.condition}.json")
-            with open(out_path, "w") as f:
-                json.dump(result, f, indent=2, default=str)
+            out_path, oof_path = write_condition_result(args.dataset, args.condition, result, args.results_dir)
             print(f"\nWrote: {out_path}")
+            print(f"Wrote: {oof_path}  ({len(result['oof_rf'])}-beam RF/LR OOF score vectors -- "
+                  f"kept out of the JSON, which is summaries only)")
             print(f"Next: run the other 5 conditions (in parallel, if you like), then "
                   f"--dataset {args.dataset} --combine-conditions")
             return
