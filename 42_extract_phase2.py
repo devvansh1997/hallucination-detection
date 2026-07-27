@@ -55,9 +55,12 @@ from tqdm import tqdm
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-# Llama-3.1-8B-Instruct's max_position_embeddings -- fixed architecture fact, used only to
-# sanity-check TyDiQA-GP's long passages weren't silently truncated during Phase 1 generation.
-CONTEXT_LIMIT = 131072
+# max_position_embeddings per model_folder -- fixed architecture facts, used only to sanity-check
+# TyDiQA-GP's long passages weren't silently truncated during Phase 1 generation. Was a single
+# hardcoded Llama constant (131072); Qwen2.5-7B-Instruct's real limit is 32768 -- 4x smaller, so
+# reusing Llama's value would have silently printed [PASS] on prompts that actually risked
+# truncation under Qwen's real context window.
+CONTEXT_LIMITS = {"llama-3.1-8b-instruct": 131072, "qwen-2.5-7b-instruct": 32768}
 
 
 def _load(name, filename):
@@ -283,16 +286,17 @@ def run_extraction(dataset, model_folder, data_dir, batch_size=16):
     print(f"Loading pinned Phase 1 sequences: {seq_path}")
     seq_data = torch.load(seq_path, weights_only=False)
 
+    context_limit = CONTEXT_LIMITS[model_folder]
     stats_pre = compute_window_stats(seq_data)
     print(f"  [Pre-extraction] mean completion len={stats_pre['mean_completion_len']:.2f}  "
           f"min={stats_pre['min_completion_len']}  max={stats_pre['max_completion_len']}  "
           f"max_prompt_len={stats_pre['max_prompt_len']}")
-    if stats_pre["max_prompt_len"] >= CONTEXT_LIMIT:
+    if stats_pre["max_prompt_len"] >= context_limit:
         print(f"  [WARN] max prompt length {stats_pre['max_prompt_len']} >= model context limit "
-              f"{CONTEXT_LIMIT} -- possible prompt-side truncation during Phase 1 generation.")
+              f"{context_limit} -- possible prompt-side truncation during Phase 1 generation.")
     else:
         print(f"  [PASS] no prompt-side truncation risk (max {stats_pre['max_prompt_len']} tokens, "
-              f"well under the {CONTEXT_LIMIT}-token context limit)")
+              f"well under the {context_limit}-token context limit)")
 
     print("\n  Spot-decoded completions (from Phase 1's pinned decoded_text, 5 random beams):")
     for line in spot_decode(seq_data, n=5, seed=0):
