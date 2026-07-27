@@ -38,6 +38,22 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
+try:
+    import resource   # POSIX only (the cluster) -- absent on Windows (local --self-test runs).
+except ImportError:
+    resource = None
+
+
+def peak_rss_mb():
+    """Process peak resident set size so far, in MB. q_velocity OOM'd silently over 6+ hours on
+    triviaqa with no completed fold to show for it (job 747801) -- wiring this into the existing
+    per-fold/per-seed progress prints means a future OOM leaves a trail of *where* memory was
+    building, instead of just a bare kernel kill with no diagnostic signal. None on Windows/if
+    unavailable; callers must handle that."""
+    if resource is None:
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Wall-clock reference for every "elapsed since process start" print in this script -- lets you
@@ -162,6 +178,10 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
     n_folds = len(folds)
     for fold_i, (tr, va) in enumerate(folds):
         t0 = time.time()
+        rss0 = peak_rss_mb()
+        rss0_str = f"  peakRSS={rss0:.0f}MB" if rss0 is not None else ""
+        print(f"  [{label}] fold {fold_i+1}/{n_folds} starting  [job elapsed {fmt_elapsed(since_start())}]"
+              f"{rss0_str}", flush=True)
         core = core_builder(tr, seed + fold_i)
         rf_scores = fit_eval("RF", core[tr], y[tr], core[va], seed + fold_i)
         oof_rf[va] = rf_scores; fold_rf.append(float(roc_auc_score(y[va], rf_scores)))
@@ -171,9 +191,11 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
         fold_times.append(elapsed)
         avg = sum(fold_times) / len(fold_times)
         eta = avg * (n_folds - fold_i - 1)
+        rss = peak_rss_mb()
+        rss_str = f"  peakRSS={rss:.0f}MB" if rss is not None else ""
         print(f"  [{label}] fold {fold_i+1}/{n_folds} done in {elapsed:.1f}s (RF={fold_rf[-1]:.4f}, "
               f"LR={fold_lr[-1]:.4f})  -- ETA this condition: {eta:.0f}s  "
-              f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
+              f"[job elapsed {fmt_elapsed(since_start())}]{rss_str}", flush=True)
     return ({"RF": summarize_oof(oof_rf, y, prompt_idx, fold_rf, seed),
              "LR": summarize_oof(oof_lr, y, prompt_idx, fold_lr, seed)},
             {"RF": oof_rf, "LR": oof_lr})
@@ -197,8 +219,10 @@ def run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_
                 scores = fit_eval(clf, core[t_idx], y[t_idx], core[v_idx], seed)
                 row[clf] = float(roc_auc_score(y[v_idx], scores))
             per_seed[name].append(row)
+            rss = peak_rss_mb()
+            rss_str = f"  peakRSS={rss:.0f}MB" if rss is not None else ""
             print(f"    [{label_prefix}] seed {seed_i+1}/{n_seeds}, condition {cond_i+1}/{n_conditions} "
-                  f"({name}): RF={row['RF']:.4f} LR={row['LR']:.4f}  ({time.time()-t0:.1f}s)", flush=True)
+                  f"({name}): RF={row['RF']:.4f} LR={row['LR']:.4f}  ({time.time()-t0:.1f}s){rss_str}", flush=True)
     summary = {}
     for name, rows in per_seed.items():
         summary[name] = {"per_seed": rows,
