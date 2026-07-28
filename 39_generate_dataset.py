@@ -1,6 +1,17 @@
 """
-39_generate_dataset.py -- Session 06 Phase 1, Steps 1+2: Dataset Creation (TriviaQA/NQ-Open/TyDiQA-GP)
+39_generate_dataset.py -- Session 06 Phase 1, Steps 1+2: Dataset Creation
+(TriviaQA/NQ-Open/TyDiQA-GP/TruthfulQA)
 ===========================================================================================================
+TruthfulQA added post-session06-Phase-1 to make this pipeline work uniformly for a SECOND model
+(Qwen2.5-7B-Instruct): unlike LLaMA, Qwen has no cached canonical TruthfulQA artifacts from the
+older Route N pipeline (34_gate_reconstruct_or_regenerate.py), so it needs an actual generation
+pass, not just a pointer to existing files. TruthfulQA's real schema already provides genuine
+correct_answers AND incorrect_answers lists (unlike the other three, which always pass
+incorrect_answers=[] since their HF sources don't have that field) -- so it's the one dataset
+where is_correct_simple's BLEURT contrastive check (already written to accept `incorrect`, just
+never fed one before) actually exercises both branches. LLaMA's existing TruthfulQA results are
+untouched by this -- they still come from the older pipeline via 43_eval_phase2.py's
+--core-pooled-pt/--velocity-meta path, not this one.
 GPU (generation), with a CPU-only --audit-only preview mode for Step 1. Scope is strictly
 generate + label + pin -- NO hidden-state capture, no pooling, no feature extraction this session
 (the raw-state-store pattern from sessions 04/05 does not apply here; we only need sequences,
@@ -49,6 +60,7 @@ Usage:
   python 39_generate_dataset.py --self-test
   python 39_generate_dataset.py --dataset triviaqa --model_folder llama-3.1-8b-instruct --audit-only
   python 39_generate_dataset.py --dataset triviaqa --model_folder llama-3.1-8b-instruct
+  python 39_generate_dataset.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct
 """
 
 import argparse
@@ -100,7 +112,10 @@ EMPIRICAL_S_PER_PROMPT_SHORT_ANSWER = 1.29   # TriviaQA real run: 2581s / 2000 p
 # Raw HF validation-split length, hard-asserted at load time as a config/version sanity check
 # (session06 Phase-1 addendum). tydiqa_gp has no fixed expected value (multi-language split;
 # its English-filtered count is reported informally instead -- see load_dataset_samples).
-EXPECTED_SPLIT_LENGTH = {"triviaqa": 17944, "nq_open": 3610}
+# truthfulqa's "generation" config validation split is a well-established 817 rows -- the same
+# figure every existing TruthfulQA result in this project (LLaMA's v3 canonical data included)
+# is built on.
+EXPECTED_SPLIT_LENGTH = {"triviaqa": 17944, "nq_open": 3610, "truthfulqa": 817}
 
 
 # ==============================================================================
@@ -193,6 +208,14 @@ def load_dataset_samples(ds_cfg):
             i += 1
         print(f"  [INFO] tydiqa_gp: {raw_split_len} raw (all-language) rows -> {len(samples)} "
               f"English-filtered questions (expected ~440 per Phase-1 addendum; informal check, not asserted)")
+    elif name == "truthfulqa":
+        # unlike the other three, truthfulqa's real schema provides genuine incorrect_answers --
+        # is_correct_simple's BLEURT contrastive check actually uses both branches here, not just
+        # the correct-answers-only degenerate case the other three always hit.
+        for i, ex in enumerate(ds):
+            samples.append({"prompt_id": i, "prompt_text": template.format(question=ex["question"]),
+                             "correct_answers": [str(a) for a in ex["correct_answers"] if a],
+                             "incorrect_answers": [str(a) for a in ex["incorrect_answers"] if a]})
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
@@ -506,8 +529,14 @@ def self_test():
         assert "17944" in str(e) or "12345" in str(e)
     assert_split_length("nq_open", 3610)
     assert_split_length("tydiqa_gp", 999)   # no fixed expected value -- must not raise (info-only)
-    print("  [PASS] assert_split_length: raises on mismatch for pinned datasets, "
-          "info-only (no raise) for datasets with no fixed expected length")
+    assert_split_length("truthfulqa", 817)   # must not raise
+    try:
+        assert_split_length("truthfulqa", 800)
+        raise AssertionError("assert_split_length should have raised on a truthfulqa length mismatch")
+    except AssertionError as e:
+        assert "817" in str(e) or "800" in str(e)
+    print("  [PASS] assert_split_length: raises on mismatch for pinned datasets (incl. truthfulqa's "
+          "new 817), info-only (no raise) for datasets with no fixed expected length")
 
     # -- fabricate a minimal generation result and build a manifest from it --
     tmp_dir = os.path.join(HERE, "results", "_selftest_gen_dataset")
@@ -570,7 +599,8 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, choices=["triviaqa", "nq_open", "tydiqa_gp"], default=None)
+    parser.add_argument("--dataset", type=str,
+                         choices=["triviaqa", "nq_open", "tydiqa_gp", "truthfulqa"], default=None)
     parser.add_argument("--model_folder", type=str, default="llama-3.1-8b-instruct")
     parser.add_argument("--global-seed", type=int, default=GEN_SEED_DEFAULT)
     parser.add_argument("--audit-only", action="store_true")

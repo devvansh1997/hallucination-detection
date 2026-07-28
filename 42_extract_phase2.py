@@ -18,11 +18,17 @@ instruction -- does NOT reimplement the forward-pass/hook logic:
     max-pool) used to derive TruthfulQA v3's velocity/kinematic/static/core features.
 
 This file is a thin driver: it points those functions at Phase 1's pinned
-{dataset}_sequences_v1.pt files (triviaqa/nq_open/tydiqa_gp) instead of TruthfulQA's,
-casts the outputs to Phase 2's fp16 storage format, deletes the transient raw-state-store
-shards afterward (they run ~2-3x larger than the final pooled outputs and were never
-asked to be kept -- keeping them would blow well past the ~50GB fp16 budget), and writes
-manifest v2.
+{dataset}_sequences_v1.pt files, casts the outputs to Phase 2's fp16 storage format, deletes
+the transient raw-state-store shards afterward (they run ~2-3x larger than the final pooled
+outputs and were never asked to be kept -- keeping them would blow well past the ~50GB fp16
+budget), and writes manifest v2. run_extraction() has no dataset-schema-specific logic at all
+(unlike 39_generate_dataset.py's load_dataset_samples()) -- it only ever reads the
+already-generic {dataset}_sequences_v1.pt/manifest_{dataset}_v1.json Phase 1 produces, so
+--dataset truthfulqa works here with zero logic changes, once 39 has produced that file for
+whatever model_folder. For LLaMA specifically, TruthfulQA still goes through the OLDER
+34_gate_reconstruct_or_regenerate.py-based pipeline instead (already-cached canonical
+artifacts, never routed through 39/42) -- this script's truthfulqa support only matters for a
+model that has nothing cached yet, e.g. Qwen2.5-7B-Instruct.
 
 Window boundaries: 39_generate_dataset.py already truncates every beam's input_ids to the
 canonical window at SAVE TIME (session05b's fix, validated by Phase 1's Assert B). So the
@@ -463,7 +469,8 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, choices=["triviaqa", "nq_open", "tydiqa_gp"], default=None)
+    parser.add_argument("--dataset", type=str,
+                         choices=["triviaqa", "nq_open", "tydiqa_gp", "truthfulqa"], default=None)
     parser.add_argument("--model_folder", type=str, default="llama-3.1-8b-instruct")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--data-dir", type=str, default=None)
