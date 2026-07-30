@@ -104,6 +104,7 @@ composition_line = s02_eval.composition_line
 # per-model output isolation -- defined in 43 so both scripts share one implementation
 resolve_results_dir = s02_eval.resolve_results_dir
 legacy_read_path = s02_eval.legacy_read_path
+has_standard_features = s02_eval.has_standard_features
 
 SEED = 0
 N_SPLITS = 5
@@ -1168,10 +1169,22 @@ def main():
             cfg = yaml.safe_load(f)
         return cfg["output"]["data_dir"]
 
+    def use_legacy_truthfulqa(ds):
+        """TruthfulQA was reachable ONLY via --core-pooled-pt/--velocity-meta, since LLaMA's
+        TruthfulQA features predate this pipeline (older Route N artifacts). Now that 39/42
+        support truthfulqa for any model, Qwen has a standard {dataset}_phase2_features.npz and
+        no canonical .pt to point those flags at. Dispatch on which artifact EXISTS, not on the
+        dataset name -- Qwen takes the standard path automatically, LLaMA keeps its legacy flags."""
+        return ds == "truthfulqa" and not has_standard_features(ds, get_data_dir(), args.model_folder)
+
     def load_dataset(ds, condition=None):
-        if ds == "truthfulqa":
+        if use_legacy_truthfulqa(ds):
             if not args.core_pooled_pt or not args.velocity_meta:
-                print("ERROR: --core-pooled-pt and --velocity-meta required for truthfulqa."); sys.exit(1)
+                print(f"ERROR: truthfulqa for model_folder={args.model_folder} has no "
+                      f"truthfulqa_phase2_features.npz, so --core-pooled-pt and --velocity-meta "
+                      f"are required (LLaMA's legacy path). Run 42_extract_phase2.py --dataset "
+                      f"truthfulqa --model_folder {args.model_folder} to use the standard path "
+                      f"instead."); sys.exit(1)
             return load_truthfulqa(args.core_pooled_pt, args.velocity_meta, condition=condition)
         return load_new_dataset(ds, get_data_dir(), args.model_folder, condition=condition)
 
@@ -1231,10 +1244,9 @@ def main():
             t_load0 = time.time()
             print(f"Loading {ds_i+1}/{len(DATASETS)}: {ds} ...  [job elapsed {fmt_elapsed(since_start())}]",
                   flush=True)
-            if ds == "truthfulqa":
-                feats, y, _, _ = load_truthfulqa(args.core_pooled_pt, args.velocity_meta)
-            else:
-                feats, y, _, _ = load_new_dataset(ds, get_data_dir(), args.model_folder)
+            # same existence-based dispatch as load_dataset() -- Part C loads all 4 datasets
+            # directly rather than going through it
+            feats, y, _, _ = load_dataset(ds)
             all_feats[ds] = feats
             all_y[ds] = y
             print(f"  loaded {ds}: {len(y)} beams  ({time.time()-t_load0:.1f}s)", flush=True)

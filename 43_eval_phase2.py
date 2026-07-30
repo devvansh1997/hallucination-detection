@@ -130,6 +130,14 @@ def resolve_results_dir(explicit, model_folder):
     return os.path.join(LEGACY_RESULTS_DIR, model_folder)
 
 
+def has_standard_features(dataset, data_dir, model_folder):
+    """True if this model has 42_extract_phase2.py's standard {dataset}_phase2_features.npz.
+    Used to decide whether TruthfulQA should load via the standard path or via LLaMA's legacy
+    --core-pooled-pt/--velocity-meta artifacts -- dispatching on what exists, not on the dataset
+    name, is what lets one code path serve both models."""
+    return os.path.exists(os.path.join(data_dir, model_folder, f"{dataset}_phase2_features.npz"))
+
+
 def legacy_read_path(filename, results_dir):
     """Resolve a file for READING: prefer the model-scoped location, else fall back to the legacy
     flat results/ dir where everything lived before per-model scoping existed. LLaMA's already-
@@ -598,19 +606,30 @@ def main():
     if not args.dataset:
         print("ERROR: --dataset required (or --combine)."); sys.exit(1)
 
-    if args.dataset == "truthfulqa":
+    if args.data_dir:
+        data_dir = args.data_dir
+    else:
+        import yaml
+        with open(os.path.join(HERE, "config.yaml")) as f:
+            cfg = yaml.safe_load(f)
+        data_dir = cfg["output"]["data_dir"]
+
+    # TruthfulQA used to be reachable ONLY via --core-pooled-pt/--velocity-meta, because LLaMA's
+    # TruthfulQA features predate this pipeline (older Route N artifacts, never produced by
+    # 39/42). Now that 39/42 support truthfulqa for any model, a second model (Qwen) has a
+    # standard {dataset}_phase2_features.npz instead -- and no canonical .pt/.npz to point those
+    # flags at. Dispatch on which artifact ACTUALLY EXISTS rather than on the dataset name:
+    # Qwen picks up the standard path automatically, LLaMA keeps using its legacy flags unchanged.
+    if args.dataset == "truthfulqa" and not has_standard_features("truthfulqa", data_dir, args.model_folder):
         if not args.core_pooled_pt or not args.velocity_meta:
-            print("ERROR: --core-pooled-pt and --velocity-meta required for truthfulqa."); sys.exit(1)
+            print(f"ERROR: truthfulqa for model_folder={args.model_folder} has no "
+                  f"truthfulqa_phase2_features.npz, so --core-pooled-pt and --velocity-meta are "
+                  f"required (LLaMA's legacy canonical-artifact path). Run 42_extract_phase2.py "
+                  f"--dataset truthfulqa --model_folder {args.model_folder} to use the standard "
+                  f"path instead."); sys.exit(1)
         core_raw, V_concat, y, prompt_idx, is_known, decoding_config = load_truthfulqa_features(
             args.core_pooled_pt, args.velocity_meta)
     else:
-        if args.data_dir:
-            data_dir = args.data_dir
-        else:
-            import yaml
-            with open(os.path.join(HERE, "config.yaml")) as f:
-                cfg = yaml.safe_load(f)
-            data_dir = cfg["output"]["data_dir"]
         core_raw, V_concat, y, prompt_idx, is_known, decoding_config = load_new_dataset_features(
             args.dataset, data_dir, args.model_folder)
 
