@@ -226,3 +226,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Session 08 analysis figures/JSONs -- outputs, never tracked
+analysis_out/
