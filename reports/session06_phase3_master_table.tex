@@ -1,0 +1,151 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\definecolor{harpgray}{RGB}{225,225,225}
+\usepackage{multirow}
+\usepackage{amssymb}
+\title{Session 06 Phase 3 -- Master Results Tables}
+\author{}
+\date{\today}
+\begin{document}
+\maketitle
+
+\section*{What each condition means}
+
+Every row below is a different way of turning the model's internal activity while it writes
+an answer into a single feature vector. Think of that internal activity as a trail of
+numbers -- one per layer, per generated token -- and each condition as a different way of
+boiling that trail down.
+
+\begin{description}
+\item[core\_max] The baseline. Takes the single highest value each internal signal ever
+  reaches while generating the answer -- a snapshot of the loudest moment.
+\item[q\_velocity] Instead of the activity itself, tracks how much it \emph{changes} from
+  one layer to the next -- speed instead of position. Picks up on whether the model's
+  internal representation is still being revised as information moves through the network,
+  not just where it ends up.
+\item[q\_static] The same kind of peak snapshot as core\_max, but softer: uses a high/low
+  percentile instead of the literal maximum/minimum, so one unusual token can't skew the
+  whole signal.
+\item[core\_concat] Staples core\_max's peak snapshot and q\_velocity's change signal
+  together into one longer feature vector -- ``where it ended up'' plus ``how it got
+  there.''
+\item[joint\_tensor] Instead of computing two signals separately and combining them
+  afterward, fits one shared compression across the combined raw data from the start, so
+  the signals can influence each other during compression rather than only being stapled
+  together at the end.
+\item[triple\_concat] Staples all three single signals -- core\_max, q\_static, and
+  q\_velocity -- together. The ``use everything we have'' condition.
+\end{description}
+
+% ---------- TABLE 1: literature-comparable ----------
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Condition} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
+\midrule
+\multirow{7}{*}{LLaMA-3.1-8B}
+  & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.5 & \cellcolor{harpgray}92.9 & \cellcolor{harpgray}89.4 & \cellcolor{harpgray}86.6 \\
+  & core\_max      & 84.4 & 86.4 & 85.7 & 83.1 \\
+  & q\_velocity    & \textbf{86.2} & 85.8 & 84.6 & 82.6 \\
+  & q\_static      & 84.3 & 86.7 & 86.1 & \textbf{84.0} \\
+  & core\_concat   & 86.0 & 86.8$^{\dagger}$ & 85.3 & 83.2 \\
+  & joint\_tensor  & 84.5 & 86.4 & \textbf{86.3} & 83.3 \\
+  & triple\_concat & 85.5 & \textbf{87.0} & 85.7 & 83.2 \\
+\midrule
+\multirow{7}{*}{Qwen2.5-7B}
+  & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.1 & \cellcolor{harpgray}92.8 & \cellcolor{harpgray}84.0 & \cellcolor{harpgray}88.4 \\
+  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Literature-comparable results: pooled AUROC (\%) under HARP's evaluation
+protocol} (train on 75\% of known questions; test on the rest plus all fully-hallucinated
+questions), 5-seed mean, Random Forest readout. All non-gray rows are \emph{our}
+unsupervised feature variants scored under this protocol; the gray row is the published
+score of HARP's own supervised detector, copied from their paper for reference (not
+recomputed by us). Bold = best of our conditions per column (HARP row excluded).
+$^{\dagger}$On TriviaQA, logistic regression outperforms the forest: core\_max
+87.3~$\pm$~0.2, q\_static 87.3~$\pm$~0.3, core\_concat 87.3~$\pm$~0.2 -- our best
+literature-comparable numbers, all three effectively tied.}
+\end{table}
+
+% ---------- TABLE 2: our internal primary metric ----------
+\begin{table}[h]
+\centering\small
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Condition} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
+\midrule
+\multirow{6}{*}{LLaMA-3.1-8B}
+  & core\_max      & 81.77 & 81.97 & 76.10 & 84.48 \\
+  & q\_velocity    & 83.58 & 81.17 & 75.44 & 85.68 \\
+  & q\_static      & 83.28 & 81.97 & 76.72 & 85.26 \\
+  & core\_concat   & \textbf{84.35}$^{*}$ & 82.06 & \textbf{76.74} & 85.27 \\
+  & joint\_tensor  & 83.76 & 81.84 & 75.70 & 85.13 \\
+  & triple\_concat & 83.28 & \textbf{82.27} & 76.01 & \textbf{85.76} \\
+\midrule
+\multirow{6}{*}{Qwen2.5-7B}
+  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest} -- our stricter
+internal metric: among the 10 answers to the \emph{same} question, can the detector rank the
+hallucinated ones above the truthful ones? No HARP reference row appears here because this
+metric is not reported in their paper. Bold = best per column, but note that a bolded lead is
+\emph{nominal} unless marked $^{*}$: on TriviaQA, NQ-Open, and TyDiQA-GP no condition's
+within-prompt gain over core\_max survives a paired bootstrap (all 95\% CIs include zero;
+triple\_concat's TriviaQA lead, for instance, is $\Delta=+0.30$~pts, CI $[-0.14, +0.73]$).
+$^{*}$core\_concat vs.\ core\_max on TruthfulQA remains, across all four completed datasets,
+the project's \emph{only} statistically significant within-prompt improvement (paired
+$\Delta=+2.57$~pts, 95\% CI $[+0.03, +5.26]$, excludes zero). Separately, all four
+combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on both metrics.}
+\end{table}
+
+% ---------- TABLE 3: RF vs LR winner grid ----------
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{ll cc cc cc cc}
+\toprule
+& & \multicolumn{2}{c}{\textbf{TruthfulQA}} & \multicolumn{2}{c}{\textbf{TriviaQA}}
+  & \multicolumn{2}{c}{\textbf{NQ-Open}} & \multicolumn{2}{c}{\textbf{TyDiQA-GP}} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}
+\textbf{Model} & \textbf{Condition} & RF & LR & RF & LR & RF & LR & RF & LR \\
+\midrule
+\multirow{6}{*}{LLaMA-3.1-8B}
+  & core\_max      & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
+  & q\_velocity    & \checkmark &            & \checkmark &            & \checkmark &            & \checkmark &            \\
+  & q\_static      & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
+  & core\_concat   & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
+  & joint\_tensor  & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
+  & triple\_concat & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
+\midrule
+\multirow{6}{*}{Qwen2.5-7B}
+  & core\_max      & \multicolumn{8}{c}{\textit{pending}} \\
+  & q\_velocity    & \multicolumn{8}{c}{\textit{pending}} \\
+  & q\_static      & \multicolumn{8}{c}{\textit{pending}} \\
+  & core\_concat   & \multicolumn{8}{c}{\textit{pending}} \\
+  & joint\_tensor  & \multicolumn{8}{c}{\textit{pending}} \\
+  & triple\_concat & \multicolumn{8}{c}{\textit{pending}} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Which classifier wins, under the HARP protocol} -- \checkmark marks the
+higher of RF/LR (5-seed mean pooled AUROC) for that condition$\times$dataset cell. RF sweeps
+TruthfulQA, NQ-Open, and TyDiQA-GP (18/18 LLaMA cells). TriviaQA flips: LR wins 5 of 6
+conditions, RF holds only on q\_velocity. See Table~1's caption for the actual TriviaQA
+numbers (LR's wins there are narrow, 0.2--0.9pt -- not a landslide like RF's wins
+elsewhere).}
+\end{table}
+
+\end{document}
