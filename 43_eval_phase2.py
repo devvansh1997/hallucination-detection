@@ -37,6 +37,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -109,6 +110,42 @@ def fold_pure_core_randomized(X_raw, tr_idx, r_l, r_d, seed):
     X_scaled = robust_scale_3d(X_raw, tr_idx)
     U_L, U_D = compute_ul_ud_randomized(X_scaled[tr_idx], r_l, r_d, seed)
     return s01.project_core(X_scaled, U_L, U_D)
+
+
+# ==============================================================================
+# PER-MODEL OUTPUT ISOLATION -- defined here (not in 44_eval_phase3.py) because 44 already
+# imports this module, so this is the shared home both can use without a circular import.
+# ==============================================================================
+
+LEGACY_RESULTS_DIR = "results"
+
+
+def resolve_results_dir(explicit, model_folder):
+    """Model-scoped results dir: results/{model_folder} unless explicitly overridden. Every Phase
+    2/3 output filename keys on dataset (+condition) only, NEVER on model -- so before this, a
+    Qwen run would have silently overwritten LLaMA's session06_phase3_partA_triviaqa.json, i.e.
+    ~30h of parallel compute plus a 1.5h combine, with no warning and no way to tell afterward."""
+    if explicit:
+        return explicit
+    return os.path.join(LEGACY_RESULTS_DIR, model_folder)
+
+
+def legacy_read_path(filename, results_dir):
+    """Resolve a file for READING: prefer the model-scoped location, else fall back to the legacy
+    flat results/ dir where everything lived before per-model scoping existed. LLaMA's already-
+    completed files (all four datasets' Part A, best_condition, partB, partC, Phase 2 per-dataset
+    results) sit there, so this keeps them working with no migration and no recompute. Returns the
+    model-scoped path unchanged when neither exists, so callers' own 'missing file' errors still
+    name the location a new run should write to."""
+    scoped = os.path.join(results_dir, filename)
+    if os.path.exists(scoped):
+        return scoped
+    legacy = os.path.join(LEGACY_RESULTS_DIR, filename)
+    if os.path.exists(legacy):
+        print(f"  [legacy] reading {legacy} (pre-model-scoping location; new writes go to "
+              f"{results_dir})", flush=True)
+        return legacy
+    return scoped
 
 
 # ==============================================================================
@@ -384,6 +421,36 @@ def self_test():
     assert np.array_equal(is_known2, is_known), "derive_is_known must match generate_synthetic_data's own is_known"
     print("  [PASS] derive_is_known matches the generator's ground-truth is_known array")
 
+    # -- per-model output isolation: distinct models must resolve to distinct dirs (the whole
+    # point), an explicit override must win, and reads must fall back to the legacy flat location
+    # so LLaMA's already-completed files keep resolving without migration --
+    assert resolve_results_dir(None, "llama-3.1-8b-instruct") != resolve_results_dir(None, "qwen-2.5-7b-instruct"), \
+        "two models must never resolve to the same results dir -- that's the overwrite bug"
+    assert resolve_results_dir("custom/dir", "qwen-2.5-7b-instruct") == "custom/dir", \
+        "an explicit --results-dir must override the model-scoped default"
+    iso_dir = os.path.join(HERE, "results", "_selftest_iso")
+    shutil.rmtree(iso_dir, ignore_errors=True)
+    os.makedirs(iso_dir, exist_ok=True)
+    scoped_name = "_selftest_iso_scoped.json"
+    with open(os.path.join(iso_dir, scoped_name), "w") as f:
+        json.dump({"where": "scoped"}, f)
+    assert legacy_read_path(scoped_name, iso_dir) == os.path.join(iso_dir, scoped_name), \
+        "a file present in the model-scoped dir must be read from there"
+    legacy_name = "_selftest_iso_legacy.json"
+    legacy_full = os.path.join(LEGACY_RESULTS_DIR, legacy_name)
+    os.makedirs(LEGACY_RESULTS_DIR, exist_ok=True)
+    with open(legacy_full, "w") as f:
+        json.dump({"where": "legacy"}, f)
+    assert legacy_read_path(legacy_name, iso_dir) == legacy_full, \
+        "a file absent from the scoped dir but present in legacy results/ must fall back"
+    missing = legacy_read_path("_selftest_iso_absent.json", iso_dir)
+    assert missing == os.path.join(iso_dir, "_selftest_iso_absent.json"), \
+        "a file in neither location must report the SCOPED path (where a new run should write)"
+    os.remove(legacy_full)
+    shutil.rmtree(iso_dir, ignore_errors=True)
+    print("  [PASS] resolve_results_dir/legacy_read_path: models isolated, explicit override wins, "
+          "reads fall back to legacy flat results/, misses report the scoped path")
+
     comp = composition_line("selftest", y, prompt_idx)
     assert comp["n_beams"] == n_beams and comp["n_prompts"] == 150
     print(f"  [PASS] composition_line: {comp}")
@@ -488,8 +555,10 @@ def main():
     parser.add_argument("--velocity-meta", type=str, default=None, help="truthfulqa only")
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument("--combine", action="store_true")
-    parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--leaderboard", type=str, default="results/leaderboard_v1.json")
+    parser.add_argument("--results-dir", type=str, default=None,
+                         help="Defaults to results/{model_folder} for per-model output isolation.")
+    parser.add_argument("--leaderboard", type=str, default=None,
+                         help="Defaults to {results-dir}/leaderboard_v1.json.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -497,10 +566,19 @@ def main():
         self_test()
         return
 
+    # Per-model output isolation -- see 44_eval_phase3.py's resolve_results_dir() for the full
+    # rationale (Phase 2/3 output filenames key on dataset only, so a second model's run would
+    # otherwise overwrite the first's results in place).
+    args.results_dir = resolve_results_dir(args.results_dir, args.model_folder)
+    if args.leaderboard is None:
+        args.leaderboard = os.path.join(args.results_dir, "leaderboard_v1.json")
+    os.makedirs(args.results_dir, exist_ok=True)
+    print(f"[results-dir] {args.results_dir}", flush=True)
+
     if args.combine:
         all_results = {}
         for ds in DATASETS:
-            p = os.path.join(args.results_dir, f"session06_phase2_{ds}.json")
+            p = legacy_read_path(f"session06_phase2_{ds}.json", args.results_dir)
             if os.path.exists(p):
                 with open(p) as f:
                     all_results[ds] = json.load(f)

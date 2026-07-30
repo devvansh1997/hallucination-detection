@@ -101,6 +101,9 @@ fold_pure_core_randomized = s02_eval.fold_pure_core_randomized
 robust_scale_3d = s02_eval.robust_scale_3d
 derive_is_known = s02_eval.derive_is_known
 composition_line = s02_eval.composition_line
+# per-model output isolation -- defined in 43 so both scripts share one implementation
+resolve_results_dir = s02_eval.resolve_results_dir
+legacy_read_path = s02_eval.legacy_read_path
 
 SEED = 0
 N_SPLITS = 5
@@ -306,6 +309,7 @@ def write_condition_result(dataset_name, cond_name, result, results_dir):
     only ever needs them as numpy arrays, never as JSON text, so there's no reason to pay the
     JSON-list serialization cost at all -- .npz is both smaller and faster to load."""
     oof_filename = _oof_npz_filename(dataset_name, cond_name)
+    os.makedirs(results_dir, exist_ok=True)   # model-scoped dir may not exist yet on a first run
     oof_path = os.path.join(results_dir, oof_filename)
     np.savez(oof_path, oof_rf=np.asarray(result["oof_rf"], dtype=np.float64),
               oof_lr=np.asarray(result["oof_lr"], dtype=np.float64))
@@ -327,18 +331,22 @@ def load_condition_result(dataset_name, cond_name, results_dir):
     no "oof_npz" key -- 7+ hours of real compute already paid for. Re-splitting them here on
     first load (write the npz, rewrite the JSON summary-only) means the fix applies without
     forcing a wasteful recompute of anything already finished."""
-    p = os.path.join(results_dir, f"session06_phase3_partA_{dataset_name}_{cond_name}.json")
+    p = legacy_read_path(f"session06_phase3_partA_{dataset_name}_{cond_name}.json", results_dir)
     if not os.path.exists(p):
         return None, p
     with open(p) as f:
         result = json.load(f)
+    # Migrate/resolve relative to the dir the file was actually FOUND in, not results_dir -- for a
+    # legacy flat-results file those differ, and writing the .npz to the model-scoped dir while
+    # re-reading the legacy JSON would leave the reread still missing "oof_npz" (KeyError below).
+    found_dir = os.path.dirname(p) or "."
     if "oof_npz" not in result:
         print(f"  [migrate] {p}: old format (OOF arrays embedded inline) -- splitting into "
               f".npz now, no recompute needed", flush=True)
-        write_condition_result(dataset_name, cond_name, result, results_dir)
+        write_condition_result(dataset_name, cond_name, result, found_dir)
         with open(p) as f:
             result = json.load(f)
-    oof_path = os.path.join(results_dir, result["oof_npz"])
+    oof_path = os.path.join(found_dir, result["oof_npz"])
     oof_npz = np.load(oof_path)
     result["oof_rf"] = oof_npz["oof_rf"]
     result["oof_lr"] = oof_npz["oof_lr"]
@@ -1126,14 +1134,31 @@ def main():
     parser.add_argument("--combine-part-a", action="store_true")
     parser.add_argument("--part-c", action="store_true")
     parser.add_argument("--combine", action="store_true")
-    parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--leaderboard", type=str, default="results/leaderboard_v2.json")
+    parser.add_argument("--results-dir", type=str, default=None,
+                         help="Defaults to results/{model_folder} -- see resolve_results_dir(). "
+                              "Pass explicitly only to override that per-model isolation.")
+    parser.add_argument("--leaderboard", type=str, default=None,
+                         help="Defaults to {results-dir}/leaderboard_v2.json.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
     if args.self_test:
         self_test()
         return
+
+    # Per-model output isolation. Every Part A/B/C output filename is keyed on dataset+condition
+    # only -- NOT model -- so a Qwen run would have silently overwritten LLaMA's
+    # session06_phase3_partA_triviaqa.json, i.e. ~30h of parallel compute plus a 1.5h combine.
+    # Resolving the default here (rather than editing all ~13 os.path.join(args.results_dir, ...)
+    # sites) makes every write model-scoped in one place. Reads fall back to the legacy flat
+    # results/ location via legacy_read_path(), so LLaMA's already-completed files keep working
+    # with no migration.
+    args.results_dir = resolve_results_dir(args.results_dir, args.model_folder)
+    if args.leaderboard is None:
+        args.leaderboard = os.path.join(args.results_dir, "leaderboard_v2.json")
+    # every branch below writes something here, and the model-scoped dir won't exist on a first run
+    os.makedirs(args.results_dir, exist_ok=True)
+    print(f"[results-dir] {args.results_dir}", flush=True)
 
     def get_data_dir():
         if args.data_dir:
@@ -1181,7 +1206,7 @@ def main():
     if args.combine_part_a:
         part_a_results = {}
         for ds in DATASETS:
-            p = os.path.join(args.results_dir, f"session06_phase3_partA_{ds}.json")
+            p = legacy_read_path(f"session06_phase3_partA_{ds}.json", args.results_dir)
             if os.path.exists(p):
                 with open(p) as f:
                     part_a_results[ds] = json.load(f)
@@ -1197,7 +1222,7 @@ def main():
         return
 
     if args.part_c:
-        best_path = os.path.join(args.results_dir, "session06_phase3_best_condition.json")
+        best_path = legacy_read_path("session06_phase3_best_condition.json", args.results_dir)
         with open(best_path) as f:
             best_condition = json.load(f)["best_condition"]
         print(f"Part C: transfer matrix for core_max and {best_condition} (best Part A condition)")
@@ -1228,22 +1253,22 @@ def main():
     if args.combine:
         part_a_results = {}
         for ds in DATASETS:
-            p = os.path.join(args.results_dir, f"session06_phase3_partA_{ds}.json")
+            p = legacy_read_path(f"session06_phase3_partA_{ds}.json", args.results_dir)
             with open(p) as f:
                 part_a_results[ds] = json.load(f)
-        best_path = os.path.join(args.results_dir, "session06_phase3_best_condition.json")
+        best_path = legacy_read_path("session06_phase3_best_condition.json", args.results_dir)
         with open(best_path) as f:
             best_info = json.load(f)
         best_condition = best_info["best_condition"]
 
         part_b_results = {}
         for ds in RANK_PROBE_DATASETS:
-            p = os.path.join(args.results_dir, f"session06_phase3_partB_{ds}.json")
+            p = legacy_read_path(f"session06_phase3_partB_{ds}.json", args.results_dir)
             if os.path.exists(p):
                 with open(p) as f:
                     part_b_results[ds] = json.load(f)
 
-        part_c_path = os.path.join(args.results_dir, "session06_phase3_partC.json")
+        part_c_path = legacy_read_path("session06_phase3_partC.json", args.results_dir)
         part_c_results = None
         if os.path.exists(part_c_path):
             with open(part_c_path) as f:
@@ -1305,7 +1330,7 @@ def main():
     if args.part == "b":
         if args.dataset not in RANK_PROBE_DATASETS:
             print(f"ERROR: rank probe only runs on {RANK_PROBE_DATASETS}."); sys.exit(1)
-        best_path = os.path.join(args.results_dir, "session06_phase3_best_condition.json")
+        best_path = legacy_read_path("session06_phase3_best_condition.json", args.results_dir)
         if not os.path.exists(best_path):
             print("ERROR: run --combine-part-a first to determine the best condition."); sys.exit(1)
         with open(best_path) as f:
