@@ -100,11 +100,11 @@ def run_dataset(ds, data_dir, model_folder, max_beams=None, timing_probe=False):
             folds = AL.make_folds(y, pid)
             info_meta = {k: info[k] for k in ("provenance", "alignment_verified", "n_beams", "n_prompts")}
         X = AL.concat_stream(info, stream)          # [N, L, 8192] float32
-        halves = None
-        if stream == "static":
-            # the within-stream reference: each quantile half on its own, in its own R^4096
-            halves = (info["arrays"]["static_q95"].astype(np.float32),
-                      info["arrays"]["static_q05"].astype(np.float32))
+        # Fit the concatenated stream first and RELEASE it before touching the quantile halves.
+        # Holding X (29GB at TriviaQA scale) alongside both halves (29GB) plus robust_scale_3d's
+        # copy would put peak RSS near 140GB; sequencing them caps it at roughly one array plus
+        # its scaled copy.
+        arrays_ref = info["arrays"] if stream == "static" else None
         del info
 
         for fi, (tr, va) in enumerate(folds):
@@ -112,9 +112,6 @@ def run_dataset(ds, data_dir, model_folder, max_beams=None, timing_probe=False):
             subsampled = subsampled or was_sub
             t0 = time.time()
             factors[stream].append(channel_factor(X, tr_s, r_l, R_D, AL.SEED + fi))
-            if halves is not None:
-                factors["static_q95"].append(channel_factor(halves[0], tr_s, r_l, R_D, AL.SEED + fi))
-                factors["static_q05"].append(channel_factor(halves[1], tr_s, r_l, R_D, AL.SEED + fi))
             dt = time.time() - t0
             rss = _peak_rss_mb()
             print(f"    [{ds}/{stream}] fold {fi+1}/{len(folds)} factor in {dt:.1f}s"
@@ -123,9 +120,19 @@ def run_dataset(ds, data_dir, model_folder, max_beams=None, timing_probe=False):
                 n_units = len(folds) * 2
                 print(f"    [timing probe] {ds}: fold-0 {stream} took {dt:.1f}s -> est. "
                       f"~{dt*n_units/60:.1f} min for both streams x {len(folds)} folds "
-                      f"(plus the within-stream reference)", flush=True)
+                      f"(plus the within-stream reference, roughly +50%)", flush=True)
                 return None
-        del X, halves
+        del X
+
+        if arrays_ref is not None:
+            # within-stream reference, one half at a time in its own R^4096
+            for half in ("static_q95", "static_q05"):
+                H = arrays_ref[half].astype(np.float32)
+                for fi, (tr, va) in enumerate(folds):
+                    tr_s, _ = _subsample(tr, max_beams, AL.SEED + fi)
+                    factors[half].append(channel_factor(H, tr_s, r_l, R_D, AL.SEED + fi))
+                del H
+            del arrays_ref
 
     n_ch = factors["static"][0].shape[0]
     sv = [AL.principal_angles(s, v) for s, v in zip(factors["static"], factors["velocity"])]
