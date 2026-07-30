@@ -57,12 +57,12 @@ boiling that trail down.
 \midrule
 \multirow{7}{*}{Qwen2.5-7B}
   & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.1 & \cellcolor{harpgray}92.8 & \cellcolor{harpgray}84.0 & \cellcolor{harpgray}88.4 \\
-  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textbf{88.3}$^{\ddagger}$ \\
+  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & 87.0 \\
+  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & 87.5 \\
+  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & 87.8 \\
+  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & 87.0 \\
+  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & 87.9 \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Literature-comparable results: pooled AUROC (\%) under HARP's evaluation
@@ -73,7 +73,10 @@ score of HARP's own supervised detector, copied from their paper for reference (
 recomputed by us). Bold = best of our conditions per column (HARP row excluded).
 $^{\dagger}$On TriviaQA, logistic regression outperforms the forest: core\_max
 87.3~$\pm$~0.2, q\_static 87.3~$\pm$~0.3, core\_concat 87.3~$\pm$~0.2 -- our best
-literature-comparable numbers, all three effectively tied.}
+literature-comparable numbers, all three effectively tied. $^{\ddagger}$Qwen/TyDiQA-GP is the
+first cell where an unsupervised condition of ours reaches the published supervised score:
+core\_max 88.3~$\pm$~1.8 against HARP's reported 88.4, a gap of 0.1 points, well inside our
+seed-to-seed spread.}
 \end{table}
 
 % ---------- TABLE 2: our internal primary metric ----------
@@ -92,12 +95,12 @@ literature-comparable numbers, all three effectively tied.}
   & triple\_concat & 83.28 & \textbf{82.27} & 76.01 & \textbf{85.76} \\
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
-  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
-  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & 87.39 \\
+  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & 88.50 \\
+  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & 86.88 \\
+  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & 88.85 \\
+  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & 87.11 \\
+  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textbf{89.14} \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest} -- our stricter
@@ -132,12 +135,12 @@ combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on b
   & triple\_concat & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
-  & core\_max      & \multicolumn{8}{c}{\textit{pending}} \\
-  & q\_velocity    & \multicolumn{8}{c}{\textit{pending}} \\
-  & q\_static      & \multicolumn{8}{c}{\textit{pending}} \\
-  & core\_concat   & \multicolumn{8}{c}{\textit{pending}} \\
-  & joint\_tensor  & \multicolumn{8}{c}{\textit{pending}} \\
-  & triple\_concat & \multicolumn{8}{c}{\textit{pending}} \\
+  & core\_max      & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & q\_velocity    & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & q\_static      & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & core\_concat   & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & joint\_tensor  & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & triple\_concat & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Which classifier wins, under the HARP protocol} -- \checkmark marks the
@@ -145,7 +148,8 @@ higher of RF/LR (5-seed mean pooled AUROC) for that condition$\times$dataset cel
 TruthfulQA, NQ-Open, and TyDiQA-GP (18/18 LLaMA cells). TriviaQA flips: LR wins 5 of 6
 conditions, RF holds only on q\_velocity. See Table~1's caption for the actual TriviaQA
 numbers (LR's wins there are narrow, 0.2--0.9pt -- not a landslide like RF's wins
-elsewhere).}
+elsewhere). Qwen2.5-7B's first completed dataset reproduces LLaMA's TyDiQA-GP pattern
+exactly: RF wins all 6 conditions, by 3.8--7.3 points.}
 \end{table}
 
 \end{document}
