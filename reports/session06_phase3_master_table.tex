@@ -5,6 +5,9 @@
 \definecolor{harpgray}{RGB}{225,225,225}
 \usepackage{multirow}
 \usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
 \title{Session 06 Phase 3 -- Master Results Tables}
 \author{}
 \date{\today}
@@ -151,5 +154,173 @@ numbers (LR's wins there are narrow, 0.2--0.9pt -- not a landslide like RF's win
 elsewhere). Qwen2.5-7B's first completed dataset reproduces LLaMA's TyDiQA-GP pattern
 exactly: RF wins all 6 conditions, by 3.8--7.3 points.}
 \end{table}
+
+\clearpage
+\section*{Reading the two metrics}
+
+Both metrics answer ``can the detector rank hallucinated answers above truthful ones,'' but over
+different comparison sets, and the difference matters for how the numbers should be read.
+
+\begin{itemize}
+\item \textbf{Pooled AUROC.} Put every answer from every question into one pile and rank the whole
+pile. The catch: some questions are easy (the model gets all 10 tries right) and some are hard (it
+gets all 10 wrong). A detector can score well here just by recognising ``this looks like a hard
+question,'' without ever telling a good answer from a bad one \emph{for the same question}. This
+is the number the literature reports, so we report it for comparability.
+
+\item \textbf{Within-prompt AUROC.} For each question separately, compare only that question's own
+answers against each other, then average across questions. Questions where all 10 answers are
+right, or all 10 are wrong, contribute nothing -- there is no correct/incorrect pair to rank. This
+removes the easy-vs-hard shortcut entirely, so it is the harder and more honest number, and it is
+what we select on.
+
+\item \textbf{``OOF'' = out-of-fold.} With 5-fold cross-validation, every answer is scored by the
+one model that did \emph{not} see it during training. ``Pooled OOF AUROC'' means: collect all
+those held-out scores, put them in one pile, and compute a single AUROC. It is not an average of
+five per-fold numbers -- it is one number over all held-out predictions, so no answer is ever
+scored by a model that trained on it.
+\end{itemize}
+
+\noindent Figure~3 exists precisely to measure how much of the pooled number is the shortcut and
+how much is real detection.
+
+\clearpage
+\section*{Figure 1 -- where in the network the signal lives}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{{fig1_layer_divergence_llama-3.1-8b_all}.pdf}
+\caption*{\small LLaMA-3.1-8B. Left: how much larger the average size of the internal activity is
+for hallucinated answers than for truthful ones, in pooled standard deviations. Right: detection
+score when the detector is allowed to use only that one layer (64 components, logistic
+regression). Bands are 95\% confidence intervals. Only layers 15--23 exist on disk.}
+\end{figure}
+
+\subsection*{What it shows}
+\begin{itemize}
+\item \textbf{Left panel: the curves are flat.} There is no bump at any layer. The ``layer-22
+hump'' we have been assuming does not exist -- the whole range of movement across nine layers is
+about 0.1 standard deviations, which is nothing.
+
+\item \textbf{The datasets sit far apart, and one has the opposite sign.} NQ-Open is at $+1.3$,
+TriviaQA $+0.7$, TyDiQA-GP $+0.35$, and TruthfulQA at $-0.85$ -- there, hallucinated answers have
+\emph{smaller} internal activity, not larger. So this quantity behaves like a fingerprint of the
+dataset, not a signal of hallucination.
+
+\item \textbf{Critically: this quantity does not predict detection at all.} NQ-Open has the
+largest gap and TruthfulQA has a negative one, yet both sit at the top of the right panel. Since
+the 15--23 window was originally chosen using exactly this kind of energy audit, the method we
+used to pick our window does not track what we actually care about.
+
+\item \textbf{Right panel: layer 15 is the best single layer on all four datasets.} Three of the
+four decline steadily to the right; TruthfulQA is flat rather than falling.
+
+\item \textbf{Layer 15 is the left edge of our window, which is a warning sign.} When the best
+value sits on the boundary of the range you looked at, the true best is usually outside it. The
+honest reading is that we may have been extracting from the wrong part of the network, and we
+cannot tell because the pipeline crops at 15. Settling this needs one GPU pass over earlier
+layers.
+
+\item \textbf{A single layer appears to match the entire pipeline.} Layer 15 alone, with 64
+numbers and a simple linear model, scores about 0.877 / 0.862 / 0.873 / 0.830 across the four
+datasets, against 0.869 / 0.854 / 0.865 / 0.821 for the full 9-layer, 320-number random forest.
+The confidence intervals overlap, so the claim is ``matches,'' not ``beats'' -- but even a match
+means the other eight layers are contributing close to nothing. This needs one cheap paired check
+before we state it publicly.
+\end{itemize}
+
+\clearpage
+\section*{Figure 2 -- do the static and velocity streams carry different things?}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{{fig2_principal_angles_llama-3.1-8b_all}.pdf}
+\caption*{\small Left: for each pair of directions (1st most important, 2nd, and so on up to
+64th), how closely aligned the static and velocity subspaces are. 1.0 means the two directions are
+identical; 0 means completely unrelated. Right: how stable the static subspace is, comparing folds
+within a dataset (diagonal) and datasets against each other (off-diagonal).}
+\end{figure}
+
+\subsection*{What it shows}
+\begin{itemize}
+\item \textbf{Three clearly separated bands in the left panel.} The black line (the two halves of
+the \emph{same} stream, q95 vs q05) stays near 1.0 almost the whole way -- they are near-copies,
+sharing about 58 of 64 directions. The coloured lines (static vs velocity) drop below 0.5 around
+the 15th direction -- about 15 of 64 shared. The grey line (two random subspaces) never rises
+above 0.18 -- nothing shared.
+
+\item \textbf{So static and velocity really are geometrically different} -- far more different
+than chance, far less different than two halves of one stream. That part of the story holds.
+
+\item \textbf{But being different did not make them useful together.} Combining the two streams
+buys only 0.1--2.5 points, mostly not statistically significant. So the two streams point in
+different directions while carrying largely the \emph{same} information about hallucination. This
+is the honest headline, and it explains why several rounds of feature engineering produced about
+one point.
+
+\item \textbf{Where the overlap sits matters.} The first five directions are nearly identical
+(above 0.8). The part the two streams share is their biggest, most dominant part -- which is
+plausibly the part a classifier leans on most. The genuinely different directions are the small,
+tail ones.
+
+\item \textbf{A free simplification.} Because q05 is nearly a copy of q95, we could likely drop
+q05 entirely and halve the feature size at no cost. That is a CPU-only check on data we already
+have.
+
+\item \textbf{Right panel, and a good rigour point:} comparing two different folds of the same
+dataset gives 0.99--1.00. Our unsupervised basis is essentially deterministic -- it does not wobble
+when the data is resampled. Across different datasets it is 0.69--0.92, so there is substantial
+shared structure, with TyDiQA-GP the most distinct.
+
+\item \textbf{One caution when presenting:} the diagonal and off-diagonal cells of that heatmap
+measure two different comparisons. It is stated in the title but is easy to miss.
+\end{itemize}
+
+\clearpage
+\section*{Figure 3 -- what the standard metric is actually measuring}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{{fig3_difficulty_decomposition_llama-3.1-8b_all}.pdf}
+\caption*{\small Left: pooled AUROC using full features, using only each question's 10-answer
+average (``centroid-only,'' which destroys all per-answer information), and using each answer
+minus that average (``delta-only,'' which destroys all question-identity information). Right:
+pooled AUROC minus within-prompt AUROC, per dataset.}
+\end{figure}
+
+\subsection*{What it shows}
+\begin{itemize}
+\item \textbf{Question identity alone gets most of the way there.} The centroid-only bars reach
+0.71--0.81. Those features contain \emph{zero} information about any individual answer -- every
+answer to a question has been replaced by the same average. Yet they recover 66--85\% of the
+pooled score's lift above chance.
+
+\item \textbf{What this does and does not mean.} It does not mean the metric is invalid -- those
+features still come from the model's own internal states. It means pooled AUROC is mostly
+measuring \emph{which questions the model will fail on}, not \emph{which specific answers are
+lies}. Most readers of a hallucination-detection paper assume the second.
+
+\item \textbf{The size of the distortion varies a lot by benchmark} (right panel). NQ-Open is the
+most inflated at $+0.108$, then TruthfulQA $+0.049$ and TriviaQA $+0.034$. TyDiQA-GP is the only
+one where pooled \emph{understates} performance, at $-0.025$.
+
+\item \textbf{The most useful result is not currently drawn in the figure.} Removing the question
+average and keeping only the per-answer part \emph{beats} the full features on within-prompt
+AUROC: 83.2 vs 82.0 on TruthfulQA, 83.8 vs 82.0 on TriviaQA. So the question average is not just
+unhelpful for per-answer detection -- it is actively getting in the way.
+
+\item \textbf{That is a plain subtraction beating all six engineered feature variants} on the
+metric we care about, at no compute cost. It should go into the condition grid for both models.
+
+\item \textbf{One honest caveat on it.} Subtracting the average needs the other nine answers
+available at test time, so it is a ``multi-sample'' method -- the same setting as SelfCheckGPT and
+INSIDE, which is legitimate and precedented, but it is not a like-for-like comparison against
+single-pass HARP and must be labelled as such. It uses no labels, so there is no leakage.
+
+\item \textbf{This lines up with the tables.} Combination conditions beat the baseline on pooled
+but never on within-prompt, for both models and every dataset -- exactly what you would expect if
+those combinations are adding question-difficulty information rather than per-answer signal. Two
+separate analyses reaching the same conclusion.
+\end{itemize}
 
 \end{document}
