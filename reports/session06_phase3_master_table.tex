@@ -57,12 +57,12 @@ boiling that trail down.
 \midrule
 \multirow{7}{*}{Qwen2.5-7B}
   & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.1 & \cellcolor{harpgray}92.8 & \cellcolor{harpgray}84.0 & \cellcolor{harpgray}88.4 \\
-  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & \textbf{88.3}$^{\ddagger}$ \\
-  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & 87.0 \\
-  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & 87.5 \\
-  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & 87.8 \\
-  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & 87.0 \\
-  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & 87.9 \\
+  & core\_max      & 87.1 & \textit{pending} & 78.8 & \textbf{88.3}$^{\ddagger}$ \\
+  & q\_velocity    & 87.7 & \textit{pending} & 78.2 & 87.0 \\
+  & q\_static      & 87.1 & \textit{pending} & 79.1 & 87.5 \\
+  & core\_concat   & 87.8 & \textit{pending} & \textbf{79.4} & 87.8 \\
+  & joint\_tensor  & 87.2 & \textit{pending} & 78.5 & 87.0 \\
+  & triple\_concat & \textbf{87.8} & \textit{pending} & 79.3 & 87.9 \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Literature-comparable results: pooled AUROC (\%) under HARP's evaluation
@@ -95,12 +95,12 @@ seed-to-seed spread.}
   & triple\_concat & 83.28 & \textbf{82.27} & 76.01 & \textbf{85.76} \\
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
-  & core\_max      & \textit{pending} & \textit{pending} & \textit{pending} & 87.39 \\
-  & q\_velocity    & \textit{pending} & \textit{pending} & \textit{pending} & 88.50 \\
-  & q\_static      & \textit{pending} & \textit{pending} & \textit{pending} & 86.88 \\
-  & core\_concat   & \textit{pending} & \textit{pending} & \textit{pending} & 88.85 \\
-  & joint\_tensor  & \textit{pending} & \textit{pending} & \textit{pending} & 87.11 \\
-  & triple\_concat & \textit{pending} & \textit{pending} & \textit{pending} & \textbf{89.14} \\
+  & core\_max      & 82.47 & \textit{pending} & 74.45 & 87.39 \\
+  & q\_velocity    & 84.33 & \textit{pending} & 74.88 & 88.50 \\
+  & q\_static      & 83.28 & \textit{pending} & 75.32 & 86.88 \\
+  & core\_concat   & \textbf{84.43} & \textit{pending} & 76.18 & 88.85 \\
+  & joint\_tensor  & 82.69 & \textit{pending} & 75.87 & 87.11 \\
+  & triple\_concat & 84.05 & \textit{pending} & \textbf{77.61} & \textbf{89.14} \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest} -- our stricter
@@ -135,11 +135,11 @@ combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on b
   & triple\_concat & \checkmark &            &            & \checkmark & \checkmark &            & \checkmark &            \\
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
-  & core\_max      & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
-  & q\_velocity    & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
-  & q\_static      & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
-  & core\_concat   & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
-  & joint\_tensor  & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & core\_max      & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
+  & q\_velocity    & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
+  & q\_static      & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
+  & core\_concat   & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
+  & joint\_tensor  & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
   & triple\_concat & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
 \bottomrule
 \end{tabular}
