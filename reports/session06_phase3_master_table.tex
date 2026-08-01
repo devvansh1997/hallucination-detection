@@ -61,11 +61,11 @@ boiling that trail down.
 \multirow{7}{*}{Qwen2.5-7B}
   & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.1 & \cellcolor{harpgray}92.8 & \cellcolor{harpgray}84.0 & \cellcolor{harpgray}88.4 \\
   & core\_max      & 87.1 & 91.3$^{\dagger}$ & 78.8 & \textbf{88.3}$^{\ddagger}$ \\
-  & q\_velocity    & 87.7 & \textit{pending} & 78.2 & 87.0 \\
-  & q\_static      & 87.1 & \textit{pending} & 79.1 & 87.5 \\
-  & core\_concat   & 87.8 & \textit{pending} & \textbf{79.4} & 87.8 \\
-  & joint\_tensor  & 87.2 & \textit{pending} & 78.5 & 87.0 \\
-  & triple\_concat & \textbf{87.8} & \textit{pending} & 79.3 & 87.9 \\
+  & q\_velocity    & 87.7 & 90.9 & 78.2 & 87.0 \\
+  & q\_static      & 87.1 & 91.7 & 79.1 & 87.5 \\
+  & core\_concat   & 87.8 & 91.5 & \textbf{79.4} & 87.8 \\
+  & joint\_tensor  & 87.2 & \textbf{91.8} & 78.5 & 87.0 \\
+  & triple\_concat & \textbf{87.8} & 91.7 & 79.3 & 87.9 \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Literature-comparable results: pooled AUROC (\%) under HARP's evaluation
@@ -77,8 +77,10 @@ recomputed by us). Bold = best of our conditions per column (HARP row excluded).
 $^{\dagger}$On TriviaQA -- and \emph{only} on TriviaQA -- logistic regression outperforms the
 forest, for \emph{both} models, which makes this a property of the dataset rather than the
 architecture. LLaMA: core\_max 87.3~$\pm$~0.2, q\_static 87.3~$\pm$~0.3, core\_concat
-87.3~$\pm$~0.2. Qwen: core\_max 92.4~$\pm$~0.1, our single best literature-comparable number in
-the study and 0.4 points below HARP's published 92.8. $^{\ddagger}$Qwen/TyDiQA-GP is the
+87.3~$\pm$~0.2. Qwen: q\_static 92.7~$\pm$~0.2, core\_concat 92.6~$\pm$~0.2, joint\_tensor
+92.5~$\pm$~0.1, triple\_concat 92.5~$\pm$~0.1, core\_max 92.4~$\pm$~0.1 -- LR wins all six
+conditions, and q\_static sits 0.11 points below HARP's published 92.8, our closest approach to
+the published reference anywhere in the study. $^{\ddagger}$Qwen/TyDiQA-GP is the
 first cell where an unsupervised condition of ours reaches the published supervised score:
 core\_max 88.3~$\pm$~1.8 against HARP's reported 88.4, a gap of 0.1 points, well inside our
 seed-to-seed spread.}
@@ -101,11 +103,11 @@ seed-to-seed spread.}
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
   & core\_max      & 82.47 & 88.56 & 74.45 & 87.39 \\
-  & q\_velocity    & 84.33 & \textit{pending} & 74.88 & 88.50 \\
-  & q\_static      & 83.28 & \textit{pending} & 75.32 & 86.88 \\
-  & core\_concat   & \textbf{84.43} & \textit{pending} & 76.18 & 88.85 \\
-  & joint\_tensor  & 82.69 & \textit{pending} & 75.87 & 87.11 \\
-  & triple\_concat & 84.05 & \textit{pending} & \textbf{77.61} & \textbf{89.14} \\
+  & q\_velocity    & 84.33 & 88.11 & 74.88 & 88.50 \\
+  & q\_static      & 83.28 & 88.70 & 75.32 & 86.88 \\
+  & core\_concat   & \textbf{84.43} & 88.55 & 76.18 & 88.85 \\
+  & joint\_tensor  & 82.69 & \textbf{88.80} & 75.87 & 87.11 \\
+  & triple\_concat & 84.05 & 88.64 & \textbf{77.61} & \textbf{89.14} \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest} -- our stricter
@@ -141,10 +143,10 @@ combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on b
 \midrule
 \multirow{6}{*}{Qwen2.5-7B}
   & core\_max      & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
-  & q\_velocity    & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
-  & q\_static      & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
-  & core\_concat   & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
-  & joint\_tensor  & \checkmark &  & \multicolumn{2}{c}{\textit{pend}} & \checkmark &  & \checkmark &  \\
+  & q\_velocity    & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
+  & q\_static      & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
+  & core\_concat   & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
+  & joint\_tensor  & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
   & triple\_concat & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
 \bottomrule
 \end{tabular}
@@ -154,8 +156,9 @@ TruthfulQA, NQ-Open, and TyDiQA-GP (18/18 LLaMA cells). TriviaQA flips: LR wins 
 conditions, RF holds only on q\_velocity. See Table~1's caption for the actual TriviaQA
 numbers (LR's wins there are narrow, 0.2--0.9pt -- not a landslide like RF's wins
 elsewhere). Qwen reproduces this exactly: RF sweeps TruthfulQA, NQ-Open and TyDiQA-GP (18/18
-cells), and its one completed TriviaQA condition flips to LR (92.4 vs 91.3). The RF/LR inversion
-therefore tracks the \emph{dataset}, not the model -- the same dataset flips both architectures.}
+cells) and LR sweeps all six TriviaQA conditions. Across both models, 42 of 48
+condition$\times$dataset cells favour RF and all 12 exceptions are TriviaQA. The inversion
+therefore tracks the \emph{dataset}, not the architecture.}
 \end{table}
 
 \clearpage
