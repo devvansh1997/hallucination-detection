@@ -110,10 +110,12 @@ seed-to-seed spread.}
   & triple\_concat & 84.05 & 88.64 & \textbf{77.61} & \textbf{89.14} \\
 \bottomrule
 \end{tabular}
-\caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest} -- our stricter
-internal metric: among the 10 answers to the \emph{same} question, can the detector rank the
-hallucinated ones above the truthful ones? No HARP reference row appears here because this
-metric is not reported in their paper. Bold = best per column, but note that a bolded lead is
+\caption{\textbf{Within-prompt AUROC (\%), grouped 5-fold CV, Random Forest.} Among the 10 answers
+to the \emph{same} question, does the detector score the hallucinated ones above the truthful
+ones? Formally: concordant (hallucinated, truthful) pairs over total such pairs, counting only
+pairs drawn from the same question, ties at one half. No HARP row appears because no prior work in
+this area reports a per-question metric -- see the preceding section for why we introduce one and
+what it costs. Bold = best per column, but note that a bolded lead is
 \emph{nominal} unless marked $^{*}$: on TriviaQA, NQ-Open, and TyDiQA-GP no condition's
 within-prompt gain over core\_max survives a paired bootstrap (all 95\% CIs include zero;
 triple\_concat's TriviaQA lead, for instance, is $\Delta=+0.30$~pts, CI $[-0.14, +0.73]$).
@@ -162,33 +164,98 @@ therefore tracks the \emph{dataset}, not the architecture.}
 \end{table}
 
 \clearpage
-\section*{Reading the two metrics}
+\section*{Within-prompt AUROC: motivation, definition, and why we introduce it}
 
-Both metrics answer ``can the detector rank hallucinated answers above truthful ones,'' but over
-different comparison sets, and the difference matters for how the numbers should be read.
+\subsection*{The convention, and what it silently assumes}
+
+Hallucination detection is evaluated almost universally with a single dataset-level AUROC. HARP
+states that ``AUROC (area under the ROC curve) is employed as the primary evaluation metric'';
+INSIDE that ``AUROC is a popular metric to evaluate the quality of a binary classifier''; and
+Janiak et al.\ that AUROC ``assesses the ability of a hallucination detection method to correctly
+rank positive and negative instances (hallucinations vs.\ non-hallucinations).''
+
+All three generate \emph{multiple answers per question} -- ten, in every case, as do we. So the
+data has an explicit two-level structure: answers nested inside questions. Yet none of the three
+states how scores from \emph{different} questions are combined, and the standard implementation
+simply flattens the array. Every hallucinated answer is ranked against every truthful answer in
+the dataset, regardless of whether they answer the same question. The grouping is present in the
+data and discarded without comment.
+
+\subsection*{Why that matters: the shortcut}
+
+Questions differ enormously in difficulty. In our data, 300 of TruthfulQA's 817 questions are
+ones where the model got all ten attempts wrong, and 111 where it got all ten right. Under pooled
+AUROC, every answer from the first group is compared against every answer from the second, and a
+detector gets all of those pairs correct simply by outputting a higher score for hard questions.
+It never has to distinguish a good answer from a bad one.
+
+This is not hypothetical. Janiak et al.\ report two ``simple baselines'' -- \texttt{Mean-Len}
+(mean answer length across a question's ten generations) and \texttt{Std-Len} (their standard
+deviation) -- that are \emph{per-question constants}: identical for all ten answers to a question,
+carrying literally zero information about any individual answer. On LLaMA they average 0.721 and
+0.751 AUROC respectively, against 0.747 for Eigenscore, a sophisticated internal-state detector.
+A feature that \emph{cannot} discriminate between two answers to the same question, even in
+principle, matches or beats the state of the art under pooled AUROC. They present this as evidence
+that simple baselines are competitive; we read it as evidence that the metric is measuring
+something other than what it appears to.
+
+\subsection*{Definition}
+
+Both metrics are computed from the \emph{same} score vector -- one detector, trained once, scoring
+every answer out-of-fold. They differ only in which comparisons are permitted.
+
+AUROC in either form is a pair-counting quantity: among all (hallucinated, truthful) pairs, the
+fraction in which the hallucinated answer received the higher score, with ties counting one half.
 
 \begin{itemize}
-\item \textbf{Pooled AUROC.} Put every answer from every question into one pile and rank the whole
-pile. The catch: some questions are easy (the model gets all 10 tries right) and some are hard (it
-gets all 10 wrong). A detector can score well here just by recognising ``this looks like a hard
-question,'' without ever telling a good answer from a bad one \emph{for the same question}. This
-is the number the literature reports, so we report it for comparability.
-
-\item \textbf{Within-prompt AUROC.} For each question separately, compare only that question's own
-answers against each other, then average across questions. Questions where all 10 answers are
-right, or all 10 are wrong, contribute nothing -- there is no correct/incorrect pair to rank. This
-removes the easy-vs-hard shortcut entirely, so it is the harder and more honest number, and it is
-what we select on.
-
-\item \textbf{``OOF'' = out-of-fold.} With 5-fold cross-validation, every answer is scored by the
-one model that did \emph{not} see it during training. ``Pooled OOF AUROC'' means: collect all
-those held-out scores, put them in one pile, and compute a single AUROC. It is not an average of
-five per-fold numbers -- it is one number over all held-out predictions, so no answer is ever
-scored by a model that trained on it.
+\item \textbf{Pooled AUROC} forms every such pair in the dataset, including pairs drawn from
+different questions.
+\item \textbf{Within-prompt AUROC} forms only pairs whose two members answer the \emph{same}
+question, then aggregates concordant pairs over total pairs across all questions.
 \end{itemize}
 
-\noindent Figure~3 exists precisely to measure how much of the pooled number is the shortcut and
-how much is real detection.
+\noindent A question whose ten answers are all truthful, or all hallucinated, yields no valid pair
+and drops out entirely. Only \emph{mixed} questions -- where the model both succeeded and failed
+on the same input -- contribute.
+
+\textbf{``OOF'' means out-of-fold.} Under \texttt{GroupKFold(5)} grouped by prompt, all ten answers
+to a question stay together, so a question is never split across training and test. Each answer is
+scored by the one model that did not see it. ``Pooled OOF AUROC'' is a single AUROC over all
+held-out scores, not an average of five per-fold values.
+
+\subsection*{Why this is the right correction, and not a novel one}
+
+Conditioning on a grouping variable to remove a confound is standard practice elsewhere.
+Information retrieval computes MAP and NDCG per query and then averages; pooling documents across
+queries would be considered plainly wrong. Recommender systems use per-user AUC (``GAUC'') for
+exactly the reason we need it here: pooled AUC conflated ``this user clicks often'' with ``this
+item suits this user.'' Substituting question for user and answer for item gives our setting
+exactly.
+
+We therefore do not claim within-prompt AUROC as a new metric. We claim that hallucination
+detection has not been applying it, that the two-level structure required for it is already
+present in every standard benchmark, and that the difference it makes is large -- which is what
+Figure~3 quantifies.
+
+\subsection*{What it costs}
+
+The correction is not free, and the limitations should be stated plainly.
+
+\begin{itemize}
+\item \textbf{Homogeneous questions are discarded.} On Qwen/NQ-Open only 348 of 3{,}610 questions
+are mixed, so the metric rests on 5{,}365 pairs rather than the full dataset, and its confidence
+intervals are correspondingly wide. Where the model almost never succeeds, there is little to
+measure.
+\item \textbf{It is not comparable to published numbers.} No prior work reports it, so pooled
+AUROC must still be reported alongside for literature comparison. We report both throughout.
+\item \textbf{It is not uniformly stricter.} On TyDiQA-GP within-prompt AUROC \emph{exceeds}
+pooled. Pooling there mixes questions across languages, adding cross-question variance that the
+within-question comparison never sees. The sign of the gap is itself a per-benchmark diagnostic,
+not a fixed penalty.
+\end{itemize}
+
+\noindent The gap between the two numbers is the quantity of interest, and Figure~3 decomposes it
+directly.
 
 \clearpage
 \section*{Figure 1 -- where in the network the signal lives}
