@@ -3,6 +3,10 @@
 \usepackage{booktabs}
 \usepackage[table]{xcolor}
 \definecolor{harpgray}{RGB}{225,225,225}
+% diverging scale for the difficulty-gap table: warm = pooled overstates,
+% cool = pooled understates, intensity proportional to |gap| (max |gap| = 13.4)
+\definecolor{gapPos}{RGB}{214,96,77}
+\definecolor{gapNeg}{RGB}{69,117,180}
 \usepackage{multirow}
 \usepackage{amssymb}
 \usepackage{graphicx}
@@ -135,24 +139,24 @@ each model reaches, not which condition tops a column.}
 \textbf{Model} & \textbf{Condition} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
 \midrule
 \multirow{7}{*}{LLaMA-3.1-8B}
-  & core\_max      & $+5.15$ & $+3.44$ & $+10.34$ & $-2.39$ \\
-  & q\_velocity    & $+4.87$ & $+3.53$ & $+10.96$ & $-3.52$ \\
-  & q\_static      & $+4.22$ & $+3.67$ & $+10.00$ & $-2.31$ \\
-  & core\_concat   & $+4.22$ & $+3.54$ & $+10.18$ & $-2.58$ \\
-  & joint\_tensor  & $+4.42$ & $+3.61$ & $+10.81$ & $-2.44$ \\
-  & triple\_concat & $+5.25$ & $+3.55$ & $+10.72$ & $-3.08$ \\
+  & core\_max      & \cellcolor{gapPos!25}$+5.15$ & \cellcolor{gapPos!17}$+3.44$ & \cellcolor{gapPos!50}$+10.34$ & \cellcolor{gapNeg!12}$-2.39$ \\
+  & q\_velocity    & \cellcolor{gapPos!23}$+4.87$ & \cellcolor{gapPos!17}$+3.53$ & \cellcolor{gapPos!53}$+10.96$ & \cellcolor{gapNeg!17}$-3.52$ \\
+  & q\_static      & \cellcolor{gapPos!20}$+4.22$ & \cellcolor{gapPos!18}$+3.67$ & \cellcolor{gapPos!48}$+10.00$ & \cellcolor{gapNeg!11}$-2.31$ \\
+  & core\_concat   & \cellcolor{gapPos!20}$+4.22$ & \cellcolor{gapPos!17}$+3.54$ & \cellcolor{gapPos!49}$+10.18$ & \cellcolor{gapNeg!12}$-2.58$ \\
+  & joint\_tensor  & \cellcolor{gapPos!21}$+4.42$ & \cellcolor{gapPos!17}$+3.61$ & \cellcolor{gapPos!52}$+10.81$ & \cellcolor{gapNeg!12}$-2.44$ \\
+  & triple\_concat & \cellcolor{gapPos!25}$+5.25$ & \cellcolor{gapPos!17}$+3.55$ & \cellcolor{gapPos!52}$+10.72$ & \cellcolor{gapNeg!15}$-3.08$ \\
 \cmidrule(lr){2-6}
-  & \textbf{mean}  & $\mathbf{+4.69}$ & $\mathbf{+3.56}$ & $\mathbf{+10.50}$ & $\mathbf{-2.72}$ \\
+  & \textbf{mean}  & \cellcolor{gapPos!23}$\mathbf{+4.69}$ & \cellcolor{gapPos!17}$\mathbf{+3.56}$ & \cellcolor{gapPos!51}$\mathbf{+10.50}$ & \cellcolor{gapNeg!13}$\mathbf{-2.72}$ \\
 \midrule
 \multirow{7}{*}{Qwen2.5-7B}
-  & core\_max      & $+4.84$ & $+2.40$ & $+13.02$ & $+0.13$ \\
-  & q\_velocity    & $+4.36$ & $+2.65$ & $+13.43$ & $-0.42$ \\
-  & q\_static      & $+4.42$ & $+2.58$ & $+13.19$ & $+1.31$ \\
-  & core\_concat   & $+4.17$ & $+2.61$ & $+12.71$ & $-0.45$ \\
-  & joint\_tensor  & $+5.47$ & $+2.62$ & $+12.52$ & $+0.77$ \\
-  & triple\_concat & $+4.51$ & $+2.67$ & $+11.10$ & $-0.74$ \\
+  & core\_max      & \cellcolor{gapPos!23}$+4.84$ & \cellcolor{gapPos!12}$+2.40$ & \cellcolor{gapPos!63}$+13.02$ & \cellcolor{gapPos!1}$+0.13$ \\
+  & q\_velocity    & \cellcolor{gapPos!21}$+4.36$ & \cellcolor{gapPos!13}$+2.65$ & \cellcolor{gapPos!65}$+13.43$ & \cellcolor{gapNeg!2}$-0.42$ \\
+  & q\_static      & \cellcolor{gapPos!21}$+4.42$ & \cellcolor{gapPos!12}$+2.58$ & \cellcolor{gapPos!63}$+13.19$ & \cellcolor{gapPos!6}$+1.31$ \\
+  & core\_concat   & \cellcolor{gapPos!20}$+4.17$ & \cellcolor{gapPos!13}$+2.61$ & \cellcolor{gapPos!61}$+12.71$ & \cellcolor{gapNeg!2}$-0.45$ \\
+  & joint\_tensor  & \cellcolor{gapPos!26}$+5.47$ & \cellcolor{gapPos!13}$+2.62$ & \cellcolor{gapPos!60}$+12.52$ & \cellcolor{gapPos!4}$+0.77$ \\
+  & triple\_concat & \cellcolor{gapPos!22}$+4.51$ & \cellcolor{gapPos!13}$+2.67$ & \cellcolor{gapPos!53}$+11.10$ & \cellcolor{gapNeg!4}$-0.74$ \\
 \cmidrule(lr){2-6}
-  & \textbf{mean}  & $\mathbf{+4.63}$ & $\mathbf{+2.59}$ & $\mathbf{+12.66}$ & $\mathbf{+0.10}$ \\
+  & \textbf{mean}  & \cellcolor{gapPos!22}$\mathbf{+4.63}$ & \cellcolor{gapPos!12}$\mathbf{+2.59}$ & \cellcolor{gapPos!61}$\mathbf{+12.66}$ & \cellcolor{gapPos!1}$\mathbf{+0.10}$ \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{The difficulty gap: pooled minus within-prompt AUROC (percentage points).} Both
@@ -160,6 +164,12 @@ terms come from the \emph{same} grouped 5-fold run and the same Random Forest sc
 difference isolates exactly one thing -- how much a condition's pooled number depends on being
 allowed to compare answers across different questions. Positive means pooled \emph{overstates}
 per-response detection; negative means it understates it.
+\\[2pt]
+\textbf{Colour key.} Shading is a diverging scale on the signed gap: warm
+(\cellcolor{gapPos!35}\phantom{xx}) where pooled overstates, cool
+(\cellcolor{gapNeg!35}\phantom{xx}) where it understates, with intensity proportional to
+magnitude on a common scale across the whole table (deepest shade $=13.4$ points, the largest gap
+observed). Near-white cells are gaps close to zero, where the two metrics agree.
 \\[2pt]
 The striking pattern is how little the gap moves down a column and how much it moves across one.
 Within any model$\times$dataset cell the six conditions span about one point; across datasets the
