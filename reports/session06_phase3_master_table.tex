@@ -122,10 +122,66 @@ triple\_concat's TriviaQA lead, for instance, is $\Delta=+0.30$~pts, CI $[-0.14,
 $^{*}$core\_concat vs.\ core\_max on TruthfulQA remains, across all four completed datasets,
 the project's \emph{only} statistically significant within-prompt improvement (paired
 $\Delta=+2.57$~pts, 95\% CI $[+0.03, +5.26]$, excludes zero). Separately, all four
-combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on both metrics.}
+combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on both metrics.
+Because the leads are nominal, the practically useful reading of this table is the \emph{level}
+each model reaches, not which condition tops a column.}
 \end{table}
 
-% ---------- TABLE 3: RF vs LR winner grid ----------
+% ---------- TABLE 3: the difficulty gap ----------
+\begin{table}[h]
+\centering\small
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Condition} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
+\midrule
+\multirow{7}{*}{LLaMA-3.1-8B}
+  & core\_max      & $+5.15$ & $+3.44$ & $+10.34$ & $-2.39$ \\
+  & q\_velocity    & $+4.87$ & $+3.53$ & $+10.96$ & $-3.52$ \\
+  & q\_static      & $+4.22$ & $+3.67$ & $+10.00$ & $-2.31$ \\
+  & core\_concat   & $+4.22$ & $+3.54$ & $+10.18$ & $-2.58$ \\
+  & joint\_tensor  & $+4.42$ & $+3.61$ & $+10.81$ & $-2.44$ \\
+  & triple\_concat & $+5.25$ & $+3.55$ & $+10.72$ & $-3.08$ \\
+\cmidrule(lr){2-6}
+  & \textbf{mean}  & $\mathbf{+4.69}$ & $\mathbf{+3.56}$ & $\mathbf{+10.50}$ & $\mathbf{-2.72}$ \\
+\midrule
+\multirow{7}{*}{Qwen2.5-7B}
+  & core\_max      & $+4.84$ & $+2.40$ & $+13.02$ & $+0.13$ \\
+  & q\_velocity    & $+4.36$ & $+2.65$ & $+13.43$ & $-0.42$ \\
+  & q\_static      & $+4.42$ & $+2.58$ & $+13.19$ & $+1.31$ \\
+  & core\_concat   & $+4.17$ & $+2.61$ & $+12.71$ & $-0.45$ \\
+  & joint\_tensor  & $+5.47$ & $+2.62$ & $+12.52$ & $+0.77$ \\
+  & triple\_concat & $+4.51$ & $+2.67$ & $+11.10$ & $-0.74$ \\
+\cmidrule(lr){2-6}
+  & \textbf{mean}  & $\mathbf{+4.63}$ & $\mathbf{+2.59}$ & $\mathbf{+12.66}$ & $\mathbf{+0.10}$ \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{The difficulty gap: pooled minus within-prompt AUROC (percentage points).} Both
+terms come from the \emph{same} grouped 5-fold run and the same Random Forest scores, so the
+difference isolates exactly one thing -- how much a condition's pooled number depends on being
+allowed to compare answers across different questions. Positive means pooled \emph{overstates}
+per-response detection; negative means it understates it.
+\\[2pt]
+The striking pattern is how little the gap moves down a column and how much it moves across one.
+Within any model$\times$dataset cell the six conditions span about one point; across datasets the
+means run from $-2.7$ to $+12.7$. \textbf{The gap is a property of the benchmark, not of the
+feature variant.} NQ-Open is the extreme -- at 89--97\% hallucination rates it has very few mixed
+questions, so almost all of its pooled comparisons are cross-question and its pooled score is
+inflated by 10--13 points. TyDiQA-GP inverts for LLaMA, where pooling mixes questions across
+languages and adds variance the within-question comparison never sees; for Qwen the same dataset
+sits at essentially zero.
+\\[2pt]
+Practical consequence: a pooled AUROC cannot be interpreted without knowing its benchmark's gap.
+Two published numbers of 86.5 mean different things if one comes from NQ-Open and the other from
+TyDiQA-GP.
+\\[2pt]
+\emph{Note:} Figure~3's right panel reports the same quantity for LLaMA and differs by
+0.1--0.5 points ($+4.9$ / $+3.4$ / $+10.8$ / $-2.5$ against this table's core\_max row). Both are
+computed from the same features and folds; the small discrepancy is an implementation difference
+between the two code paths and is under investigation. This table is built directly from the
+Phase-3 result files, consistent with Tables~1 and~2.}
+\end{table}
+
+% ---------- TABLE 4: RF vs LR winner grid ----------
 \begin{table}[h]
 \centering\footnotesize
 \begin{tabular}{ll cc cc cc cc}
@@ -149,7 +205,7 @@ combination conditions \emph{do} significantly beat q\_velocity on TriviaQA on b
   & q\_static      & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
   & core\_concat   & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
   & joint\_tensor  & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
-  & triple\_concat & \multicolumn{6}{c}{\textit{pending}} & \checkmark &  \\
+  & triple\_concat & \checkmark &  &  & \checkmark & \checkmark &  & \checkmark &  \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Which classifier wins, under the HARP protocol} -- \checkmark marks the
