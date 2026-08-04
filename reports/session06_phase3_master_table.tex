@@ -187,9 +187,13 @@ Within any model$\times$dataset cell the six conditions span about one point; ac
 means run from $-2.7$ to $+12.7$. \textbf{The gap is a property of the benchmark, not of the
 feature variant.} NQ-Open is the extreme -- at 89--97\% hallucination rates it has very few mixed
 questions, so almost all of its pooled comparisons are cross-question and its pooled score is
-inflated by 10--13 points. TyDiQA-GP inverts for LLaMA, where pooling mixes questions across
-languages and adds variance the within-question comparison never sees; for Qwen the same dataset
-sits at essentially zero.
+inflated by 10--13 points. TyDiQA-GP is where the two metrics most nearly agree: slightly negative for
+LLaMA ($-2.7$) and essentially zero for Qwen ($+0.1$). It also carries the smallest
+question-difficulty share in Figure~3 (66\%, against 74--85\% elsewhere), which is consistent with
+a near-zero gap. We report the LLaMA inversion without claiming a mechanism -- the same dataset
+behaves differently under the two models, which argues against a purely structural explanation.
+(Note: we use the \emph{English-only} subset of TyDiQA-GP, 440 of 5{,}077 rows, so no
+cross-language effect is involved.)
 \\[2pt]
 Practical consequence: a pooled AUROC cannot be interpreted without knowing its benchmark's gap.
 Two published numbers of 86.5 mean different things if one comes from NQ-Open and the other from
@@ -325,10 +329,10 @@ intervals are correspondingly wide. Where the model almost never succeeds, there
 measure.
 \item \textbf{It is not comparable to published numbers.} No prior work reports it, so pooled
 AUROC must still be reported alongside for literature comparison. We report both throughout.
-\item \textbf{It is not uniformly stricter.} On TyDiQA-GP within-prompt AUROC \emph{exceeds}
-pooled. Pooling there mixes questions across languages, adding cross-question variance that the
-within-question comparison never sees. The sign of the gap is itself a per-benchmark diagnostic,
-not a fixed penalty.
+\item \textbf{It is not uniformly stricter.} On TyDiQA-GP under LLaMA, within-prompt AUROC
+\emph{exceeds} pooled by 2.7 points -- restricting comparisons to the same question helps there
+rather than hurting. The same dataset under Qwen sits at essentially zero. The sign of the gap is
+a per-benchmark diagnostic, not a fixed penalty, and it cannot be assumed in advance.
 \end{itemize}
 
 \noindent The gap between the two numbers is the quantity of interest, and Figure~3 decomposes it
@@ -501,9 +505,12 @@ from NQ-Open and the other from TyDiQA-GP. This motivates reporting the gap as a
 descriptor -- see Part 2.
 
 \paragraph{3. The sign of the gap varies, so this is a diagnostic and not a correction factor.}
-\textbf{[Established]} TyDiQA-GP inverts for LLaMA: pooled \emph{understates} per-response
-detection there, plausibly because pooling mixes questions across languages. Any framing that
-treats pooled AUROC as uniformly inflated is wrong.
+\textbf{[Established; mechanism unexplained]} TyDiQA-GP inverts for LLaMA: pooled
+\emph{understates} per-response detection there by 2.7 points, while the same dataset under Qwen
+sits at essentially zero. Any framing that treats pooled AUROC as uniformly inflated is wrong. We
+report the inversion as an observation and do not offer a mechanism; that the two models disagree
+on the same data argues against a purely structural explanation, and identifying the cause is an
+open question.
 
 \paragraph{4. Energy divergence does not track discriminability, which invalidates a common
 layer-selection heuristic.} \textbf{[Established, needs lit check]} Figure~1: the norm gap between
