@@ -452,4 +452,140 @@ those combinations are adding question-difficulty information rather than per-an
 separate analyses reaching the same conclusion.
 \end{itemize}
 
+\clearpage
+\section*{Novel contributions}
+
+Claims are graded by how well the current data supports them. \textbf{[Established]} means our own
+measurements support it directly. \textbf{[Needs lit check]} means the result is solid but we have
+not confirmed no one has published it. \textbf{[Do not claim]} records things we deliberately are
+\emph{not} asserting, so the boundary is explicit.
+
+\subsection*{Part 1 -- What we have now}
+
+\paragraph{1. Pooled AUROC is mostly a question-difficulty detector, and we measured how mostly.}
+\textbf{[Established, needs lit check]} Replacing every answer by its question's 10-answer mean
+destroys all per-answer information, yet those features recover \textbf{66--85\% of pooled AUROC's
+lift above chance} across four datasets. The centroid/delta decomposition is the instrument, and
+it is the contribution -- not the observation that a confound exists, but a number for how large
+it is. Janiak et al.\ independently produced supporting evidence without framing it this way:
+their \texttt{Std-Len} baseline, a per-question constant that cannot separate two answers to the
+same question even in principle, scores 0.751 pooled AUROC against Eigenscore's 0.747.
+
+\paragraph{2. The difficulty gap is a property of the benchmark, not of the method.}
+\textbf{[Established]} Across 48 model$\times$condition$\times$dataset cells, the pooled-minus-
+within-prompt gap varies by about one point across the six conditions within a cell, and by
+\emph{fifteen} points across datasets ($-2.7$ to $+12.7$; Table~3). The practical consequence is
+concrete and checkable: two published pooled AUROCs of 86.5 describe different things if one comes
+from NQ-Open and the other from TyDiQA-GP. This motivates reporting the gap as a benchmark
+descriptor -- see Part 2.
+
+\paragraph{3. The sign of the gap varies, so this is a diagnostic and not a correction factor.}
+\textbf{[Established]} TyDiQA-GP inverts for LLaMA: pooled \emph{understates} per-response
+detection there, plausibly because pooling mixes questions across languages. Any framing that
+treats pooled AUROC as uniformly inflated is wrong.
+
+\paragraph{4. Energy divergence does not track discriminability, which invalidates a common
+layer-selection heuristic.} \textbf{[Established, needs lit check]} Figure~1: the norm gap between
+hallucinated and truthful answers is essentially flat across the extraction window
+($\sim$0.1~SD over nine layers), varies enormously between datasets ($+1.3$ to $-0.85$),
+\emph{flips sign} on TruthfulQA, and is uncorrelated with per-layer detection AUROC -- NQ-Open has
+the largest norm gap and TruthfulQA a negative one, yet both rank highest on discriminability. Our
+own extraction window was selected by exactly such an audit, so this is a self-critique with
+general force.
+
+\paragraph{5. Geometric complementarity does not imply informational complementarity.}
+\textbf{[Established]} Figure~2: the static and velocity subspaces share only $\sim$16 of 64
+directions against a random null of 0 and a within-stream reference of $\sim$58 -- genuinely
+different geometry -- yet combining them buys 0.1--2.5 points, mostly not significant. The overlap
+concentrates in the leading, highest-variance directions, which is plausibly what a classifier
+leans on. This explains why several rounds of feature engineering produced about one point, and it
+is a more useful negative result than ``the combination did not help.''
+
+\paragraph{6. A plain mean-subtraction outperforms all six engineered feature variants.}
+\textbf{[Established on 2 of 4 datasets; extension pending]} Removing each answer's prompt centroid
+beats the full features on within-prompt AUROC (83.2 vs 82.0 on TruthfulQA, 83.8 vs 82.0 on
+TriviaQA) at zero compute cost. Must be reported as a \emph{multi-sample} method, since centering
+requires the sibling answers at inference -- the SelfCheckGPT/INSIDE setting, legitimate and
+precedented, but not comparable to single-pass HARP.
+
+\paragraph{7. An unsupervised pipeline reaches published supervised performance.}
+\textbf{[Established]} On Qwen2.5-7B, three of four datasets sit within 0.3 points of HARP's
+published supervised scores: TyDiQA-GP $-0.1$, TriviaQA $-0.11$, TruthfulQA $-0.3$. The best
+condition on two of them is plain \texttt{core\_max}, which supports the reading that the
+\emph{pipeline} is the contribution rather than any particular feature variant.
+
+\paragraph{8. Two smaller consistency results.} \textbf{[Established]} The RF/LR inversion tracks
+the dataset, not the architecture: 42 of 48 cells favour Random Forest and all 12 exceptions are
+TriviaQA, for both models. And condition ranking is stable across architectures with different
+hidden dimensions (4096 vs 3584) -- \texttt{core\_concat}/\texttt{triple\_concat} occupy the top two
+positions in 5 of 6 completed cells.
+
+\paragraph{What we explicitly do not claim.} \textbf{[Do not claim]} Within-prompt AUROC is
+\emph{not} a new metric -- information retrieval computes MAP and NDCG per query, and recommender
+systems use per-user AUC (GAUC) for precisely this confound. Our claim is that hallucination
+detection has not been applying it despite every standard benchmark already having the required
+structure. Nor do we claim to have discovered that hallucination benchmarks are confounded;
+Janiak et al.\ established that for labels and response length. Ours is a different axis.
+
+\subsection*{Part 2 -- Future contributions reachable from the current state}
+
+Ordered by expected value per unit cost. All but the last two are CPU-only on artifacts already on
+disk.
+
+\paragraph{A. Re-label with an LLM judge and re-run everything. [GPU-free, API cost. Highest
+value.]} Janiak et al.\ show ROUGE-based correctness labels have 0.401 precision against human
+judgment, and that detector rankings change substantially -- up to 45.9\% -- when labels are
+corrected. \emph{Our labels are ROUGE-L $>0.7$ or BLEURT $>0.5$, so we inherit this criticism
+in full.} Every generation is already pinned to disk and labelling is a separate pipeline stage,
+so re-labelling and re-running costs no GPU time. This is simultaneously our largest exposure and
+the cheapest way to close it: if our findings survive human-aligned labels, they become far more
+defensible, and ``we re-verified under LLM-as-Judge'' is itself a contribution.
+
+\paragraph{B. Does one layer match the whole pipeline? [CPU, hours.]} Figure~1(ii) suggests layer
+15 alone, at 64 dimensions with logistic regression, matches the full 9-layer 320-dimension random
+forest on all four datasets (0.877/0.862/0.873/0.830 vs 0.869/0.854/0.865/0.821). Confidence
+intervals overlap, so the verifiable claim is ``matches,'' not ``beats'' -- but a match means eight
+of nine layers contribute nothing and the compression story strengthens fivefold. Requires one
+paired test against \texttt{core\_max} on identical folds.
+
+\paragraph{C. Is the extraction window in the wrong place? [One GPU pass. Highest ceiling.]} The
+best single layer is 15 -- the \emph{left edge} of the window. An optimum sitting on a boundary
+usually means the true optimum lies outside it. If the signal peaks before layer 15, then the
+convention of extracting from middle-to-late layers may be misplaced across this whole line of
+work, and every number we have is a lower bound. One extraction pass over layers $\sim$7--15 on two
+datasets settles it. Note the caveat: single-layer AUROC is not marginal contribution inside a
+9-layer fit, so a monotone profile is suggestive rather than conclusive.
+
+\paragraph{D. Promote delta-centering from diagnostic to method. [CPU, free.]} Extend
+contribution~6 across the full grid and both models. If it holds, the paper gains a concrete
+improvement that follows directly from the decomposition -- the diagnostic and the method share one
+idea, which is a much tighter story than reporting them separately.
+
+\paragraph{E. Report the gap as a benchmark descriptor. [CPU, near-free.]} Turn contribution~2
+into a proposed practice: alongside any pooled AUROC, report that benchmark's difficulty gap so
+readers can interpret the number. We would publish gaps for the four standard benchmarks as a
+reference table. This is the cheapest path from ``we found a problem'' to ``we gave the community
+a fix.''
+
+\paragraph{F. Aggregate properly instead of testing cell by cell. [CPU, hours.]} Combination
+conditions beat the baseline on pooled but never on within-prompt in \emph{any single cell}. A
+random-effects meta-analysis across all eight cells, plus a Friedman/Nemenyi test over the six
+conditions, resolves whether that is a real null or eight underpowered tests. Either outcome is
+publishable, and ``this subfield tests underpowered comparisons one dataset at a time'' is a
+methods point in its own right.
+
+\paragraph{G. Halve the feature dimensionality for free. [CPU, hours.]} Figure~2 shows the q95 and
+q05 halves share $\sim$58 of 64 directions. If dropping q05 costs nothing measurable, every feature
+variant halves in size. Minor alone; useful combined with B.
+
+\paragraph{H. Cross-dataset transfer. [CPU, heavy.]} Fit on one dataset, evaluate on another, all
+16 pairs per model, against HARP's published transfer matrix. Tests whether the learned subspace is
+general or dataset-specific -- and Figure~2(B) already gives a geometric prediction to check it
+against (cross-dataset subspace similarity 0.69--0.92, TyDiQA-GP most distinct), so the two
+analyses can corroborate each other.
+
+\paragraph{Sequencing.} A is the priority: until labels are human-aligned, every other contribution
+carries an asterisk. B, D, E and F are cheap and can run in parallel with it. C has the highest
+ceiling but the highest cost, and is best attempted once A has confirmed the findings are real.
+
 \end{document}
