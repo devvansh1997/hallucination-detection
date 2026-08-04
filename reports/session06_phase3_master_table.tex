@@ -53,8 +53,9 @@ boiling that trail down.
 \toprule
 \textbf{Model} & \textbf{Condition} & \textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{NQ-Open} & \textbf{TyDiQA-GP} \\
 \midrule
-\multirow{7}{*}{LLaMA-3.1-8B}
+\multirow{8}{*}{LLaMA-3.1-8B}
   & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.5 & \cellcolor{harpgray}92.9 & \cellcolor{harpgray}89.4 & \cellcolor{harpgray}86.6 \\
+  & \cellcolor{harpgray}HARP (our reimplementation)$^{\S}$ & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} \\
   & core\_max      & 84.4 & 86.4 & 85.7 & 83.1 \\
   & q\_velocity    & \textbf{86.2} & 85.8 & 84.6 & 82.6 \\
   & q\_static      & 84.3 & 86.7 & 86.1 & \textbf{84.0} \\
@@ -62,8 +63,9 @@ boiling that trail down.
   & joint\_tensor  & 84.5 & 86.4 & \textbf{86.3} & 83.3 \\
   & triple\_concat & 85.5 & \textbf{87.0} & 85.7 & 83.2 \\
 \midrule
-\multirow{7}{*}{Qwen2.5-7B}
+\multirow{8}{*}{Qwen2.5-7B}
   & \cellcolor{harpgray}HARP (published, supervised) & \cellcolor{harpgray}88.1 & \cellcolor{harpgray}92.8 & \cellcolor{harpgray}84.0 & \cellcolor{harpgray}88.4 \\
+  & \cellcolor{harpgray}HARP (our reimplementation)$^{\S}$ & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} & \cellcolor{harpgray}\textit{pending} \\
   & core\_max      & 87.1 & 91.3$^{\dagger}$ & 78.8 & \textbf{88.3}$^{\ddagger}$ \\
   & q\_velocity    & 87.7 & 90.9 & 78.2 & 87.0 \\
   & q\_static      & 87.1 & 91.7 & 79.1 & 87.5 \\
@@ -87,7 +89,16 @@ conditions, and q\_static sits 0.11 points below HARP's published 92.8, our clos
 the published reference anywhere in the study. $^{\ddagger}$Qwen/TyDiQA-GP is the
 first cell where an unsupervised condition of ours reaches the published supervised score:
 core\_max 88.3~$\pm$~1.8 against HARP's reported 88.4, a gap of 0.1 points, well inside our
-seed-to-seed spread.}
+seed-to-seed spread.
+\\[2pt]
+$^{\S}$\textbf{An important caveat on every comparison in this table.} We replicate HARP's
+evaluation \emph{protocol} -- their 75/25 known split, 10 beams per question, and their exact
+labelling rule (ROUGE-L $>0.7$ or semantic similarity $>0.5$) -- but not their \emph{method}. The
+published row was computed by them on \emph{their} generations; our rows are computed on ours.
+Same protocol, different samples. Until we run their reasoning-subspace projection on our own
+pinned generations, ``we match HARP'' means ``our number on our data is close to their number on
+their data,'' which is weaker than a like-for-like result. The reimplementation row above is
+reserved for that comparison.}
 \end{table}
 
 % ---------- TABLE 2: our internal primary metric ----------
@@ -551,6 +562,26 @@ so re-labelling and re-running costs no GPU time. This is simultaneously our lar
 the cheapest way to close it: if our findings survive human-aligned labels, they become far more
 defensible, and ``we re-verified under LLM-as-Judge'' is itself a contribution.
 
+\paragraph{A2. Reimplement HARP and run it on our own generations. [Cost unscoped -- see below.]}
+Every comparison in Table~1 is currently our method on our data against HARP's published number on
+their data. The protocol matches theirs exactly, but the generations do not, so ``we tie HARP'' is
+not yet a like-for-like claim and will be the first thing a reviewer asks about. Running their
+reasoning-subspace projection on our pinned generations fixes that.
+\\[2pt]
+It is worth more than a fairness repair, for two reasons. First, it \emph{neutralises the labelling
+criticism for the comparison specifically}: if both methods are scored against the same labels,
+then even if those labels are imperfect (contribution~A), the \emph{relative} result stays valid.
+Second, and more valuable, it lets us compute HARP's \emph{within-prompt} AUROC and its difficulty
+gap. At present our decomposition shows that \emph{our} features are 66--85\% question difficulty.
+Showing the same for a published state-of-the-art detector would lift that finding from a property
+of our pipeline to a property of the field's methods -- which is a substantially stronger claim
+than anything else in Part 1.
+\\[2pt]
+\emph{Cost is currently unscoped.} We have read HARP's evaluation protocol but not their method
+section in detail, so we do not yet know whether their projection can be computed from the pooled
+tensors already on disk or requires a fresh extraction pass. That determination should precede any
+commitment.
+
 \paragraph{B. Does one layer match the whole pipeline? [CPU, hours.]} Figure~1(ii) suggests layer
 15 alone, at 64 dimensions with logistic regression, matches the full 9-layer 320-dimension random
 forest on all four datasets (0.877/0.862/0.873/0.830 vs 0.869/0.854/0.865/0.821). Confidence
@@ -594,8 +625,12 @@ general or dataset-specific -- and Figure~2(B) already gives a geometric predict
 against (cross-dataset subspace similarity 0.69--0.92, TyDiQA-GP most distinct), so the two
 analyses can corroborate each other.
 
-\paragraph{Sequencing.} A is the priority: until labels are human-aligned, every other contribution
-carries an asterisk. B, D, E and F are cheap and can run in parallel with it. C has the highest
-ceiling but the highest cost, and is best attempted once A has confirmed the findings are real.
+\paragraph{Sequencing.} A and A2 are the two validity items and should lead. A determines whether
+our labels are trustworthy at all; A2 determines whether our headline comparison is like-for-like.
+They are complementary -- A2 makes the \emph{comparison} robust to label error even before A makes
+the \emph{absolute numbers} trustworthy -- so A2 is worth doing even if A slips. B, D, E and F are
+cheap, independent, and can run alongside. C has the highest ceiling but the highest cost, and is
+best attempted once A has confirmed the findings survive corrected labels. G and H are
+consolidation.
 
 \end{document}
