@@ -32,7 +32,7 @@ substantive difference is in \textbf{how the data is split into training and tes
 \renewcommand{\arraystretch}{1.35}
 \begin{table}[h]
 \centering\footnotesize
-\begin{tabular}{L{2.4cm} L{5.0cm} L{5.6cm} c}
+\begin{tabular}{L{2.3cm} L{4.8cm} L{5.4cm} L{1.7cm}}
 \toprule
 \textbf{Item} & \textbf{What the paper says} & \textbf{What the code does} & \textbf{Match?} \\
 \midrule
@@ -65,7 +65,7 @@ question's 10 answers);
 & Appendix A: ``beam search is used to generate 10 answer paths per question.''
 & 10 requested (\texttt{main.py:157--158}), but answers that decode to empty text are dropped
 (\texttt{get\_known.py:93--94}), so a question can end up with fewer than 10.
-& Minor \\
+& Mostly \\
 
 \textbf{Detector architecture}
 & Appendix A: ``a two-layer MLP with hidden dimension 1024 and ReLU activation.''
@@ -95,14 +95,14 @@ similarity exceeds 0.5.''
 not mention -- the best similarity to a correct answer must exceed the best similarity to a wrong
 answer by more than a margin. That margin defaults to $-1$ (\texttt{DatasetJudge.py:26}), which
 makes the condition almost always true, so in practice it rarely changes a label.
-& Yes (minor undocumented extra term) \\
+& Yes (see note) \\
 
 \textbf{Which layer is used}
 & Not stated. \S4.4 says only that ``deep hidden states exhibit stronger features in the reasoning
 subspace.''
 & \texttt{main.py:210} requests a single key, \texttt{model.layers.[L-1]} where \texttt{L} is the
 model's layer count -- i.e.\ the final layer only.
-& Paper does not specify \\
+& Not specified \\
 
 \bottomrule
 \end{tabular}
