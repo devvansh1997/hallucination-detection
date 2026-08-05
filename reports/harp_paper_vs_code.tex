@@ -37,15 +37,24 @@ substantive difference is in \textbf{how the data is split into training and tes
 \textbf{Item} & \textbf{What the paper says} & \textbf{What the code does} & \textbf{Match?} \\
 \midrule
 
+\textbf{Known / unknown grouping}
+& \S3.1: a question is ``known'' if any of its generated answers matches the reference. Appendix A:
+the unknown questions are all placed in the test set.
+& Correct. \texttt{get\_known.py:115} marks a question known if any of its 10 answers is judged
+correct; \texttt{main.py:264} puts \emph{every} unknown question into the test set and none into
+training; the 75/25 ratio is applied only to the known group.
+& Yes \\
+
 \rowcolor{mismatch}
-\textbf{Train/test split unit}
+\textbf{How the known group is split}
 & \S3.1: ``Let $\mathcal{X}_{known} = \{x \mid known(x)=1\}$ denote \textbf{the set of all inputs}
 whose knowledge is known to the LLMs.'' \newline
 Appendix A: ``75\% of $\mathcal{X}_{known}$ is used for training, while the remaining 25\%,
 together with $\mathcal{X}_{unknown}$, is used to test the hallucination detector on
 \textbf{unseen data}.''
-& Splits \textbf{individual answers}, not questions. \texttt{main.py:184--201} builds one entry per
-answer (loop over questions, then over that question's 10 answers);
+& Within the known group, splits \textbf{individual answers}, not questions.
+\texttt{main.py:184--201} builds one entry per answer (loop over questions, then over that
+question's 10 answers);
 \texttt{get\_hidden\_state.py:72--79} stores one vector per answer;
 \texttt{main.py:237--246} zips these into one list;
 \texttt{main.py:259} splits that list 75/25 with shuffling, which in \texttt{utils.py} is a
@@ -101,13 +110,27 @@ model's layer count -- i.e.\ the final layer only.
 
 \section*{The one difference that matters, in plain terms}
 
-Each question is answered ten times. The paper says the split is made \emph{over questions}: 75\% of
-the questions the model can answer go into training, and the rest are held out as ``unseen data.''
-The code instead pools all the answers together and splits \emph{that} list at random.
+\noindent\textbf{What is \emph{not} wrong.} The overall structure is right, and this should be stated
+first to avoid overstating the finding. Questions are correctly labelled ``known'' or ``unknown''
+according to the paper's definition; all unknown questions are correctly placed in the test set and
+never used for training; and the 75/25 ratio is correctly applied only to the known group. There is
+a genuine known/unknown separation.
 
-The practical effect: for a given question, roughly seven or eight of its ten answers go into
-training and the other two or three into the test set. The question is therefore not unseen at test
-time -- the detector has already been trained on other answers to that same question.
+\medskip
+\noindent\textbf{What is wrong.} It is one level further down. Each question is answered ten times.
+The paper says the 75/25 split within the known group is made \emph{over questions}. The code
+instead pools that group's answers into a single list and splits \emph{that} at random.
+
+The practical effect: a known question typically has around seven or eight of its ten answers in
+training and the remaining two or three in the test set. Because the shuffle is random rather than a
+clean per-question allocation, a known question keeps all ten answers on the training side only
+about 5.6\% of the time ($0.75^{10}$) and almost never lands entirely in the test set. So roughly
+\textbf{94\% of known questions contribute answers to both sides}, and for those the question is not
+unseen at test time -- the detector was trained on other answers to it.
+
+\medskip
+\noindent The unknown questions are unaffected: none of their answers appear in training, so that
+portion of the test set is genuinely unseen.
 
 This matters for our project specifically, because our own analysis shows that a large share of
 what these detectors appear to measure is \emph{which questions the model finds hard}, rather than
