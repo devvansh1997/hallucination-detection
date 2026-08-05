@@ -1,0 +1,156 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage[table]{xcolor}
+\definecolor{mismatch}{RGB}{250,225,225}
+\usepackage{amssymb,amsmath}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\setlength{\emergencystretch}{3em}
+% let long code identifiers break rather than overflow the column
+\usepackage[htt]{hyphenat}
+\title{HARP: released code vs.\ published paper\\[2pt]
+\large A point-by-point comparison of the experimental setup}
+\author{}
+\date{\today}
+\begin{document}
+\maketitle
+
+\noindent\textbf{Purpose.} We are rerunning HARP's released code on our own generated data, so that
+our comparison against their published numbers is like-for-like. While reading their code to build
+the data adapter, we found one place where the released implementation does not match the setup
+described in the paper. This document lists what we checked, with exact quotes and file/line
+references, so it can be verified independently.
+
+\medskip
+\noindent\textbf{Summary.} The \emph{method} is implemented exactly as the paper describes --
+detector architecture, token aggregation, optimiser, and correctness thresholds all match. The one
+substantive difference is in \textbf{how the data is split into training and test sets}.
+
+\medskip
+
+\renewcommand{\arraystretch}{1.35}
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{L{2.4cm} L{5.0cm} L{5.6cm} c}
+\toprule
+\textbf{Item} & \textbf{What the paper says} & \textbf{What the code does} & \textbf{Match?} \\
+\midrule
+
+\rowcolor{mismatch}
+\textbf{Train/test split unit}
+& \S3.1: ``Let $\mathcal{X}_{known} = \{x \mid known(x)=1\}$ denote \textbf{the set of all inputs}
+whose knowledge is known to the LLMs.'' \newline
+Appendix A: ``75\% of $\mathcal{X}_{known}$ is used for training, while the remaining 25\%,
+together with $\mathcal{X}_{unknown}$, is used to test the hallucination detector on
+\textbf{unseen data}.''
+& Splits \textbf{individual answers}, not questions. \texttt{main.py:184--201} builds one entry per
+answer (loop over questions, then over that question's 10 answers);
+\texttt{get\_hidden\_state.py:72--79} stores one vector per answer;
+\texttt{main.py:237--246} zips these into one list;
+\texttt{main.py:259} splits that list 75/25 with shuffling, which in \texttt{utils.py} is a
+\texttt{torch.randperm} -- a random shuffle of the answer list.
+& \textbf{No} \\
+
+\textbf{Answers per question}
+& Appendix A: ``beam search is used to generate 10 answer paths per question.''
+& 10 requested (\texttt{main.py:157--158}), but answers that decode to empty text are dropped
+(\texttt{get\_known.py:93--94}), so a question can end up with fewer than 10.
+& Minor \\
+
+\textbf{Detector architecture}
+& Appendix A: ``a two-layer MLP with hidden dimension 1024 and ReLU activation.''
+& \texttt{mlp\_trainer.py:27--31}: \texttt{Linear(input,1024)} $\to$ \texttt{ReLU} $\to$
+\texttt{Linear(1024,1)} $\to$ \texttt{Sigmoid}.
+& Yes \\
+
+\textbf{Score for a QA pair}
+& Eq.~16: ``The maximum score among all tokens is taken as the hallucination score of the QA
+pair.''
+& \texttt{mlp\_trainer.py:56, 192, 213}: \texttt{masked\_scores.max(dim=-1)} -- maximum over the
+answer's tokens, with padding masked out.
+& Yes \\
+
+\textbf{Training setup}
+& Appendix A: ``50 epochs with the Adam optimizer, initial learning rate 1e-4, cosine decay, batch
+size 128, and weight decay 3e-4.''
+& \texttt{mlp\_trainer.py:282}: \texttt{Adam(lr=lr, weight\_decay=weight\_decay)};
+\texttt{mlp\_trainer.py:12}: \texttt{CosineAnnealingLR}. Values passed from
+\texttt{main.py} (1e-4, 3e-4, 50 epochs); batch size 128 comes from the README command.
+& Yes \\
+
+\textbf{Correctness label}
+& \S5.1: ``An answer is considered correct if its ROUGE-L score exceeds 0.7 or its semantic
+similarity exceeds 0.5.''
+& \texttt{DatasetJudge.py:106--112}: same two thresholds, plus one extra condition the paper does
+not mention -- the best similarity to a correct answer must exceed the best similarity to a wrong
+answer by more than a margin. That margin defaults to $-1$ (\texttt{DatasetJudge.py:26}), which
+makes the condition almost always true, so in practice it rarely changes a label.
+& Yes (minor undocumented extra term) \\
+
+\textbf{Which layer is used}
+& Not stated. \S4.4 says only that ``deep hidden states exhibit stronger features in the reasoning
+subspace.''
+& \texttt{main.py:210} requests a single key, \texttt{model.layers.[L-1]} where \texttt{L} is the
+model's layer count -- i.e.\ the final layer only.
+& Paper does not specify \\
+
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{The one difference that matters, in plain terms}
+
+Each question is answered ten times. The paper says the split is made \emph{over questions}: 75\% of
+the questions the model can answer go into training, and the rest are held out as ``unseen data.''
+The code instead pools all the answers together and splits \emph{that} list at random.
+
+The practical effect: for a given question, roughly seven or eight of its ten answers go into
+training and the other two or three into the test set. The question is therefore not unseen at test
+time -- the detector has already been trained on other answers to that same question.
+
+This matters for our project specifically, because our own analysis shows that a large share of
+what these detectors appear to measure is \emph{which questions the model finds hard}, rather than
+whether a particular answer is wrong. A split that puts the same question on both sides makes that
+shortcut available to the detector.
+
+\paragraph{How large is the effect likely to be?} It applies only to the ``25\% of known'' part of
+the test set; the $\mathcal{X}_{unknown}$ questions are genuinely unseen. So the impact should scale
+with how much of the test set comes from answerable questions. Using our own generations as a guide:
+on Qwen/TruthfulQA roughly half the test answers would come from questions seen in training, whereas
+on Qwen/NQ-Open only about 3\% would. If the effect is real, it should therefore inflate TruthfulQA
+and TyDiQA-GP noticeably and NQ-Open barely.
+
+\paragraph{Our own implementation follows the paper, not the code.} We split by question. This is
+visible in our logs: for LLaMA/TruthfulQA we get 3{,}870 training answers (387 questions
+$\times$ 10) and 4{,}300 test answers (430 questions $\times$ 10), summing to exactly 817 questions.
+Every count is a clean multiple of ten. So our current comparison holds our method to a stricter
+standard than their published numbers were produced under.
+
+\section*{A separate note: the LLaMA model differs from ours}
+
+This is \emph{not} a paper/code discrepancy -- the two agree -- but it affects our comparison. The
+paper (\S5.1) evaluates ``Qwen-2.5-7B-Instruct and LLaMA-3.1-8B,'' and the code confirms it at
+\texttt{main.py:20}, where the LLaMA entry points to \texttt{meta-llama/Llama-3.1-8B} -- the
+\textbf{base} model, not the instruction-tuned one. Our generations used the Instruct variant,
+\texttt{Meta-Llama-3.1-8B-Instruct}. The Qwen model matches exactly. Any like-for-like claim should therefore start with Qwen.
+
+\section*{What we propose}
+
+\begin{enumerate}
+\item Run their code \textbf{exactly as released} on our generated data. We supply the data through
+the cache files their pipeline already reads (\texttt{main.py:120--123}), so nothing in their method
+is touched. If our numbers land close to their published ones, that confirms both the handoff and
+the reading above.
+\item Add a matching answer-level split option to \textbf{our} evaluator, so the two systems are
+compared under identical conditions. This changes only our code, never theirs.
+\item Treat this document as provisional until step 1 is done. The reading of the code is
+straightforward, but a claim of this kind should rest on a reproduction rather than on a code
+inspection alone.
+\end{enumerate}
+
+\noindent We would also note that this looks like a mismatch between the write-up and the released
+implementation rather than anything deliberate: the paper's own formalism is precise, and the
+method itself is implemented faithfully.
+
+\end{document}
