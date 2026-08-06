@@ -45,9 +45,13 @@ echo "${TIMESTAMP}: Conda Env Activated.. "
 cd $REPO
 
 echo "${TIMESTAMP}: triviaqa / ${COND} / answer-level split"
+# --part a is REQUIRED alongside --condition (44_eval_phase3.py:1424 rejects the call without
+# it); --condition narrows that part to a single condition rather than running all six. This
+# matches the original phase3_tri_*.slurm invocation exactly.
 python 44_eval_phase3.py \
     --dataset triviaqa \
     --model_folder qwen-2.5-7b-instruct \
+    --part a \
     --condition "$COND" \
     --split-unit answer \
     --results-dir "$OUT"
