@@ -213,16 +213,68 @@ def run_grouped_generic(core_builder, y, prompt_idx, folds, seed=SEED, label="co
             {"RF": oof_rf, "LR": oof_lr})
 
 
+# Which unit the 75/25 split inside the known group is taken over.
+#   "question" -- the paper's protocol (S3.1, "the set of all inputs"). Our default; unchanged.
+#   "answer"   -- what HARP's RELEASED code actually does (main.py:259 -> utils.split_data ->
+#                 torch.randperm over the flat per-answer list).
+# The second exists so OUR method can be measured under THEIR protocol, which is the fourth cell
+# of the method x protocol grid. Set once from --split-unit before any run; never mutated after.
+SPLIT_UNIT = "question"
+
+
+def answer_level_harp_split(is_known, prompt_idx, N, seed):
+    """HARP's released split: pool the known group's ANSWERS into one list, shuffle, cut 75/25.
+
+    Mirrors utils.split_data using numpy, with the same save/seed/restore discipline
+    original_harp_split uses so neither disturbs the global RNG. Unknown prompts still go wholly
+    to valid, exactly as main.py:264 does -- ONLY the known group's split unit differs.
+
+    A known question lands entirely on one side only 0.75^10 = 5.6% of the time, so ~94% appear on
+    both. That is the leakage; the caller asserts it actually happened."""
+    known_prompts = set(np.where(is_known)[0].tolist())
+    known_rows = np.array([i for i in range(N) if prompt_idx[i] in known_prompts], dtype=int)
+    unknown_rows = np.array([i for i in range(N) if prompt_idx[i] not in known_prompts], dtype=int)
+
+    rng_state = np.random.get_state()
+    np.random.seed(seed)
+    perm = np.random.permutation(len(known_rows))
+    np.random.set_state(rng_state)
+
+    s = int(len(known_rows) * 0.75)
+    t_idx = np.sort(known_rows[perm[:s]])
+    v_idx = np.sort(np.concatenate([known_rows[perm[s:]], unknown_rows]))
+    return t_idx, v_idx
+
+
+def harp_split(is_known, prompt_idx, N, seed):
+    """Dispatch on SPLIT_UNIT so every caller of the HARP protocol honours the same choice."""
+    if SPLIT_UNIT == "answer":
+        return answer_level_harp_split(is_known, prompt_idx, N, seed)
+    return original_harp_split(is_known, prompt_idx, N, seed=seed)
+
+
 def run_harp_generic(builders, y, prompt_idx, is_known, seeds=HARP_SEEDS, label_prefix=""):
     n_beams = len(y)
     per_seed = {name: [] for name in builders}
     n_seeds = len(seeds)
     n_conditions = len(builders)
     for seed_i, seed in enumerate(seeds):
-        t_idx, v_idx = original_harp_split(is_known, prompt_idx, n_beams, seed=seed)
-        assert set(prompt_idx[t_idx].tolist()).isdisjoint(set(prompt_idx[v_idx].tolist()))
-        print(f"  [{label_prefix}] HARP seed {seed_i+1}/{n_seeds} (seed={seed}): n_train={len(t_idx)}  "
-              f"n_valid={len(v_idx)}  [job elapsed {fmt_elapsed(since_start())}]", flush=True)
+        t_idx, v_idx = harp_split(is_known, prompt_idx, n_beams, seed)
+        tq = set(prompt_idx[t_idx].tolist())
+        vq = set(prompt_idx[v_idx].tolist())
+        overlap = len(tq & vq)
+        if SPLIT_UNIT == "question":
+            assert overlap == 0, f"question-level split leaked {overlap} prompts across sides"
+        else:
+            # Positive check, not a formality: if the answer-level arm somehow produced a clean
+            # question split we would be measuring the SAME protocol twice and reporting the
+            # comparison as if it differed. Expect ~94% of known prompts on both sides.
+            assert overlap > 0.8 * len(tq), (
+                f"answer-level split put only {overlap}/{len(tq)} train prompts on both sides; "
+                f"expected ~94% -- this is not HARP's released protocol")
+        print(f"  [{label_prefix}] HARP({SPLIT_UNIT}) seed {seed_i+1}/{n_seeds} (seed={seed}): "
+              f"n_train={len(t_idx)}  n_valid={len(v_idx)}  prompts_on_both_sides={overlap}  "
+              f"[job elapsed {fmt_elapsed(since_start())}]", flush=True)
         for cond_i, (name, builder) in enumerate(builders.items()):
             t0 = time.time()
             core = builder(t_idx, seed)
@@ -817,6 +869,48 @@ def self_test():
     print("  SELF-TEST: combination builders, generic evaluators, transfer fit/apply, verdicts")
     print("=" * 70)
 
+    # ---- split protocols: pure, no features, no model ------------------------------------
+    n_q, n_b = 200, 10
+    st_prompt_idx = np.repeat(np.arange(n_q), n_b)
+    st_N = n_q * n_b
+    st_is_known = np.zeros(n_q, dtype=bool)
+    st_is_known[:140] = True                       # 140 known / 60 unknown prompts
+
+    t_q, v_q = original_harp_split(st_is_known, st_prompt_idx, st_N, seed=42)
+    tq, vq = set(st_prompt_idx[t_q].tolist()), set(st_prompt_idx[v_q].tolist())
+    assert not (tq & vq), "question-level split must leave no prompt on both sides"
+    assert len(tq) == 105, f"75% of 140 known prompts is 105, got {len(tq)}"
+    assert len(t_q) + len(v_q) == st_N and len(set(t_q) | set(v_q)) == st_N
+    print("  [PASS] original_harp_split: prompt-disjoint, 105/35 known prompts, all rows covered")
+
+    t_a, v_a = answer_level_harp_split(st_is_known, st_prompt_idx, st_N, seed=42)
+    ta, va = set(st_prompt_idx[t_a].tolist()), set(st_prompt_idx[v_a].tolist())
+    both = len(ta & va)
+    assert len(t_a) + len(v_a) == st_N and len(set(t_a) | set(v_a)) == st_N, \
+        "answer-level split must still partition every row exactly once"
+    assert len(t_a) == int(140 * n_b * 0.75), \
+        f"train should be 75% of the 1400 known ANSWERS, got {len(t_a)}"
+    assert not (ta & set(np.where(~st_is_known)[0].tolist())), \
+        "no unknown prompt may appear in training (main.py:264)"
+    assert both > 0.8 * len(ta), \
+        f"answer-level split must leak: only {both}/{len(ta)} prompts on both sides"
+    print(f"  [PASS] answer_level_harp_split: partitions all rows, unknown prompts held out, "
+          f"{both}/140 known prompts on both sides (expect ~132 = 94%)")
+
+    # both splits must be pure functions of (is_known, prompt_idx, seed) and leave the global
+    # RNG untouched -- otherwise re-running a seed gives different folds
+    np.random.seed(7)
+    before = np.random.rand()
+    np.random.seed(7)
+    answer_level_harp_split(st_is_known, st_prompt_idx, st_N, seed=42)
+    original_harp_split(st_is_known, st_prompt_idx, st_N, seed=42)
+    assert np.random.rand() == before, "splits must not disturb the global numpy RNG"
+    t_a2, _ = answer_level_harp_split(st_is_known, st_prompt_idx, st_N, seed=42)
+    assert np.array_equal(t_a, t_a2), "same seed must give the same answer-level split"
+    t_a3, _ = answer_level_harp_split(st_is_known, st_prompt_idx, st_N, seed=43)
+    assert not np.array_equal(t_a, t_a3), "different seeds must give different splits"
+    print("  [PASS] both splits are deterministic per seed and leave the global RNG untouched")
+
     # D must comfortably exceed r_d=64 even BEFORE concatenation (core_max/q_static use the raw
     # D alone, not the concatenated 2D) -- D=48 originally used here was too small and silently
     # under-filled r_d, caught by the shape assertion below rather than a crash.
@@ -1140,8 +1234,26 @@ def main():
                               "Pass explicitly only to override that per-model isolation.")
     parser.add_argument("--leaderboard", type=str, default=None,
                          help="Defaults to {results-dir}/leaderboard_v2.json.")
+    parser.add_argument("--split-unit", type=str, choices=["question", "answer"],
+                         default="question",
+                         help="Unit of the 75/25 split inside the known group. 'question' is the "
+                              "HARP paper's protocol and the default -- existing results were all "
+                              "produced under it. 'answer' reproduces HARP's RELEASED code "
+                              "(main.py:259). Use a separate --results-dir with 'answer': the "
+                              "output filenames key on dataset+condition only, so the two "
+                              "protocols would otherwise overwrite each other.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+
+    global SPLIT_UNIT
+    SPLIT_UNIT = args.split_unit
+    if SPLIT_UNIT != "question":
+        print(f"*** SPLIT_UNIT = {SPLIT_UNIT} -- reproducing HARP's released split, NOT the "
+              f"paper's. Results are not comparable with question-level runs.", flush=True)
+        if not args.results_dir:
+            print("*** WARNING: --results-dir not set. Answer-level results will be written into "
+                  "the same per-model directory as the question-level ones and will overwrite "
+                  "them. Pass --results-dir explicitly.", flush=True)
 
     if args.self_test:
         self_test()
