@@ -56,6 +56,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_HARP = os.path.abspath(os.path.join(HERE, "..", "HARP-Code"))
 
 PROJ_DIMS = [32, 64, 128, 192, 256, 512, 1024]   # main.py:59, unchanged
+# Their S5.3 fixes the reasoning subspace dimension at 256 for BOTH models and ALL four datasets
+# ("a dimension of 256 yields the best performance"), and every Table 1 value is reported at it.
+# So 256 -- not the sweep maximum -- is the like-for-like cell.
+PAPER_PROJ_DIM = 256
 HIDDEN_DIM = 1024                                 # main.py:61
 TRAIN_RATIO = 0.75                                # their default / README
 LR, WEIGHT_DECAY, EPOCHS, BATCH = 1e-4, 3e-4, 50, 128   # main.py:286-288 + README
@@ -447,17 +451,28 @@ def main():
     print("\nWrote: %s" % out)
 
     print("\n" + "=" * 78)
-    print("  SUMMARY -- best over proj_dim, as their main.py reports it")
+    print("  SUMMARY")
+    # 256 is THE number to compare against the paper. Their S5.3 fixes the reasoning subspace
+    # dimension at 256 globally -- across both models and all four datasets -- and every value in
+    # their Table 1 is reported at it. They do not take a per-dataset maximum over the sweep, so
+    # neither should we when quoting a like-for-like figure.
+    print("  at proj_dim 256 (the paper's fixed setting, S5.3 -- use this for comparison):")
+    for arm in arms:
+        if arm in results and PAPER_PROJ_DIM in results[arm]:
+            r = results[arm][PAPER_PROJ_DIM]
+            print("    %-11s %.2f%% +/- %.2f" % (arm, 100 * r["mean"], 100 * r["std"]))
+    if all(a in results and PAPER_PROJ_DIM in results[a] for a in ("answer", "question")):
+        d = (results["answer"][PAPER_PROJ_DIM]["mean"]
+             - results["question"][PAPER_PROJ_DIM]["mean"])
+        print("    delta (answer - question): %+.2f points" % (100 * d))
+        print("    Read this ONLY if the 'answer' arm reproduces their main.py number.")
+
+    print("\n  best over the sweep (context only -- NOT the paper's reported quantity):")
     for arm in arms:
         if arm not in results:
             continue
         best = max(results[arm].items(), key=lambda kv: kv[1]["mean"])
         print("    %-11s %.2f%%  at proj_dim %d" % (arm, 100 * best[1]["mean"], best[0]))
-    if "answer" in results and "question" in results:
-        ba = max(v["mean"] for v in results["answer"].values())
-        bq = max(v["mean"] for v in results["question"].values())
-        print("    delta (answer - question): %+.2f points" % (100 * (ba - bq)))
-        print("    Read this ONLY if the 'answer' arm reproduces their main.py number.")
     print("=" * 78)
 
 
