@@ -25,7 +25,14 @@ echo "${TIMESTAMP}: Loading modules.. "
 module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
 
 conda activate hal-det
-echo "${TIMESTAMP}: Conda Env Activated.. "
+# HARP targets the transformers 4.5x API (main.py:105 uses model.model.config, and
+# bleurt_pytorch needs pytorch_utils.find_pruneable_heads_and_indices -- both gone in
+# 5.13). This venv was built with --system-site-packages, so its transformers 4.51
+# shadows hal-det's 5.13 while torch/CUDA come through from the conda env unchanged.
+source $HOME/envs/harp-rerun/bin/activate || exit 1
+echo "${TIMESTAMP}: Env activated.."
+python -c "import torch,transformers;print('  transformers',transformers.__version__,'| torch',torch.__version__)"
+python -c "import transformers,sys;sys.exit(0 if transformers.__version__.startswith('4.') else 1)" || { echo "ERROR: transformers is not 4.x -- venv not active, aborting"; exit 1; }
 
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
@@ -57,5 +64,6 @@ python ./main.py \
 echo "Exit status: $?"
 du -sh "${HARP}/hidden_state" "${HARP}/svd" "${HARP}/mlp_result" 2>/dev/null
 
+deactivate 2>/dev/null || true
 conda deactivate
 echo "${TIMESTAMP}: Env Deactivated.. "
