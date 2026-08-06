@@ -35,6 +35,14 @@ conda activate hal-det
 echo "${TIMESTAMP}: Conda Env Activated.. "
 cd $REPO
 
+# --- provenance: makes a stale copy of this script impossible to miss -------------------------
+echo "--- provenance ---"
+echo "  submitted script : ${SLURM_SUBMIT_DIR}/$(basename "$0")"
+echo "  submit dir       : ${SLURM_SUBMIT_DIR}"
+echo "  repo HEAD        : $(git -C $REPO log --oneline -1 2>/dev/null)"
+echo "  repo dirty?      : $(git -C $REPO status --porcelain 2>/dev/null | wc -l) modified file(s)"
+echo "------------------"
+
 for DS in tydiqa_gp truthfulqa nq_open; do
     echo ""
     echo "############################################################"
