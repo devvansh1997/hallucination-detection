@@ -180,15 +180,15 @@ their code path exactly; it doubles as a control and reproduces what their \text
 \midrule
 \rowcolor{ours}
 \textbf{Ours} & answer-level \newline \emph{(their code)}
-& 94.11 & 94.03$^{\ast}$ & 91.15 & 94.72 \\
+& 94.11 & 94.05$^{\ast}$ & 91.15 & 94.72 \\
 \rowcolor{ours}
 \textbf{Ours} & question-level \newline \emph{(their paper)}
 & 87.80 & 92.70 & 79.40 & 88.30 \\
 & \emph{cost of the mismatch}
-& $-6.31$ & $-1.33$ & $-11.75$ & $-6.42$ \\
+& $-6.31$ & $-1.35$ & $-11.75$ & $-6.42$ \\
 \midrule
 \multicolumn{2}{l}{\textbf{our margin over HARP}, answer-level}
-& $+8.95$ & $+1.53$ & $+10.12$ & $+2.97$ \\
+& $+8.95$ & $+1.55$ & $+10.12$ & $+2.97$ \\
 \multicolumn{2}{l}{\textbf{our margin over HARP}, question-level}
 & $+10.26$ & $+3.95$ & $+11.67$ & $+8.40$ \\
 \midrule
@@ -200,8 +200,9 @@ their code path exactly; it doubles as a control and reproduces what their \text
 each method the two rows differ in \emph{nothing} but the split unit. Our rows are the best of six
 unsupervised feature conditions under an RF/LR readout, chosen the same way on both rows -- best of
 six on one and a pre-selected single on the other would bias the comparison.
-$^{\ast}$TriviaQA answer-level currently covers 3 of 6 conditions; the remaining three are running
-and can only raise it.}
+$^{\ast}$TriviaQA answer-level covers 5 of 6 conditions: joint\_tensor was OOM-killed at 200\,GB.
+Since the cell is a maximum it can only rise, and joint\_tensor ranks mid-pack on all three other
+datasets (3rd, 4th, 5th), so it would have to break its own pattern to matter.}
 \end{table}
 
 \noindent\textbf{Three things follow, and the first is the most important.}
@@ -259,9 +260,10 @@ diversity to generalise from; with six thousand, the detector is pushed toward a
 \section*{6. Caveats}
 
 \begin{itemize}
-\item \textbf{TriviaQA is partial.} Our answer-level cell there covers 3 of 6 conditions
-(core\_max, q\_velocity, q\_static). The remaining three are running; since the cell is a maximum,
-they can only raise it, so the $-1.33$ inflation figure is a lower bound.
+\item \textbf{TriviaQA is one condition short.} Our answer-level cell there covers 5 of 6:
+joint\_tensor was OOM-killed at 200\,GB (it entered the first fold already holding 93\,GB, against
+56\,GB for core\_concat and 81\,GB for triple\_concat). Since the cell is a maximum, the $-1.35$
+inflation figure is a lower bound.
 \item \textbf{Readouts differ.} Our conditions use a random forest or logistic regression on pooled
 multi-layer features; theirs is an MLP over per-token projections with a max aggregation. That is
 the method difference under test, but it is not an ablation of the split alone across both systems.
