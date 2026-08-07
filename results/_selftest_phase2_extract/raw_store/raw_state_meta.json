@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "self-test",
+  "seed": 0,
+  "git_commit": "selftest",
+  "decoding_config": {
+    "do_sample": true
+  },
+  "n_beams": 20,
+  "total_tokens": 85,
+  "layer_order": [
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "final_norm"
+  ],
+  "dtype": "bfloat16 (stored as uint16 bit-pattern)",
+  "shards": [
+    "raw_state_shard0.npz"
+  ],
+  "bases_file": "bases.npz"
+}

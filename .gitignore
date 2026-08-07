@@ -229,3 +229,12 @@ __marimo__/
 
 # Session 08 analysis figures/JSONs -- outputs, never tracked
 analysis_out/
+
+# LaTeX lives OUTSIDE the repo (../reports/). Nothing .tex/.pdf should be committed --
+# reports were moved out so editing them never requires a commit or a push.
+*.tex
+*.pdf
+*.aux
+*.log
+*.synctex.gz
+reports/

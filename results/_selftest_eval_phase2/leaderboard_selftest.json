@@ -1,0 +1,60 @@
+{
+  "entries": [
+    {
+      "dataset": "truthfulqa",
+      "condition": "core-max",
+      "pipeline_version": "session06-phase2",
+      "window": "canonical (Phase 1 Assert B)",
+      "protocol": "GroupKFold(5)",
+      "pooled_auroc": 0.7545054136089719,
+      "pooled_ci95": [
+        0.7299681331639882,
+        0.7802964911018206
+      ],
+      "within_prompt_auroc": 0.7075945132151221,
+      "within_prompt_ci95": [
+        0.6604392234621415,
+        0.7547344979858187
+      ]
+    },
+    {
+      "dataset": "truthfulqa",
+      "condition": "core-max",
+      "pipeline_version": "session06-phase2",
+      "window": "canonical (Phase 1 Assert B)",
+      "protocol": "HARP 5-seed",
+      "harp_rf_mean": 0.7627585674755214,
+      "harp_rf_std": 0.009991432524478538,
+      "harp_lr_mean": 0.7753864242342765,
+      "harp_lr_std": 0.01248199681835499
+    },
+    {
+      "dataset": "truthfulqa",
+      "condition": "q-velocity",
+      "pipeline_version": "session06-phase2",
+      "window": "canonical (Phase 1 Assert B)",
+      "protocol": "GroupKFold(5)",
+      "pooled_auroc": 0.7545054136089719,
+      "pooled_ci95": [
+        0.7299681331639882,
+        0.7802964911018206
+      ],
+      "within_prompt_auroc": 0.7075945132151221,
+      "within_prompt_ci95": [
+        0.6604392234621415,
+        0.7547344979858187
+      ]
+    },
+    {
+      "dataset": "truthfulqa",
+      "condition": "q-velocity",
+      "pipeline_version": "session06-phase2",
+      "window": "canonical (Phase 1 Assert B)",
+      "protocol": "HARP 5-seed",
+      "harp_rf_mean": 0.7627585674755214,
+      "harp_rf_std": 0.009991432524478538,
+      "harp_lr_mean": 0.7753864242342765,
+      "harp_lr_std": 0.01248199681835499
+    }
+  ]
+}

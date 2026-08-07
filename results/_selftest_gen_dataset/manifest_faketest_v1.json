@@ -1,0 +1,29 @@
+{
+  "dataset": "faketest",
+  "created": "2026-07-28T18:27:01Z",
+  "repo": "fake/path",
+  "subset": "fake_config",
+  "split": "validation",
+  "split_length": 17944,
+  "sampling": "full validation split",
+  "sampling_note": "HARP does not report per-dataset sample counts; we evaluate on the full standard validation split of each dataset.",
+  "n_prompts": 2,
+  "n_beams": 20,
+  "n_empty_completions": 0,
+  "sequences_path": "C:\\Users\\devan\\Hallucination-Detection\\hallucination-detection\\results\\_selftest_gen_dataset\\fake_sequences_v1.pt",
+  "ids_sha256": "a460f8d68d25c37f7775c0b4b62a6e6f654a0896e283133be0c129259355c69e",
+  "text_sha256": "f9e9dcabe7ff1322e6bd581393cc143d82c40461757866ff93bd93b5040b1c35",
+  "labels_sha256": "21a3f51bb80d05a835f3b1703eac83a8afdff278ccbfda4f823d148fdf14ce9b",
+  "decoding_config": {
+    "do_sample": true,
+    "transformers": "5.13.0"
+  },
+  "git_commit": "selftest",
+  "assert_d_determinism_pass": true,
+  "assert_d_results": [
+    {
+      "prompt_id": 0,
+      "match": true
+    }
+  ]
+}

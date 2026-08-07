@@ -1,0 +1,263 @@
+{
+  "best_condition": "triple_concat",
+  "entries": [
+    {
+      "dataset": "selftest",
+      "condition": "core_max",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "core_max",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7131869261864011,
+      "harp_rf_std": 0.0015179698565231936,
+      "harp_lr_mean": 0.6536444270301045,
+      "harp_lr_std": 0.0028228307859730073
+    },
+    {
+      "dataset": "selftest",
+      "condition": "q_velocity",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "q_velocity",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7131869261864011,
+      "harp_rf_std": 0.0015179698565231936,
+      "harp_lr_mean": 0.6536444270301045,
+      "harp_lr_std": 0.0028228307859730073
+    },
+    {
+      "dataset": "selftest",
+      "condition": "q_static",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "static",
+          5,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "q_static",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "static",
+          5,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7131869261864011,
+      "harp_rf_std": 0.0015179698565231936,
+      "harp_lr_mean": 0.6536444270301045,
+      "harp_lr_std": 0.0028228307859730073
+    },
+    {
+      "dataset": "selftest",
+      "condition": "core_concat",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ],
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "core_concat",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ],
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7131869261864011,
+      "harp_rf_std": 0.0015179698565231936,
+      "harp_lr_mean": 0.6536444270301045,
+      "harp_lr_std": 0.0028228307859730073
+    },
+    {
+      "dataset": "selftest",
+      "condition": "joint_tensor",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "joint",
+          8,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "joint_tensor",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "joint",
+          8,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7131869261864011,
+      "harp_rf_std": 0.0015179698565231936,
+      "harp_lr_mean": 0.6536444270301045,
+      "harp_lr_std": 0.0028228307859730073
+    },
+    {
+      "dataset": "selftest",
+      "condition": "triple_concat",
+      "protocol": "GroupKFold(5)",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ],
+        [
+          "static",
+          5,
+          64
+        ],
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "pooled_auroc": 0.7080033335648308,
+      "pooled_ci95": [
+        0.6749641952905667,
+        0.737642756395352
+      ],
+      "within_prompt_auroc": 0.6495230194939859,
+      "within_prompt_ci95": [
+        0.5882190682549496,
+        0.70973083872254
+      ]
+    },
+    {
+      "dataset": "selftest",
+      "condition": "triple_concat",
+      "protocol": "HARP 5-seed",
+      "rank": [
+        [
+          "core",
+          5,
+          64
+        ],
+        [
+          "static",
+          5,
+          64
+        ],
+        [
+          "velocity",
+          4,
+          64
+        ]
+      ],
+      "harp_rf_mean": 0.7228276380526195,
+      "harp_rf_std": 0.007158623968112454,
+      "harp_lr_mean": 0.619999837499666,
+      "harp_lr_std": 0.001622909263582828
+    }
+  ]
+}
