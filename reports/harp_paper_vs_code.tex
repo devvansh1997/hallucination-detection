@@ -29,8 +29,11 @@ measures what the mismatch is worth.
 \medskip
 \noindent\textbf{Summary.} The \emph{method} is implemented exactly as the paper describes --
 detector architecture, token aggregation, optimiser, and correctness thresholds all match. The one
-substantive difference is \textbf{how the data is split into training and test sets}, and on our data
-it is worth \textbf{3.8 to 13.3 AUROC points}.
+substantive difference is \textbf{how the data is split into training and test sets}. On our data
+that difference is worth \textbf{3.8 to 13.3 AUROC points} to HARP's detector -- and
+\textbf{1.3 to 11.8 points to ours}. It is a property of the protocol, not of their method: any
+evaluation that splits multi-sample generations over answers rather than questions inherits it,
+including ours when we run it that way.
 
 \section*{1. The audit}
 
@@ -172,38 +175,65 @@ their code path exactly; it doubles as a control and reproduces what their \text
 \textbf{HARP} & question-level \newline \emph{(their paper)}
 & 77.54 {\scriptsize$\pm$1.51} & 88.75 {\scriptsize$\pm$0.33}
 & 67.73 {\scriptsize$\pm$2.24} & 79.90 {\scriptsize$\pm$2.87} \\
+& \emph{cost of the mismatch}
+& $-7.62$ & $-3.75$ & $-13.30$ & $-11.85$ \\
 \midrule
-\rowcolor{pend}
+\rowcolor{ours}
 \textbf{Ours} & answer-level \newline \emph{(their code)}
-& \textit{pending} & \textit{pending} & \textit{pending} & \textit{pending} \\
+& 94.11 & 94.03$^{\ast}$ & 91.15 & 94.72 \\
 \rowcolor{ours}
 \textbf{Ours} & question-level \newline \emph{(their paper)}
-& \textbf{87.8} & \textbf{92.7} & \textbf{79.4} & \textbf{88.3} \\
+& 87.80 & 92.70 & 79.40 & 88.30 \\
+& \emph{cost of the mismatch}
+& $-6.31$ & $-1.33$ & $-11.75$ & $-6.42$ \\
 \midrule
-\multicolumn{2}{l}{\emph{cost of the mismatch} (HARP)}
-& $-7.62$ & $-3.75$ & $-13.30$ & $-11.85$ \\
+\multicolumn{2}{l}{\textbf{our margin over HARP}, answer-level}
+& $+8.95$ & $+1.53$ & $+10.12$ & $+2.97$ \\
+\multicolumn{2}{l}{\textbf{our margin over HARP}, question-level}
+& $+10.26$ & $+3.95$ & $+11.67$ & $+8.40$ \\
+\midrule
 \multicolumn{2}{l}{\emph{known questions}}
 & 666 & 6{,}316 & 360 & 302 \\
 \bottomrule
 \end{tabular}
-\caption{Pooled AUROC (\%) on Qwen2.5-7B, $\text{proj\_dim}=256$, 5 seeds. The two HARP rows differ
-in \emph{nothing} but the split unit. Our rows use our unsupervised feature conditions with an
-RF/LR readout; the best condition per dataset is shown.}
+\caption{Pooled AUROC (\%) on Qwen2.5-7B, 5 seeds; HARP at its fixed $\text{proj\_dim}=256$. Within
+each method the two rows differ in \emph{nothing} but the split unit. Our rows are the best of six
+unsupervised feature conditions under an RF/LR readout, chosen the same way on both rows -- best of
+six on one and a pre-selected single on the other would bias the comparison.
+$^{\ast}$TriviaQA answer-level currently covers 3 of 6 conditions; the remaining three are running
+and can only raise it.}
 \end{table}
 
-\noindent\textbf{Two things follow.}
+\noindent\textbf{Three things follow, and the first is the most important.}
 
 \medskip
-\noindent\textbf{(i) The mismatch is worth 3.8 to 13.3 points.} Every dataset drops substantially
-when the split is made over questions instead of answers, mean 9.1 points. Their README states that
-running the given command obtains the paper's experimental results, so the published numbers were
-produced under the answer-level split, not the protocol \S3.1 describes.
+\noindent\textbf{(i) This is a property of the protocol, not of their method. We are not immune.}
+Run our own conditions under the answer-level split and they inflate too, by 1.3 to 11.8 points.
+Any evaluation that splits multi-sample generations over answers rather than questions inherits
+this, whoever is doing it. We report our own inflated numbers here for exactly that reason: the
+finding would be worth little if we exempted ourselves from it.
 
 \medskip
-\noindent\textbf{(ii) Under the paper's own protocol, our unsupervised conditions beat their
-supervised detector on all four datasets} -- by 10.3, 4.0, 11.7 and 8.4 points respectively.
-Comparing our question-level numbers against their answer-level numbers, as the literature table
-currently does, we lose three of four. The protocol was the entire gap.
+\noindent\textbf{(ii) The mismatch is worth 3.8 to 13.3 points to HARP's detector}, mean 9.1.
+Their README states that running the given command obtains the paper's experimental results, so
+the published numbers were produced under the answer-level split, not the protocol \S3.1 describes.
+Our own conditions inflate less on all four datasets (6.31 vs 7.62, 1.33 vs 3.75, 11.75 vs 13.30,
+6.42 vs 11.85), but this is confounded with the readout difference and we report it as an
+observation rather than a claim about mechanism.
+
+\medskip
+\noindent\textbf{(iii) Our unsupervised conditions beat their supervised detector on all four
+datasets under \emph{both} protocols.} The earlier version of this claim held only under the
+paper's protocol; it now no longer depends on which protocol a reader accepts.
+
+\paragraph{A memorisation signature, from the data rather than from argument.} Under the
+question-level split, logistic regression beats the random forest on TriviaQA for
+\emph{every one} of our six conditions. Under the answer-level split the ranking inverts -- the
+forest wins there, and on every other dataset too (TriviaQA q\_static: 94.03 RF vs 93.02 LR
+answer-level, against 91.7 RF vs 92.7 LR question-level). A forest can carve out per-question
+regions in a way a linear model structurally cannot, so the classifier better at memorising is
+precisely the one that gains when the split lets it memorise. The ranking flip is what one would
+predict if the extra points come from recognising the question rather than judging the answer.
 
 \section*{5. A prediction we got wrong, and the corrected mechanism}
 
@@ -229,9 +259,9 @@ diversity to generalise from; with six thousand, the detector is pushed toward a
 \section*{6. Caveats}
 
 \begin{itemize}
-\item \textbf{The missing cell.} Until our method is also run under the answer-level split, the
-comparison in Table~3 varies method and protocol together in the top-vs-bottom direction. The
-HARP-vs-HARP contrast is fully controlled; the HARP-vs-ours contrast is not yet.
+\item \textbf{TriviaQA is partial.} Our answer-level cell there covers 3 of 6 conditions
+(core\_max, q\_velocity, q\_static). The remaining three are running; since the cell is a maximum,
+they can only raise it, so the $-1.33$ inflation figure is a lower bound.
 \item \textbf{Readouts differ.} Our conditions use a random forest or logistic regression on pooled
 multi-layer features; theirs is an MLP over per-token projections with a max aggregation. That is
 the method difference under test, but it is not an ablation of the split alone across both systems.
