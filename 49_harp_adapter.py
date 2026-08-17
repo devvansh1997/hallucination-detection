@@ -56,9 +56,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # our dataset name -> the name HARP's main.py expects (its DATASET_PATH / PROMPT_TEMPLATE keys)
 DS_OURS_TO_HARP = {"truthfulqa": "truthful_qa", "triviaqa": "trivia_qa",
                    "nq_open": "nq_open", "tydiqa_gp": "tydiqa"}
-# our model folder -> their MODEL_PATH key
+# our model folder -> their MODEL_PATH key.
+# Only llama-3.1-8b (BASE) is a true match for their "Llama-3.1-8B": main.py:20 resolves that key
+# to meta-llama/Llama-3.1-8B. An earlier version of this table mapped our INSTRUCT folder to that
+# key, which would have handed Instruct generations to a run labelled as their base-model
+# configuration -- a silent model mismatch in the one comparison the key exists to support.
+# Instruct is mapped to None: the adapter still writes its jsonl, but refuses to claim a HARP
+# model key for it, so --model_name must be chosen deliberately.
 MODEL_OURS_TO_HARP = {"qwen-2.5-7b-instruct": "Qwen2.5-7B-Instruct",
-                      "llama-3.1-8b-instruct": "Llama-3.1-8B"}
+                      "llama-3.1-8b": "Llama-3.1-8B",
+                      "llama-3.1-8b-instruct": None}
 BEAMS_PER_PROMPT = 10
 
 
@@ -254,9 +261,12 @@ def main():
     if a.self_test:
         self_test(); return
 
-    if a.model_folder not in MODEL_OURS_TO_HARP:
+    if MODEL_OURS_TO_HARP.get(a.model_folder) is None:
         print(f"WARNING: {a.model_folder} has no HARP MODEL_PATH mapping; files will still be "
               f"written but you must pick --model_name yourself when invoking their main.py.")
+        if a.model_folder == "llama-3.1-8b-instruct":
+            print("         This is deliberate: HARP's 'Llama-3.1-8B' key is the BASE model "
+                  "(main.py:20). Use --model_folder llama-3.1-8b for the like-for-like run.")
 
     if a.data_dir:
         data_dir = a.data_dir
@@ -291,7 +301,7 @@ def main():
     print(f"\nWrote: {summary_path}")
 
     if infos:
-        key = MODEL_OURS_TO_HARP.get(a.model_folder, "<MODEL_NAME>")
+        key = MODEL_OURS_TO_HARP.get(a.model_folder) or "<PICK_MODEL_NAME_YOURSELF>"
         print("\nNext, from inside HARP-Code/ -- copy ONE model's files in at a time, because")
         print("their ./dataset/ cache path is keyed on dataset only, not on model:")
         print(f"    cp {out_dir}/*.jsonl ./dataset/")

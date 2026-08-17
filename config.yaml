@@ -8,6 +8,13 @@
 #   - Known/unknown split: 75% known -> train, 25% known + all unknown -> valid
 
 models:
+  # HARP evaluates the BASE Llama, not the Instruct variant: main.py:20 points its
+  # "Llama-3.1-8B" entry at meta-llama/Llama-3.1-8B, and the paper (S5.1) says the same. This
+  # entry is the like-for-like one; llama-3.1-8b-instruct below is a different model that we
+  # keep because it is already generated and the base/instruct gap is itself informative.
+  # NOTE: gated repo -- the HF token must be valid on the compute node, not just the login node.
+  - id: "meta-llama/Llama-3.1-8B"
+    folder: "llama-3.1-8b"
   - id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
     folder: "llama-3.1-8b-instruct"
   - id: "Qwen/Qwen2.5-7B-Instruct"
