@@ -68,8 +68,24 @@ PYEOF
     ;;
 
   gen)
-    python 39_generate_dataset.py --dataset "$DS" --model_folder "$MODEL" || exit 1
-    python 40_validate_dataset.py --dataset "$DS" --model_folder "$MODEL" || exit 1
+    # 40_validate_dataset.py requires BOTH --manifest and --dataset; passing only --dataset
+    # exits 1 with "ERROR: --manifest and --dataset required". 39 prints the manifest path it
+    # wrote, and it is derived from config's output.data_dir, so build it the same way.
+    DATA_DIR=$(python -c "import yaml;print(yaml.safe_load(open('config.yaml'))['output']['data_dir'])") || exit 1
+    SEQ="${DATA_DIR}/${MODEL}/${DS}_sequences_v1.pt"
+    MANIFEST="${DATA_DIR}/${MODEL}/manifest_${DS}_v1.json"
+
+    # Idempotent: generation is the expensive half (hours of GPU) and is already pinned and
+    # determinism-checked once it lands. Re-running this stage after a downstream failure must
+    # not redo it -- resume at validation instead.
+    if [ -f "$SEQ" ] && [ -f "$MANIFEST" ]; then
+        echo "sequences + manifest already present -- skipping generation, validating only:"
+        echo "  $SEQ"
+    else
+        python 39_generate_dataset.py --dataset "$DS" --model_folder "$MODEL" || exit 1
+    fi
+    python 40_validate_dataset.py --manifest "$MANIFEST" --dataset "$DS" \
+        --model_folder "$MODEL" || exit 1
     ;;
 
   extract)
