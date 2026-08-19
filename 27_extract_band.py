@@ -81,9 +81,35 @@ def compute_bases(model, band_rank=BAND_RANK, rand_rank=RAND_RANK, seed=SEED):
 # A2 -- POST-NORM VERIFICATION
 # ==============================================================================
 
-def verify_post_norm_route(model, tokenizer, sample_texts, device):
+BF16_REL_EPS = 2.0 ** -8   # bfloat16 keeps 8 mantissa bits
+
+
+def verify_post_norm_route(model, tokenizer, sample_texts, device, min_tokens=128):
     """Returns (route, agreement_frac). route in {"hidden_states[-1]", "manual_norm"}.
-    Hard-fails (raises) if neither route reaches >= 99.9% top-1 agreement."""
+    Hard-fails (raises) if neither route reaches >= 99.9% top-1 agreement.
+
+    WHY AGREEMENT IS TIE-TOLERANT
+        The model is loaded in bf16, so out.logits is computed in bf16; this check recomputes
+        lm_head in fp32 (see lm_head_fp32 below). Where the top-2 candidates sit closer together
+        than bf16 can resolve, the two argmaxes can legitimately disagree, and that says nothing
+        about whether the hidden-state route is correct. Counting such positions as failures
+        measures numeric precision, not wiring.
+
+        This bit: LLaMA-3.1-8B *base* failed here at 12/13 = 0.9231 while the Instruct
+        checkpoints passed, purely because a base model puts flatter distributions on generic
+        probe text and so produces more near-ties. Only the last of 13 tokens has to wobble.
+
+        So a position counts as agreeing if the argmaxes match OR the two candidates are within
+        bf16 resolution of each other. A genuine wiring error -- pre-norm states treated as
+        post-norm -- produces disagreements with large logit gaps, which are still counted and
+        still fail. The manual_norm route scoring 0.6154 on the same input is exactly that, and
+        it must keep failing.
+
+    WHY min_tokens
+        The default sample used to be two short strings: THIRTEEN tokens. At n=13 a 0.999
+        threshold can only mean 13/13, so one near-tie fails the gate and the fraction carries
+        no statistical meaning. Callers should pass enough text to make 0.999 a real bar; below
+        min_tokens this warns rather than raising, so existing callers keep working."""
     inputs = tokenizer(sample_texts, return_tensors="pt", padding=True).to(device)
     with torch.no_grad():
         out = model(**inputs, output_hidden_states=True)
@@ -101,29 +127,48 @@ def verify_post_norm_route(model, tokenizer, sample_texts, device):
     def lm_head_fp32(h):
         return torch.nn.functional.linear(h, lm_head_w, lm_head_b)
 
+    n_tokens = int(mask.sum())
+    if n_tokens < min_tokens:
+        print(f"  [WARN] A2 verification sample is only {n_tokens} tokens (< {min_tokens}). A "
+              f"0.999 threshold needs far more than this to mean anything -- pass more text.")
+
     def agreement(logits_check):
+        """Returns (tie_tolerant_frac, strict_frac). See the docstring for why they differ."""
         pred_check = logits_check.argmax(dim=-1)
         pred_model = logits_model.argmax(dim=-1)
-        agree = (pred_check == pred_model) & mask
-        return float(agree.sum()) / float(mask.sum())
+        same = pred_check == pred_model
+        # Gap between the model's pick and ours, measured in OUR logits, relative to the scale
+        # of the row. Below bf16 resolution the two are tied and either may win.
+        g_model = logits_check.gather(-1, pred_model.unsqueeze(-1)).squeeze(-1)
+        g_check = logits_check.gather(-1, pred_check.unsqueeze(-1)).squeeze(-1)
+        scale = logits_check.abs().amax(dim=-1).clamp(min=1.0)
+        tied = (g_check - g_model).abs() <= (BF16_REL_EPS * scale)
+        return (float(((same | tied) & mask).sum()) / n_tokens,
+                float((same & mask).sum()) / n_tokens)
 
     logits_direct = lm_head_fp32(h_last)
-    frac_direct = agreement(logits_direct)
+    frac_direct, strict_direct = agreement(logits_direct)
     if frac_direct >= 0.999:
+        if strict_direct < 0.999:
+            print(f"  [A2] direct route verified at {frac_direct:.4f} tie-tolerant "
+                  f"({strict_direct:.4f} strict): {n_tokens - round(strict_direct * n_tokens)} "
+                  f"of {n_tokens} tokens differ only within bf16 resolution.")
         return "hidden_states[-1]", frac_direct
 
     h_normed = model.model.norm(h_last)
     logits_normed = lm_head_fp32(h_normed)
-    frac_normed = agreement(logits_normed)
+    frac_normed, strict_normed = agreement(logits_normed)
     if frac_normed >= 0.999:
         return "manual_norm", frac_normed
 
     raise RuntimeError(
-        f"A2 post-norm verification FAILED both routes: direct hidden_states[-1] "
-        f"agreement={frac_direct:.4f}, manual model.model.norm(...) agreement={frac_normed:.4f}. "
-        f"Neither reaches the required 0.999 top-1 threshold -- refusing to extract with an "
-        f"unverified projection basis. Inspect this transformers version's generate() hidden-state "
-        f"convention before proceeding.")
+        f"A2 post-norm verification FAILED both routes on {n_tokens} tokens:\n"
+        f"  direct hidden_states[-1] : {frac_direct:.4f} tie-tolerant / {strict_direct:.4f} strict\n"
+        f"  manual model.model.norm(): {frac_normed:.4f} tie-tolerant / {strict_normed:.4f} strict\n"
+        f"Neither reaches 0.999 tie-tolerant -- refusing to extract with an unverified projection "
+        f"basis. Disagreements here are NOT bf16 near-ties (those are already forgiven); the logit "
+        f"gaps are real, which points at a genuine hidden-state convention change. Inspect this "
+        f"transformers version's output_hidden_states convention before proceeding.")
 
 
 # ==============================================================================

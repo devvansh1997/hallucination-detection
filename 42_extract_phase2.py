@@ -66,6 +66,32 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 # hardcoded Llama constant (131072); Qwen2.5-7B-Instruct's real limit is 32768 -- 4x smaller, so
 # reusing Llama's value would have silently printed [PASS] on prompts that actually risked
 # truncation under Qwen's real context window.
+# Probe text for the A2 post-norm verification (27_extract_band.verify_post_norm_route).
+# This used to be two short strings -- 13 tokens total -- against a 0.999 agreement threshold,
+# which can only mean 13/13. One bf16 near-tie then fails the gate, and that is precisely what
+# killed LLaMA-3.1-8B base: a base model puts flatter distributions on generic probe text than an
+# Instruct checkpoint, so it produces more near-ties. Fixed, varied, model-independent sentences,
+# deliberately NOT drawn from the dataset being extracted, so the check stays reproducible and
+# cannot be influenced by the data under test.
+A2_PROBE_TEXTS = [
+    "The capital of France is",
+    "Water boils at a temperature of",
+    "In 1969, the first humans to walk on the surface of the moon were",
+    "The process by which plants convert sunlight into chemical energy is called",
+    "According to the theory of general relativity, gravity is best understood as",
+    "The largest organ in the human body is the",
+    "A prime number is defined as a natural number greater than one that",
+    "The Pacific Ocean is bordered to the east by the continents of",
+    "In computer science, a hash table provides average constant time lookup because",
+    "The primary cause of the seasons on Earth is the tilt of",
+    "Shakespeare wrote a play about a Danish prince whose name was",
+    "The chemical symbol for gold on the periodic table is",
+    "Photosynthesis takes place primarily within the chloroplasts, which contain",
+    "The Second World War in Europe came to an end in the year",
+    "A transformer neural network replaced recurrence with a mechanism known as",
+    "The distance light travels in one year is referred to as a",
+]
+
 # Keyed on model_folder. Only used to warn about prompt-side truncation, but the lookup was a
 # bare CONTEXT_LIMITS[model_folder], so a model missing from this dict died with a KeyError
 # seconds into extraction -- after Phase 1 had already spent GPU-hours. Add new models here.
@@ -146,7 +172,7 @@ def reforward_and_extract_raw_state(seq_path, model_folder, out_dir, batch_size=
     V_R, V_rand, spectrum = band_mod.compute_bases(model)
     V_R, V_rand = V_R.detach().cpu(), V_rand.detach().cpu()
     route, agreement = band_mod.verify_post_norm_route(
-        model, tokenizer, ["The capital of France is", "Water boils at a temperature of"], device)
+        model, tokenizer, A2_PROBE_TEXTS, device, min_tokens=128)
     apply_norm_manually = (route == "manual_norm")
     print(f"A2 post-norm route: {route}  agreement={agreement:.4f}")
 
