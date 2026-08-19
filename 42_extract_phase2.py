@@ -66,7 +66,12 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 # hardcoded Llama constant (131072); Qwen2.5-7B-Instruct's real limit is 32768 -- 4x smaller, so
 # reusing Llama's value would have silently printed [PASS] on prompts that actually risked
 # truncation under Qwen's real context window.
-CONTEXT_LIMITS = {"llama-3.1-8b-instruct": 131072, "qwen-2.5-7b-instruct": 32768}
+# Keyed on model_folder. Only used to warn about prompt-side truncation, but the lookup was a
+# bare CONTEXT_LIMITS[model_folder], so a model missing from this dict died with a KeyError
+# seconds into extraction -- after Phase 1 had already spent GPU-hours. Add new models here.
+CONTEXT_LIMITS = {"llama-3.1-8b": 131072,            # base, same 128k window as Instruct
+                  "llama-3.1-8b-instruct": 131072,
+                  "qwen-2.5-7b-instruct": 32768}
 
 
 def _load(name, filename):
@@ -292,6 +297,12 @@ def run_extraction(dataset, model_folder, data_dir, batch_size=16):
     print(f"Loading pinned Phase 1 sequences: {seq_path}")
     seq_data = torch.load(seq_path, weights_only=False)
 
+    if model_folder not in CONTEXT_LIMITS:
+        raise KeyError(
+            f"{model_folder!r} is not in CONTEXT_LIMITS (42_extract_phase2.py). This value only "
+            f"drives a truncation WARNING, but the lookup is required, so a missing entry kills "
+            f"extraction immediately -- after Phase 1 has already run. Add the model's context "
+            f"window to CONTEXT_LIMITS. Known: {sorted(CONTEXT_LIMITS)}")
     context_limit = CONTEXT_LIMITS[model_folder]
     stats_pre = compute_window_stats(seq_data)
     print(f"  [Pre-extraction] mean completion len={stats_pre['mean_completion_len']:.2f}  "
