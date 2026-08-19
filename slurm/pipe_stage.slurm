@@ -50,6 +50,26 @@ mkdir -p "$MPLCONFIGDIR"
 cd "$REPO" || exit 1
 echo "repo HEAD: $(git -C $REPO log --oneline -1 2>/dev/null)"
 
+DATA_DIR=$(python -c "import yaml;print(yaml.safe_load(open('config.yaml'))['output']['data_dir'])") || exit 1
+FORCE="${FORCE:-0}"
+
+# Every stage is resumable. Resubmitting the whole graph after ANY failure must redo only what
+# is actually missing -- otherwise a one-line bug late in the chain costs GPU-hours of finished
+# work all over again, which is exactly what happened twice on this model.
+#
+# The guard tests each stage's LAST artifact, not its first: a partially-written stage leaves
+# earlier files behind but never the final one, so "final artifact exists" means "this stage ran
+# to completion". FORCE=1 overrides everything, for when the inputs changed rather than failed.
+skip_if_done() {   # skip_if_done <artifact-path> <label>
+    [ "$FORCE" = "1" ] && return 1
+    if [ -e "$1" ]; then
+        echo "SKIP: $2 already complete -> $1"
+        echo "      (FORCE=1 to redo it anyway)"
+        return 0
+    fi
+    return 1
+}
+
 case "$STAGE" in
 
   prefetch)
@@ -71,16 +91,13 @@ PYEOF
     # 40_validate_dataset.py requires BOTH --manifest and --dataset; passing only --dataset
     # exits 1 with "ERROR: --manifest and --dataset required". 39 prints the manifest path it
     # wrote, and it is derived from config's output.data_dir, so build it the same way.
-    DATA_DIR=$(python -c "import yaml;print(yaml.safe_load(open('config.yaml'))['output']['data_dir'])") || exit 1
     SEQ="${DATA_DIR}/${MODEL}/${DS}_sequences_v1.pt"
     MANIFEST="${DATA_DIR}/${MODEL}/manifest_${DS}_v1.json"
-
-    # Idempotent: generation is the expensive half (hours of GPU) and is already pinned and
-    # determinism-checked once it lands. Re-running this stage after a downstream failure must
-    # not redo it -- resume at validation instead.
-    if [ -f "$SEQ" ] && [ -f "$MANIFEST" ]; then
-        echo "sequences + manifest already present -- skipping generation, validating only:"
-        echo "  $SEQ"
+    # Generation is the expensive half (GPU-hours) and is pinned + determinism-checked once
+    # written, so it is skipped independently of validation -- validation is seconds and worth
+    # re-running as a cheap integrity recheck.
+    if [ -f "$SEQ" ] && [ -f "$MANIFEST" ] && [ "$FORCE" != "1" ]; then
+        echo "SKIP: generation already complete -> $SEQ  (revalidating)"
     else
         python 39_generate_dataset.py --dataset "$DS" --model_folder "$MODEL" || exit 1
     fi
@@ -89,15 +106,26 @@ PYEOF
     ;;
 
   extract)
+    skip_if_done "${DATA_DIR}/${MODEL}/${DS}_phase2_features.npz" "extraction" && exit 0
     python 42_extract_phase2.py --dataset "$DS" --model_folder "$MODEL" || exit 1
     ;;
 
   eval)
+    # The two protocols are guarded separately: they write to different results dirs and either
+    # can fail on its own, so a rerun should not redo whichever one already landed.
     echo "--- question-level (the paper's protocol; our headline numbers) ---"
-    python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" --part a || exit 1
+    if skip_if_done "results/${MODEL}/session06_phase3_partA_${DS}.json" "eval (question-level)"; then
+        :
+    else
+        python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" --part a || exit 1
+    fi
     echo "--- answer-level (HARP's released protocol; the leakage arm) ---"
-    python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" --part a \
-        --split-unit answer --results-dir "$ANSWERSPLIT_DIR" || exit 1
+    if skip_if_done "${ANSWERSPLIT_DIR}/session06_phase3_partA_${DS}.json" "eval (answer-level)"; then
+        :
+    else
+        python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" --part a \
+            --split-unit answer --results-dir "$ANSWERSPLIT_DIR" || exit 1
+    fi
     ;;
 
   adapter)
@@ -115,6 +143,9 @@ PYEOF
         || { echo "ERROR: transformers is not 4.x -- venv not active"; exit 1; }
     HKEY=$(python -c "import importlib.util,sys;s=importlib.util.spec_from_file_location('a','49_harp_adapter.py');m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.MODEL_OURS_TO_HARP.get('${MODEL}') or '')")
     [ -n "$HKEY" ] || { echo "ERROR: ${MODEL} has no HARP model key -- see MODEL_OURS_TO_HARP"; exit 1; }
+    # The reeval JSON is the LAST thing this stage writes -- after their main.py and after our
+    # A/B rescoring -- so its presence means the whole stage finished, not just the HARP half.
+    skip_if_done "results/harp_reeval/${HKEY}_${HDS}_reeval.json" "harp + reeval" && exit 0
     bash harp_patch_devices.sh "$HARP" || exit 1
     mkdir -p "${HARP}/dataset"
     cp "${REPO}/harp_input/${MODEL}/[known]${HDS}.jsonl"   "${HARP}/dataset/" || exit 1
