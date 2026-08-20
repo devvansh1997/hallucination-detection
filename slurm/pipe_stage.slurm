@@ -46,6 +46,11 @@ module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
 conda activate hal-det
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
+# Compute-node egress measured at ~1.5 MB/s, and TriviaQA's rc.nocontext archive is 2.14GB.
+# fsspec's default timeout killed gen-triviaqa at 21% with FSTimeoutError. Both knobs matter:
+# the hub timeout covers huggingface_hub, HF_DATASETS_* covers the datasets fsspec path.
+export HF_HUB_DOWNLOAD_TIMEOUT=1800
+export HF_DATASETS_DOWNLOAD_TIMEOUT=1800
 mkdir -p "$MPLCONFIGDIR"
 cd "$REPO" || exit 1
 echo "repo HEAD: $(git -C $REPO log --oneline -1 2>/dev/null)"
@@ -84,6 +89,23 @@ mid = "${MODEL_ID}"
 AutoTokenizer.from_pretrained(mid)
 AutoModelForCausalLM.from_pretrained(mid, dtype="auto", device_map="cpu")
 print("  cached OK:", mid)
+PYEOF
+    # Datasets too. gen-triviaqa died with FSTimeoutError 21% into a 2.14GB download on a GPU
+    # node -- the model was prefetched but the DATA was not, so the expensive node sat there
+    # doing a slow HTTP transfer. Warming them here means generation only ever reads cache.
+    # Failures are tolerated per dataset: three of the four are already cached from earlier
+    # sessions, and a transient hub error should not block a model prefetch that succeeded.
+    echo "prefetching datasets ..."
+    python - <<'PYEOF'
+import yaml
+from datasets import load_dataset
+cfg = yaml.safe_load(open("config.yaml"))
+for d in cfg["datasets"]:
+    try:
+        ds = load_dataset(d["hf_path"], d["hf_config"], split="validation")
+        print("  cached OK: %-14s %d rows" % (d["name"], len(ds)))
+    except Exception as e:
+        print("  WARN %-14s %s: %s" % (d["name"], type(e).__name__, str(e)[:120]))
 PYEOF
     ;;
 
