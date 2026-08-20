@@ -57,6 +57,14 @@ for DS in $DATASETS; do
     J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=100G --time=06:00:00 \
                  --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS")
     # --- 4. evaluate, BOTH split protocols (CPU) -------------------------------------------
+    # SKIP_EVAL=1 leaves this stage out. Needed for TriviaQA: measured per-condition times on
+    # that dataset run 2h-7h EACH, so all six across both protocols is 40h+ and joint_tensor
+    # alone OOM'd at 200G. It does not fit one job and must be fanned out per condition.
+    if [ "${SKIP_EVAL:-0}" = "1" ]; then
+        GEN_IDS+=("$J_GEN")
+        printf "  %-11s gen->%s  extract->%s  eval->SKIPPED\n" "$DS" "$J_GEN" "$J_EXT"
+        continue
+    fi
     J_EVL=$(sub "-p $CPU_PART --mem=100G --time=24:00:00 \
                  --dependency=afterok:$J_EXT --job-name=evl-$DS" eval "$MODEL" "$DS")
     GEN_IDS+=("$J_GEN"); EVAL_IDS+=("$J_EVL")
@@ -71,7 +79,9 @@ echo "adapter (all ds)    -> $J_ADP"
 
 # --- 6. HARP: first dataset alone to build the model-keyed SVD, then the rest ---------------
 FIRST=$(echo $DATASETS | cut -d' ' -f1)
-REST=$(echo $DATASETS | cut -d' ' -f2-)
+# -s matters: without it, cut returns the WHOLE line when the delimiter is absent, so a
+# single-dataset run (DATASETS="triviaqa") set REST=triviaqa and submitted its harp stage twice.
+REST=$(echo $DATASETS | cut -s -d' ' -f2-)
 J_H1=$(sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
             --dependency=afterok:$J_ADP --job-name=harp-$FIRST" harp "$MODEL" "$FIRST")
 echo "harp $FIRST (svd)   -> $J_H1"
@@ -84,7 +94,13 @@ for DS in $REST; do
 done
 
 # --- 7. summary, after everything ------------------------------------------------------------
-DEP_ALL=$(IFS=:; echo "${EVAL_IDS[*]}:${HARP_IDS[*]}")
+# Built as an array rather than string-joined: with SKIP_EVAL=1 the EVAL_IDS array is empty, and
+# "${EVAL_IDS[*]}:${HARP_IDS[*]}" would emit a leading colon -- a malformed --dependency that
+# sbatch rejects.
+DEP_IDS=()
+[ ${#EVAL_IDS[@]} -gt 0 ] && DEP_IDS+=("${EVAL_IDS[@]}")
+DEP_IDS+=("${HARP_IDS[@]}")
+DEP_ALL=$(IFS=:; echo "${DEP_IDS[*]}")
 J_SUM=$(sub "-p $CPU_PART --mem=32G --time=01:00:00 \
              --dependency=afterany:$DEP_ALL --job-name=sum-$MODEL" summary "$MODEL")
 echo "summary             -> $J_SUM"
