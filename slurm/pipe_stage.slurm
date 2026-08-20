@@ -96,16 +96,33 @@ PYEOF
     # Failures are tolerated per dataset: three of the four are already cached from earlier
     # sessions, and a transient hub error should not block a model prefetch that succeeded.
     echo "prefetching datasets ..."
-    python - <<'PYEOF'
-import yaml
+    python - <<'PYEOF' || exit 1
+import sys, time, yaml
 from datasets import load_dataset
 cfg = yaml.safe_load(open("config.yaml"))
+ATTEMPTS = 3
+failed = []
 for d in cfg["datasets"]:
-    try:
-        ds = load_dataset(d["hf_path"], d["hf_config"], split="validation")
-        print("  cached OK: %-14s %d rows" % (d["name"], len(ds)))
-    except Exception as e:
-        print("  WARN %-14s %s: %s" % (d["name"], type(e).__name__, str(e)[:120]))
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            ds = load_dataset(d["hf_path"], d["hf_config"], split="validation")
+            print("  cached OK: %-14s %d rows" % (d["name"], len(ds)), flush=True)
+            break
+        except Exception as e:
+            print("  attempt %d/%d %-14s %s: %s" % (
+                attempt, ATTEMPTS, d["name"], type(e).__name__, str(e)[:110]), flush=True)
+            if attempt == ATTEMPTS:
+                failed.append(d["name"])
+            else:
+                time.sleep(30)
+if failed:
+    # HARD fail, deliberately. An earlier version only warned here, which meant a dataset that
+    # would not download passed prefetch silently and then killed the GPU generation job -- the
+    # exact failure this stage exists to prevent. TriviaQA's rc.nocontext archive is 2.14GB over
+    # a ~1.5 MB/s link, so retries matter, but a genuine failure must stop the graph here where
+    # it costs a CPU slot rather than downstream where it costs a GPU.
+    print("\nERROR: could not cache: %s" % ", ".join(failed))
+    sys.exit(1)
 PYEOF
     ;;
 
