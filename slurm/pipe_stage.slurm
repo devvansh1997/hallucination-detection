@@ -167,6 +167,40 @@ PYEOF
     fi
     ;;
 
+  eval_cond)
+    # ONE condition, ONE protocol. TriviaQA cannot use the 'eval' stage: measured per-condition
+    # times there are 2h39m-7h13m EACH, so six conditions across both protocols is 40h+, and
+    # joint_tensor alone OOM'd at 200G. Fanned out instead, one job per (condition, protocol),
+    # then merged with --combine-conditions.
+    #   $4 condition   $5 split unit (question|answer)
+    COND="${4:?condition required for eval_cond}"
+    UNIT="${5:?split unit required for eval_cond}"
+    if [ "$UNIT" = "answer" ]; then
+        RDIR="$ANSWERSPLIT_DIR"; EXTRA="--split-unit answer --results-dir $ANSWERSPLIT_DIR"
+    else
+        RDIR="results/${MODEL}"; EXTRA=""
+    fi
+    skip_if_done "${RDIR}/session06_phase3_partA_${DS}_${COND}.json" "eval ${DS}/${COND}/${UNIT}" \
+        && exit 0
+    python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" --part a \
+        --condition "$COND" $EXTRA || exit 1
+    ;;
+
+  combine)
+    # Merges the per-condition files a fan-out produced into the single partA json a sequential
+    # --part a run would have written. $5 selects which protocol's results dir to merge.
+    UNIT="${5:?split unit required for combine}"
+    if [ "$UNIT" = "answer" ]; then
+        EXTRA="--results-dir $ANSWERSPLIT_DIR"
+    else
+        EXTRA=""
+    fi
+    # --combine-conditions returns before 44's --part check (44_eval_phase3.py:1310 vs :1424),
+    # so it deliberately does NOT pass --part.
+    python 44_eval_phase3.py --dataset "$DS" --model_folder "$MODEL" \
+        --combine-conditions $EXTRA || exit 1
+    ;;
+
   adapter)
     # ONCE per model, never per dataset: 49 writes a single adapter_summary.json per model
     # (49_harp_adapter.py:287), so parallel per-dataset runs would overwrite each other.
