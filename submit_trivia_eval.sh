@@ -17,15 +17,19 @@
 # actually missing. That matters here more than anywhere else in the project -- a single
 # condition can be seven hours.
 #
-# PARTITION. Defaults to Stokes' CPU partition; override if the name differs:
+# PARTITION -- must be 'highmem', and this is not a preference. Measured on Stokes:
+#     highmem      ~3,094,585 MB/node  (~3 TB)   <- the only one that fits
+#     normal*      ~191,377 MB/node    (~187 GB) <- every request here exceeds it
+#     preemptable  ~191,377 MB/node              <- same ceiling, and preemptible
+# The smallest request below is 256G, so submitting to normal gets the job rejected outright at
+# submit time. Override only if the partition is renamed:
 #   CPU_PART=<name> bash submit_trivia_eval.sh llama-3.1-8b
-# Check with:  sinfo -o "%P %m %c" | sort -u
 
 set -euo pipefail
 
 MODEL="${1:?usage: submit_trivia_eval.sh <model_folder>   e.g. llama-3.1-8b}"
 DS="${DS:-triviaqa}"
-CPU_PART="${CPU_PART:-normal}"
+CPU_PART="${CPU_PART:-highmem}"
 STAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/pipe_stage.slurm"
 
 CONDITIONS="core_max q_velocity q_static core_concat joint_tensor triple_concat"

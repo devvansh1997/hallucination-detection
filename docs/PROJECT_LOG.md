@@ -169,9 +169,13 @@ then truncated HOSVD giving `G_n = U_L^T H_n U_F` in R^(r_L x r_F), flattened, R
 
 Things that cost real time. Written down so they cost it once.
 
-**Clusters.** Newton = GPU jobs. Stokes = high-RAM jobs (TriviaQA phase-3 evals at 200–256 GB).
-Shared filesystem — same paths, no copying — but **separate schedulers**, so `sbatch` from a
-terminal on the target cluster.
+**Clusters.** Newton = GPU jobs (`highgpu`, `normal`). Stokes = high-RAM jobs. Shared
+filesystem — same paths, no copying — but **separate schedulers**, so `sbatch` from a terminal
+on the target cluster.
+
+**Stokes partitions** (measured 2026-08-21): `highmem` ~3 TB/node — the only one that fits the
+TriviaQA evals; `normal*` ~187 GB/node; `preemptable` ~187 GB and preemptible. Note Newton
+*also* has a `normal`, with a different ceiling — same name, different machine.
 
 **Login nodes cap you at 100 processes** (`RLIMIT_NPROC`). numpy/OpenBLAS spawns 32 threads on
 import and dies, reported misleadingly as `KeyboardInterrupt`. Set
