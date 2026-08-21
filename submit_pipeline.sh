@@ -50,11 +50,19 @@ echo "prefetch            -> $J_PRE"
 
 GEN_IDS=(); EVAL_IDS=()
 for DS in $DATASETS; do
+    # TriviaQA is ~10x the others (9,960 prompts vs 440-3,610) and needs its own budget.
+    # A 6h limit killed gen-triviaqa at 77.6% after 5h58m -- and 39_generate_dataset.py has no
+    # checkpointing, so a timeout discards the whole run rather than resuming. Budget generously:
+    # an over-long limit costs nothing but queue priority, an under-long one costs GPU-hours.
+    case "$DS" in
+        triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00 ;;
+        *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00 ;;
+    esac
     # --- 2. generate + validate (GPU) ------------------------------------------------------
-    J_GEN=$(sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=06:00:00 \
+    J_GEN=$(sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=$GEN_TIME \
                  --dependency=afterok:$J_PRE --job-name=gen-$DS" gen "$MODEL" "$DS")
     # --- 3. extract features (GPU) ---------------------------------------------------------
-    J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=100G --time=06:00:00 \
+    J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=100G --time=$EXT_TIME \
                  --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS")
     # --- 4. evaluate, BOTH split protocols (CPU) -------------------------------------------
     # SKIP_EVAL=1 leaves this stage out. Needed for TriviaQA: measured per-condition times on
