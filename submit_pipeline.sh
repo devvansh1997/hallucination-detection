@@ -54,15 +54,19 @@ for DS in $DATASETS; do
     # A 6h limit killed gen-triviaqa at 77.6% after 5h58m -- and 39_generate_dataset.py has no
     # checkpointing, so a timeout discards the whole run rather than resuming. Budget generously:
     # an over-long limit costs nothing but queue priority, an under-long one costs GPU-hours.
+    # Extraction accumulates every beam's raw per-token states in RAM before sharding them out,
+    # so its footprint scales with beams x tokens x layers x D. ext-triviaqa was OOM-killed at
+    # 100G; the equivalent Qwen job (slurm/ext_qwen_triviaqa.slurm) asked for 180G, and LLaMA is
+    # 14% wider again (D=4096 vs 3584), so 256G.
     case "$DS" in
-        triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00 ;;
-        *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00 ;;
+        triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00; EXT_MEM=256G ;;
+        *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00; EXT_MEM=100G ;;
     esac
     # --- 2. generate + validate (GPU) ------------------------------------------------------
     J_GEN=$(sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=$GEN_TIME \
                  --dependency=afterok:$J_PRE --job-name=gen-$DS" gen "$MODEL" "$DS")
     # --- 3. extract features (GPU) ---------------------------------------------------------
-    J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=100G --time=$EXT_TIME \
+    J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=$EXT_MEM --time=$EXT_TIME \
                  --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS")
     # --- 4. evaluate, BOTH split protocols (CPU) -------------------------------------------
     # SKIP_EVAL=1 leaves this stage out. Needed for TriviaQA: measured per-condition times on
