@@ -4,7 +4,7 @@ Running record of findings, corrections and operational knowledge, kept current 
 progresses. Every claim here carries its evidence; anything retracted stays visible with the
 reason, because knowing what we got wrong is as load-bearing as knowing what we got right.
 
-Last updated: 2026-08-20.
+Last updated: 2026-08-21.
 
 ---
 
@@ -38,8 +38,23 @@ maximum, so the true value can only be higher and the +1.35 is a lower bound.
 88.1; TriviaQA 92.89 vs 92.8; NQ-Open 83.12 vs 84.0; TyDiQA-GP 91.87 vs 88.4. Mean signed
 deviation **+0.21** — no systematic bias, which is what licenses everything downstream.
 
-**HARP on LLaMA base** — runs completed on the cluster (jobs 763901–903); numbers not yet pulled
-into the reports.
+**HARP on LLaMA base**, their code on our data, proj_dim 256 — all four datasets:
+
+| | TruthfulQA | TriviaQA | NQ-Open | TyDiQA-GP |
+|---|---|---|---|---|
+| answer-level (their split) | 84.84 | 88.08 | 86.56 | 85.65 |
+| question-level (paper) | 79.58 | 82.54 | 80.56 | 74.99 |
+| **cost** | −5.26 | −5.54 | −6.00 | −10.66 |
+| published | 88.5 | 92.9 | 89.4 | 86.6 |
+| vs published | −3.66 | −4.82 | −2.84 | −0.95 |
+
+**Unexplained asymmetry.** Qwen reproduced at mean signed deviation **+0.21**; LLaMA base is
+**−3.07**, low on all four. Could be our generations, our labels, or the base checkpoint. It
+does not threaten the A/B (both arms share everything), but it weakens any claim about their
+*published* LLaMA numbers specifically, and a reviewer would ask.
+
+LLaMA known-question counts: TruthfulQA 506, TriviaQA 8,220, NQ-Open 1,267, TyDiQA-GP 404 —
+TriviaQA at 82.5% known vs Qwen's 63.4%.
 
 ---
 
