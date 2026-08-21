@@ -145,7 +145,40 @@ PYEOF
     ;;
 
   extract)
-    skip_if_done "${DATA_DIR}/${MODEL}/${DS}_phase2_features.npz" "extraction" && exit 0
+    # The guard here checks INTEGRITY, not existence. np.savez_compressed writes a zip; a job
+    # killed mid-write leaves a truncated but perfectly present file. That happened: an OOM left
+    # an 8.6GB stub of a ~35GB npz, a later run skipped extraction on it, and reported success in
+    # zero seconds. Presence is not completion for any artifact a dying process can half-write.
+    NPZ="${DATA_DIR}/${MODEL}/${DS}_phase2_features.npz"
+    SEQ="${DATA_DIR}/${MODEL}/${DS}_sequences_v1.pt"
+    if [ "$FORCE" != "1" ] && [ -f "$NPZ" ]; then
+        if python - "$NPZ" "$SEQ" <<'PYEOF'
+import sys, numpy as np, torch
+npz_path, seq_path = sys.argv[1], sys.argv[2]
+try:
+    n_expected = len(torch.load(seq_path, weights_only=False)["input_ids"])
+    d = np.load(npz_path)
+    need = ["static_max", "static_q95", "static_q05", "velocity_q95", "velocity_q05", "label"]
+    missing = [k for k in need if k not in d.files]
+    if missing:
+        print("  npz incomplete -- missing %s" % missing); sys.exit(1)
+    for k in need:
+        if d[k].shape[0] != n_expected:
+            print("  npz truncated -- %s has %d rows, expected %d"
+                  % (k, d[k].shape[0], n_expected)); sys.exit(1)
+    print("  npz verified: %d beams, all %d arrays full length" % (n_expected, len(need)))
+    sys.exit(0)
+except Exception as e:
+    print("  npz unreadable (%s: %s)" % (type(e).__name__, e)); sys.exit(1)
+PYEOF
+        then
+            echo "SKIP: extraction already complete -> $NPZ"
+            exit 0
+        fi
+        echo "Existing npz failed verification -- removing and re-extracting."
+        rm -f "$NPZ"
+        rm -rf "${DATA_DIR}/${MODEL}/${DS}_raw_state_store"
+    fi
     python 42_extract_phase2.py --dataset "$DS" --model_folder "$MODEL" || exit 1
     ;;
 
