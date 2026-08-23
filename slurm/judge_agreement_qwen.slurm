@@ -46,6 +46,11 @@ python -c "import transformers,sys;sys.exit(0 if transformers.__version__.starts
 
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
+# BLEURT-20 is ~2.3GB and has never been cached. Compute-node egress is ~1.5 MB/s, which is what
+# killed the TriviaQA dataset download at 21% with FSTimeoutError. Raise both knobs before the
+# first from_pretrained call.
+export HF_HUB_DOWNLOAD_TIMEOUT=1800
+export HF_DATASETS_DOWNLOAD_TIMEOUT=1800
 mkdir -p "$MPLCONFIGDIR"
 
 cd $REPO
