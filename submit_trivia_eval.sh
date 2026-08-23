@@ -30,6 +30,11 @@ set -euo pipefail
 MODEL="${1:?usage: submit_trivia_eval.sh <model_folder>   e.g. llama-3.1-8b}"
 DS="${DS:-triviaqa}"
 CPU_PART="${CPU_PART:-highmem}"
+# highmem rejected every submission with "Invalid account or account/partition combination",
+# so it is gated on a SLURM account. Set ACCOUNT=<name> to pass -A; find the valid pairs with
+#   sacctmgr show assoc where user=$USER format=Cluster,Account,Partition,QOS -P
+ACCT=""
+[ -n "${ACCOUNT:-}" ] && ACCT="-A ${ACCOUNT}"
 STAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/pipe_stage.slurm"
 
 CONDITIONS="core_max q_velocity q_static core_concat joint_tensor triple_concat"
@@ -46,11 +51,25 @@ mem_for() {
     esac
 }
 
+# Sets the global JOBID rather than echoing, deliberately. Called as J=$(sub ...) the function
+# runs in a subshell, so an `exit` on a rejected sbatch kills only that subshell and the caller
+# carries on -- which is exactly what happened: every one of 14 submissions was rejected with
+# "Invalid account or account/partition combination" and the script still printed "Queued 14
+# jobs". A driver must never report success for work it did not queue.
+JOBID=""
 sub() {
     local opts="$1"; shift
     local out
-    out=$(sbatch --parsable $opts "$STAGE" "$@")
-    echo "$out"
+    if ! out=$(sbatch --parsable $opts "$STAGE" "$@" 2>&1); then
+        echo "" >&2
+        echo "ERROR: sbatch rejected this job -- nothing further has been queued." >&2
+        printf '  %s\n' "$out" >&2
+        echo "  opts: $opts" >&2
+        echo "  args: $*" >&2
+        exit 1
+    fi
+    [ -n "$out" ] || { echo "ERROR: sbatch returned an empty job id" >&2; exit 1; }
+    JOBID="$out"
 }
 
 echo "model=$MODEL  dataset=$DS  partition=$CPU_PART  time=$TIME_LIMIT"
@@ -62,15 +81,15 @@ for UNIT in question answer; do
     IDS=()
     for C in $CONDITIONS; do
         M=$(mem_for "$C")
-        J=$(sub "-p $CPU_PART --mem=$M --time=$TIME_LIMIT \
-                 --job-name=ev-${UNIT:0:1}-$C" eval_cond "$MODEL" "$DS" "$C" "$UNIT")
-        IDS+=("$J")
-        printf "  %-14s %-5s -> %s\n" "$C" "$M" "$J"
+        sub "-p $CPU_PART $ACCT --mem=$M --time=$TIME_LIMIT \
+             --job-name=ev-${UNIT:0:1}-$C" eval_cond "$MODEL" "$DS" "$C" "$UNIT"
+        IDS+=("$JOBID")
+        printf "  %-14s %-5s -> %s\n" "$C" "$M" "$JOBID"
     done
     DEP=$(IFS=:; echo "${IDS[*]}")
-    JC=$(sub "-p $CPU_PART --mem=128G --time=04:00:00 --dependency=afterok:$DEP \
-              --job-name=cmb-${UNIT:0:1}" combine "$MODEL" "$DS" "-" "$UNIT")
-    echo "  combine -> $JC"
+    sub "-p $CPU_PART $ACCT --mem=128G --time=04:00:00 --dependency=afterok:$DEP \
+         --job-name=cmb-${UNIT:0:1}" combine "$MODEL" "$DS" "-" "$UNIT"
+    echo "  combine -> $JOBID"
     echo
 done
 

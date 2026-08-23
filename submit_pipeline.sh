@@ -33,11 +33,24 @@ REPO_SLURM="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/pipe_stage.slurm
 GPU_PART="${GPU_PART:-highgpu}"
 CPU_PART="${CPU_PART:-normal}"
 
-sub() {  # sub "<sbatch opts>" <stage> [dataset] ; echoes the new job id
+# Sets the global JOBID rather than echoing. Called as J=$(sub ...) the function runs in a
+# subshell, so an `exit` on a rejected sbatch kills only that subshell and the caller carries on.
+# That is not hypothetical: the sibling driver printed "Queued 14 jobs" after all 14 submissions
+# were rejected. A driver must never report success for work it did not queue.
+JOBID=""
+sub() {  # sub "<sbatch opts>" <stage> [dataset] ; sets JOBID
     local opts="$1"; shift
     local out
-    out=$(sbatch --parsable $opts "$REPO_SLURM" "$@")
-    echo "$out"
+    if ! out=$(sbatch --parsable $opts "$REPO_SLURM" "$@" 2>&1); then
+        echo "" >&2
+        echo "ERROR: sbatch rejected this job -- nothing further has been queued." >&2
+        printf '  %s\n' "$out" >&2
+        echo "  opts: $opts" >&2
+        echo "  args: $*" >&2
+        exit 1
+    fi
+    [ -n "$out" ] || { echo "ERROR: sbatch returned an empty job id" >&2; exit 1; }
+    JOBID="$out"
 }
 
 echo "model=$MODEL   datasets=$DATASETS"
@@ -45,7 +58,8 @@ echo "stage script: $REPO_SLURM"
 echo
 
 # --- 1. prefetch (serialised: gated ~16GB download, once) ----------------------------------
-J_PRE=$(sub "-p $CPU_PART --mem=32G --time=02:00:00 --job-name=pre-$MODEL" prefetch "$MODEL")
+sub "-p $CPU_PART --mem=32G --time=02:00:00 --job-name=pre-$MODEL" prefetch "$MODEL"
+J_PRE=$JOBID
 echo "prefetch            -> $J_PRE"
 
 GEN_IDS=(); EVAL_IDS=()
@@ -63,11 +77,13 @@ for DS in $DATASETS; do
         *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00; EXT_MEM=100G ;;
     esac
     # --- 2. generate + validate (GPU) ------------------------------------------------------
-    J_GEN=$(sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=$GEN_TIME \
-                 --dependency=afterok:$J_PRE --job-name=gen-$DS" gen "$MODEL" "$DS")
+    sub "-p $GPU_PART --gres=gpu:1 --mem=80G --time=$GEN_TIME \
+                 --dependency=afterok:$J_PRE --job-name=gen-$DS" gen "$MODEL" "$DS"
+    J_GEN=$JOBID
     # --- 3. extract features (GPU) ---------------------------------------------------------
-    J_EXT=$(sub "-p $GPU_PART --gres=gpu:1 --mem=$EXT_MEM --time=$EXT_TIME \
-                 --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS")
+    sub "-p $GPU_PART --gres=gpu:1 --mem=$EXT_MEM --time=$EXT_TIME \
+                 --dependency=afterok:$J_GEN --job-name=ext-$DS" extract "$MODEL" "$DS"
+    J_EXT=$JOBID
     # --- 4. evaluate, BOTH split protocols (CPU) -------------------------------------------
     # SKIP_EVAL=1 leaves this stage out. Needed for TriviaQA: measured per-condition times on
     # that dataset run 2h-7h EACH, so all six across both protocols is 40h+ and joint_tensor
@@ -77,16 +93,18 @@ for DS in $DATASETS; do
         printf "  %-11s gen->%s  extract->%s  eval->SKIPPED\n" "$DS" "$J_GEN" "$J_EXT"
         continue
     fi
-    J_EVL=$(sub "-p $CPU_PART --mem=100G --time=24:00:00 \
-                 --dependency=afterok:$J_EXT --job-name=evl-$DS" eval "$MODEL" "$DS")
+    sub "-p $CPU_PART --mem=100G --time=24:00:00 \
+                 --dependency=afterok:$J_EXT --job-name=evl-$DS" eval "$MODEL" "$DS"
+    J_EVL=$JOBID
     GEN_IDS+=("$J_GEN"); EVAL_IDS+=("$J_EVL")
     printf "  %-11s gen->%s  extract->%s  eval->%s\n" "$DS" "$J_GEN" "$J_EXT" "$J_EVL"
 done
 
 # --- 5. adapter, once, after ALL generations ------------------------------------------------
 DEP_GEN=$(IFS=:; echo "${GEN_IDS[*]}")
-J_ADP=$(sub "-p $CPU_PART --mem=32G --time=04:00:00 \
-             --dependency=afterok:$DEP_GEN --job-name=adp-$MODEL" adapter "$MODEL")
+sub "-p $CPU_PART --mem=32G --time=04:00:00 \
+             --dependency=afterok:$DEP_GEN --job-name=adp-$MODEL" adapter "$MODEL"
+J_ADP=$JOBID
 echo "adapter (all ds)    -> $J_ADP"
 
 # --- 6. HARP: first dataset alone to build the model-keyed SVD, then the rest ---------------
@@ -94,13 +112,15 @@ FIRST=$(echo $DATASETS | cut -d' ' -f1)
 # -s matters: without it, cut returns the WHOLE line when the delimiter is absent, so a
 # single-dataset run (DATASETS="triviaqa") set REST=triviaqa and submitted its harp stage twice.
 REST=$(echo $DATASETS | cut -s -d' ' -f2-)
-J_H1=$(sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
-            --dependency=afterok:$J_ADP --job-name=harp-$FIRST" harp "$MODEL" "$FIRST")
+sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
+            --dependency=afterok:$J_ADP --job-name=harp-$FIRST" harp "$MODEL" "$FIRST"
+J_H1=$JOBID
 echo "harp $FIRST (svd)   -> $J_H1"
 HARP_IDS=("$J_H1")
 for DS in $REST; do
-    J_H=$(sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
-               --dependency=afterok:$J_H1 --job-name=harp-$DS" harp "$MODEL" "$DS")
+    sub "-p $GPU_PART --gres=gpu:1 --mem=200G --time=12:00:00 \
+               --dependency=afterok:$J_H1 --job-name=harp-$DS" harp "$MODEL" "$DS"
+    J_H=$JOBID
     HARP_IDS+=("$J_H")
     echo "harp $DS           -> $J_H"
 done
@@ -113,8 +133,9 @@ DEP_IDS=()
 [ ${#EVAL_IDS[@]} -gt 0 ] && DEP_IDS+=("${EVAL_IDS[@]}")
 DEP_IDS+=("${HARP_IDS[@]}")
 DEP_ALL=$(IFS=:; echo "${DEP_IDS[*]}")
-J_SUM=$(sub "-p $CPU_PART --mem=32G --time=01:00:00 \
-             --dependency=afterany:$DEP_ALL --job-name=sum-$MODEL" summary "$MODEL")
+sub "-p $CPU_PART --mem=32G --time=01:00:00 \
+             --dependency=afterany:$DEP_ALL --job-name=sum-$MODEL" summary "$MODEL"
+J_SUM=$JOBID
 echo "summary             -> $J_SUM"
 echo
 echo "Queued. Watch with:  squeue -u \$USER"
