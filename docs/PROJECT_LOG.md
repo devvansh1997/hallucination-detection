@@ -110,6 +110,35 @@ pooled number is mostly explaining 2.5.
 
 Qwen/NQ-Open, `core_max` + RF: pooled 0.875, within-prompt 0.745, same score vector.
 
+### 2.7 Our labels ARE HARP's labels (audit #1, closed)
+
+Ran HARP's own `DatasetJudge` -- their class, their thresholds, constructed as `main.py:133-137`
+does -- over our generations and compared label for label. Qwen2.5-7B, all four datasets,
+148,270 beams.
+
+| dataset | beam agreement | known-status agreement | ours / theirs known | flips |
+|---|---|---|---|---|
+| NQ-Open | 99.94% | 99.89% | 360 / 358 | 4 |
+| TriviaQA | 99.71% | 99.67% | 6,316 / 6,331 | 33 |
+| TruthfulQA | 99.57% | 99.27% | 666 / 670 | 6 |
+| TyDiQA-GP | 99.27% | 99.77% | 302 / 301 | 1 |
+
+**44 of 14,827 questions (0.30%) change known/unknown status.**
+
+This was the load-bearing uncertainty. It decides between two claims:
+
+- *internal* -- "changing only the split unit costs 3.8-13.3 points" -- held regardless, since
+  both arms share whatever labels we have.
+- *external* -- "HARP's honest TyDiQA number is 79.9, not the published 88.4" -- needed our
+  partition to be the one their judge produces. **It is.** The claim stands as written.
+
+The judge is a function of (generated text, reference set), not of the model that produced the
+text, so agreement across 148,270 Qwen beams is strong evidence the implementation matches for
+LLaMA's generations too. Not separately verified there.
+
+**It does NOT explain the LLaMA -3.07 asymmetry.** Labels were the leading suspect and are now
+ruled out on Qwen. That asymmetry remains open.
+
 ### 2.6 A memorisation signature
 
 Under the question-level split, LR beats RF on TriviaQA for **all six** conditions. Under the
