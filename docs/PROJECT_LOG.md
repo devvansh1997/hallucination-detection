@@ -10,7 +10,7 @@ Last updated: 2026-08-24.
 
 ## 1. Where things stand
 
-**Models.** `qwen-2.5-7b-instruct` (complete), `llama-3.1-8b` **base** (4 of 4 datasets; TriviaQA answer-level cell still to transcribe),
+**Models.** `qwen-2.5-7b-instruct` (complete), `llama-3.1-8b` **base** (4 of 4 datasets, both protocols, all six conditions — complete),
 `llama-3.1-8b-instruct` (legacy, kept — *not* the checkpoint HARP evaluates).
 
 **Datasets.** TruthfulQA (817), TriviaQA (9,960 after question_id dedup), NQ-Open (3,610),
@@ -27,7 +27,7 @@ used Instruct, so they were never a like-for-like comparison.
 | Qwen2.5-7B | NQ-Open | 96.9 | 360 | 79.40 | 91.15 | +11.75 |
 | Qwen2.5-7B | TyDiQA-GP | 59.1 | 302 | 88.30 | 94.72 | +6.42 |
 | LLaMA-3.1-8B base | TruthfulQA | 63.0 | 506 | 89.32 | 94.47 | +5.15 |
-| LLaMA-3.1-8B base | TriviaQA | 52.5 | 8,220 | 84.79 | *pending* | *pending* |
+| LLaMA-3.1-8B base | TriviaQA | 52.5 | 8,220 | 84.79 | 89.52 | +4.72 |
 | LLaMA-3.1-8B base | NQ-Open | 88.8 | 1,267 | 85.36 | 91.96 | +6.60 |
 | LLaMA-3.1-8B base | TyDiQA-GP | 48.9 | 404 | 83.23 | 91.00 | +7.77 |
 
@@ -151,10 +151,21 @@ leakage cost* and has already been retracted as non-replicating (§3). This is a
 (our margin, not their inflation) and one data point. It is recorded as an observation to check
 against the answer-level cell when it lands, not as a mechanism.
 
-**Readout, question-level.** LR beats RF on 5 of 6 conditions (core_max +0.35, q_static +0.25,
-core_concat +0.65, joint_tensor +0.91, triple_concat +0.48), `q_velocity` the exception at −0.19.
-On Qwen it was 6 of 6. The memorisation argument rests on the RF/LR ranking *flipping* between
-protocols, so it stays untestable on LLaMA until the answer-level cell is transcribed.
+**Answer-level landed 2026-08-24: `q_static` 89.52 ±0.04, cost −4.72, margin +1.44.** TriviaQA is
+now our weakest cell on *both* protocols (+2.25 question-level, +1.44 answer-level, against +4.80 to
++9.74 and +5.35 to +9.63 elsewhere), which strengthens the observation above rather than resolving it.
+
+**The RF/LR flip replicates, and more sharply than on Qwen.** Question-level, LR wins 5 of 6
+(core_max +0.35, q_static +0.25, core_concat +0.65, joint_tensor +0.91, triple_concat +0.48;
+`q_velocity` the exception at −0.19). Answer-level, RF wins **6 of 6** by **3.12–5.28** points. Under
+the paper's protocol the readouts are within a point of each other in either direction; under the
+released one the forest pulls ahead by three to five points on every condition. That is exactly what
+the memorisation account predicts, now on a second model and architecture.
+
+**Provenance note.** The two `session06_phase3_partA_triviaqa.json` files are distinguishable without
+metadata: the `grouped` block is bit-identical between them (5-fold CV does not depend on the split
+unit) while every `harp` condition gains +4.56 to +5.62. `n_train`/`n_valid` do **not** discriminate
+— both arms give 61,650/37,950, since each puts 25% of known rows plus all unknown rows in valid.
 
 ### 2.3 Under matched protocols we beat HARP on all four datasets
 
