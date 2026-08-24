@@ -224,6 +224,58 @@ data collected for another purpose, which is what makes it worth something.
 
 ---
 
+### 2.8 HalluGuard (ICLR 2026): the released code cannot run, and the score loses to token count
+
+Pilot 1 (job 774134) and pilot 2 (774273), TyDiQA-GP, Qwen2.5-7B-Instruct, our pinned generations,
+their `Score/halluguard_true.py` imported **unmodified**.
+
+**(a) The released path does not execute.** Their line 126 calls `torch.linalg.eigvalsh`, which has
+no half-precision kernel on either device — `NotImplementedError` for `Half` and for `BFloat16`,
+verified locally on CPU and observed on 200/200 beams on CUDA. Their only call site,
+`Beam Search/reward_model/ntk_reward.py:26`, loads `torch_dtype=torch.float16 if device == "cuda"`
+and then calls with `param_subset="last_block"` at line 72. That combination crashes on the first
+beam. The same call site passes `input_ids=prompt_ids[:1], generated_ids=prompt_ids[1:]` — the
+entire prompt treated as generated — so T is hundreds of tokens, needing hundreds of GB.
+
+**(b) Memory is linear in completion length, so coverage is length-selected.** Line 124 stacks the
+T per-token gradients into `[T, P]` while the list of T separate vectors is still alive, giving a
+peak of ~2·T·P·4 bytes above a 30.5 GB fp32 model. The allocator log pins P: single-gradient
+requests of 933,232,640 bytes ⇒ **0.93 GB per generated token**. Observed cutoff on an 80 GB H100
+is a hard **T ≤ 27** (`expandable_segments:True`; T ≤ ~20 without it). Coverage 81% at 400 beams.
+
+The selection turned out **benign on class balance**: hallucination rate 57.7% among scored vs
+57.9% among failed, a 0.2 point shift. That was not guaranteed and is the reason the numbers below
+are readable at all.
+
+**(c) `det(K)` is inert — and my predicted mechanism for why was wrong.** I expected collinear
+consecutive-token gradients to push eigenvalues onto the `1e-8` clamp so `det_k = exp(log_det)`
+would underflow to 0. It does not: **median det(K) = 0.407, median κ = 3.92**. The gradients are
+nearly *orthogonal*, not collinear — which is what unit vectors in 233M dimensions do. The
+conclusion survives the wrong reasoning: `det(K)` contributes **0.0821** of the score's spread, and
+`log(σ_max) − 2log(κ)` alone scores **0.3360** against the full score's **0.3370**. The determinant
+moves the AUROC by 0.001. Note the gradients are still needed for κ; it is `det(K)` specifically,
+the term the method is named for, that does no work.
+
+**(d) Completion length beats the method.** Oriented as a hallucination detector, the score reaches
+**0.6630** pooled; **raw token count reaches 0.6763**. ρ(score, T) = **−0.692**, so the score is
+substantially an inverse length proxy. Restricting to T ≤ 27 truncates the range of T, which
+*suppresses* length's AUROC — so the full population can only favour length more.
+
+Raw (unflipped) AUROC is 0.3370 pooled, 0.2043 within-prompt: their score runs opposite to our
+convention (1 = hallucinated). Reported both ways rather than flipped silently; which direction
+their paper intends still needs checking against the paper.
+
+| | pooled | within-prompt |
+|---|---|---|
+| HalluGuard, as computed | 0.3370 | 0.2043 |
+| HalluGuard, oriented as a detector | 0.6630 | 0.7957 |
+| completion length alone | **0.6763** | *pending* |
+
+**Open:** the within-prompt length baseline was the gap — 0.7957 is where the method looks
+strongest and we had nothing to compare it to. Added in `e64595c`, not yet measured on real data.
+
+---
+
 ## 3. Retracted / corrected
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
