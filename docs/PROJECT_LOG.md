@@ -346,6 +346,53 @@ the finding, and the proxy is cheap enough to measure alongside it.
 
 ---
 
+### 2.10 Running HalluGuard's default path on our data: no score has a consistent direction
+
+`54_halluguard_proxy.py`, four of eight cells landed (Qwen 3 datasets, LLaMA-3.1-8B base TriviaQA).
+Each cell shows raw AUROC / sign-flipped, per beam except B which is per question.
+
+| model | dataset | beam HR | A as-coded | C norm alone | D length alone | B as-published (Q) |
+|---|---|---|---|---|---|---|
+| llama | triviaqa | 52.5% | 0.410 / 0.590 | 0.387 / 0.613 | 0.665 / 0.335 | 0.394 / 0.606 |
+| qwen | nq_open | 96.9% | 0.526 / 0.474 | 0.263 / 0.737 | 0.768 / 0.232 | 0.302 / 0.698 |
+| qwen | truthfulqa | 43.3% | 0.519 / 0.481 | 0.616 / 0.384 | 0.358 / 0.642 | 0.559 / 0.441 |
+| qwen | tydiqa_gp | 59.1% | 0.523 / 0.477 | 0.291 / 0.709 | 0.634 / 0.366 | 0.357 / 0.643 |
+
+**The finding is not "it scores X". It is that no score here has a fixed sign.** For every one of
+A, B, C and D there is no single orientation clearing 0.5 in all four cells — the direction reverses
+between datasets and between models. A detector whose sign depends on which dataset you point it at
+is not a detector, whatever its magnitude.
+
+**A is at chance on Qwen (0.519–0.526 across three datasets with hallucination rates of 43%, 59% and
+97%) but not on LLaMA (0.410).** So it is not uniformly inert; it is inconsistent.
+
+**The amplification term destroys the signal the norm carries.** On Qwen, C alone sits at 0.263,
+0.616 and 0.291 — well off chance — while A sits at 0.52 in all three. Multiplying by
+`mean_t exp(‖Δh‖)` washes a strong (if inconsistently-signed) quantity into noise. On LLaMA it does
+not: |A − C| = 0.023 there against 0.10–0.26 on Qwen.
+
+**κ is an artifact of the ridge, and more so on LLaMA.** With N=10 generations in D≈3.5–4k dims the
+covariance has rank ≤ 9, so λ_min is the ridge and κ = λ_max/α. λ_min sits within 5% of the ridge on
+**94.0%** of LLaMA prompts and 31–64% of Qwen's. The "spectral instability penalty" is therefore
+measuring λ_max times a constant, not conditioning. κ ranges 85–194 on LLaMA against 830–7586 on
+Qwen — a 40× difference in the spread of the 10-generation cloud between the two models.
+
+**What this does NOT establish.** Every cell was computed on OUR generations, which come from
+sampled beam search (`config.yaml`: `num_beams: 10`, `do_sample: true`, top-p 0.99, top-k 5) while
+their Appendix C.1 uses plain nucleus sampling (top-p 0.95, top-k 10, K=10). Ten beams from one beam
+search are far more alike than ten independent samples, and this method measures precisely the
+spread of those ten. The cloud may be degenerate before the method sees it. Temperature 0.5 does
+match.
+
+One thing the confound does not obviously explain is the **sign reversal**: attenuation from
+degenerate inputs should pull scores toward 0.5, not flip them between +0.26 and +0.62. But C's
+values are far enough from chance that this is worth testing rather than asserting.
+
+**Open:** the nucleus-sampling rerun on TyDiQA (440 prompts, ~40 min) closes the one objection that
+is ours. Remaining cells: Qwen TriviaQA, LLaMA on tydiqa/truthfulqa/nq_open.
+
+---
+
 ## 3. Retracted / corrected
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
