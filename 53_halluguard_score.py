@@ -201,6 +201,83 @@ def evaluate_on_test_rows(scores, labels, prompt_ids, seeds, split_fns):
     return out
 
 
+def selection_report(T, labels, finite):
+    """Are the beams we FAILED to score a random sample of the beams we scored?
+
+    They are not, and this measures it. An OOM is caused by a long completion (their line 124
+    allocates 2 x T x P), so failure is a deterministic function of length. If length also carries
+    label information -- and on short-answer QA it does -- then an AUROC over the survivors is
+    computed on a different population than the one we set out to evaluate, and is not comparable
+    to HARP's or ours no matter how the split is drawn. Report it rather than average over it."""
+    T = np.asarray(T, dtype=float)
+    y = np.asarray(labels, dtype=int)
+    f = np.asarray(finite, dtype=bool)
+    kept, lost = f.sum(), (~f).sum()
+    r = {"n_scored": int(kept), "n_failed": int(lost),
+         "mean_T_scored": float(T[f].mean()) if kept else None,
+         "mean_T_failed": float(T[~f].mean()) if lost else None,
+         "max_T_scored": float(T[f].max()) if kept else None,
+         "min_T_failed": float(T[~f].min()) if lost else None,
+         "halluc_rate_scored_pct": round(100.0 * float(y[f].mean()), 3) if kept else None,
+         "halluc_rate_failed_pct": round(100.0 * float(y[~f].mean()), 3) if lost else None}
+    if kept and lost:
+        r["halluc_rate_shift_pts"] = round(r["halluc_rate_failed_pct"]
+                                           - r["halluc_rate_scored_pct"], 3)
+        # A clean length threshold means failure is length, not chance.
+        r["length_separates_failure"] = bool(T[~f].min() > T[f].mean())
+    return r
+
+
+def decompose_score(score, det_k, sigma_max, kappa, T, labels):
+    """Which term of  score = det(K) + log(sigma_max) - 2 log(kappa)  actually does the ranking?
+
+    K = G G^T with the rows of G unit-normalised (their line 122), so trace(K) = T and, by AM-GM,
+    det(K) <= 1 with equality only at K = I. Consecutive-token gradients are highly collinear, so K
+    is badly rank-deficient, many eigenvalues hit the 1e-8 clamp at line 127, and log_det goes to
+    roughly -18.4 per clamped direction. det_k = exp(that) underflows to 0.
+
+    If that is what happens, the determinant -- the quantity the method is named for, and the only
+    reason for T autograd passes at ~0.93GB each -- contributes nothing to the ordering, and the
+    score is log(sigma_max) - 2 log(kappa): a hidden-state statistic plus a term driven by the
+    clamp. std(det_k)/std(score) is the number that settles it.
+
+    We also score completion length on its own. If plain token count matches the method's AUROC,
+    that is the baseline any reviewer will reach for first."""
+    s = np.asarray(score, dtype=float)
+    f = np.isfinite(s)
+    d, sm, k = (np.asarray(x, dtype=float) for x in (det_k, sigma_max, kappa))
+    t = np.asarray(T, dtype=float)
+    y = np.asarray(labels, dtype=int)
+    r = {"n": int(f.sum())}
+    if f.sum() < 2:
+        return r
+    sd_s = float(np.std(s[f]))
+    r["std_score"] = sd_s
+    r["std_det_k"] = float(np.std(d[f]))
+    r["det_k_share_of_spread"] = float(np.std(d[f]) / sd_s) if sd_s > 0 else None
+    r["frac_det_k_below_1e-6"] = float((np.abs(d[f]) < 1e-6).mean())
+    r["median_det_k"] = float(np.median(d[f]))
+    r["median_kappa"] = float(np.median(k[f]))
+    r["median_sigma_max"] = float(np.median(sm[f]))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        reduced = np.log(sm[f] + 1e-8) - 2.0 * np.log(k[f] + 1e-8)
+    g = np.isfinite(reduced)
+    if g.sum() > 2:
+        # Spearman without scipy: Pearson on ranks.
+        def _rank(a):
+            o = np.argsort(np.argsort(a))
+            return o.astype(float)
+        r["spearman_score_vs_reduced"] = float(np.corrcoef(_rank(s[f][g]), _rank(reduced[g]))[0, 1])
+        r["auroc_reduced_only"] = pooled_auroc(reduced[g], y[f][g])
+    r["spearman_score_vs_T"] = float(np.corrcoef(
+        np.argsort(np.argsort(s[f])).astype(float),
+        np.argsort(np.argsort(t[f])).astype(float))[0, 1])
+    r["auroc_length_alone"] = pooled_auroc(t[f], y[f])
+    r["auroc_length_alone_flipped"] = (None if r["auroc_length_alone"] is None
+                                       else 1.0 - r["auroc_length_alone"])
+    return r
+
+
 def summarise_finiteness(scores):
     """Non-finite scores are a real possibility under fp16 gradients. Report them; never drop
     them silently, because a method that fails on 10% of beams is not comparable to one that
@@ -241,12 +318,25 @@ def score_dataset(dataset, model_folder, data_dir, hg, device, dtype, limit=None
                                                   trust_remote_code=True).to(device)
     model.eval()
 
-    scores, details, short = [], [], 0
+    # Every component is kept, for every beam, INCLUDING the ones that fail. The pilot showed why:
+    # failures are not random -- an OOM is triggered by a long completion, so dropping them and
+    # scoring the survivors silently restricts the evaluation to short answers. T is known whether
+    # or not the score is, so the selection can be measured instead of assumed.
+    scores = np.full(n, np.nan)
+    det_k = np.full(n, np.nan)
+    log_det = np.full(n, np.nan)
+    sigma_max = np.full(n, np.nan)
+    kappa = np.full(n, np.nan)
+    T_all = np.zeros(n, dtype=int)
+    fail_kind = np.array([""] * n, dtype=object)
+    short = 0
+    n_reported = 0
     t0 = time.time()
     for i in range(n):
         ids = input_ids[i]
         pl = int(prompt_lens[i])
         p_ids, g_ids = ids[:pl], ids[pl:]
+        T_all[i] = len(g_ids)
         # Their _compute_sigma_max_lipschitz needs >=3 generated tokens and otherwise returns a
         # degenerate sigma_max of 1.0. Count those rather than exclude them -- excluding would
         # quietly restrict the comparison to longer answers.
@@ -255,35 +345,68 @@ def score_dataset(dataset, model_folder, data_dir, hg, device, dtype, limit=None
         try:
             r = hg.compute_halluguard_score(model, p_ids, g_ids, layer_idx=layer_idx,
                                             param_subset=param_subset)
-            scores.append(r["score"])
-            details.append((r["det_k"], r["sigma_max"], r["kappa"], r["T"]))
+            scores[i] = r["score"]
+            det_k[i] = r["det_k"]
+            log_det[i] = r["log_det"]
+            sigma_max[i] = r["sigma_max"]
+            kappa[i] = r["kappa"]
         except Exception as e:
-            scores.append(float("nan"))
-            details.append((float("nan"),) * 4)
-            if len([d for d in details if not np.isfinite(d[0])]) <= 3:
-                print("    beam %d failed: %s: %s" % (i, type(e).__name__, str(e)[:120]), flush=True)
+            name = type(e).__name__
+            fail_kind[i] = name
+            if name == "OutOfMemoryError":
+                # Their line 124 stacks the T per-token gradients into a [T, P] tensor while the
+                # list of T separate vectors is still alive, so peak is 2 x T x P. Release both
+                # before the next beam, or one long completion poisons every beam after it.
+                torch.cuda.empty_cache()
+            if n_reported < 3:
+                print("    beam %d (T=%d) failed: %s: %s"
+                      % (i, len(g_ids), name, str(e)[:110]), flush=True)
+                n_reported += 1
         if (i + 1) % log_every == 0:
             el = time.time() - t0
-            print("    %s %d/%d  (%.0fs, eta %.0fs)" % (dataset, i + 1, n, el,
-                                                        el / (i + 1) * (n - i - 1)), flush=True)
+            n_ok = int(np.isfinite(scores[:i + 1]).sum())
+            print("    %s %d/%d  ok=%d  (%.0fs, eta %.0fs)" % (dataset, i + 1, n, n_ok, el,
+                                                               el / (i + 1) * (n - i - 1)), flush=True)
 
-    scores = np.asarray(scores, dtype=float)
     y, pid = labels[:n], prompt_ids[:n]
     fin = np.isfinite(scores)
+    kinds = {}
+    for kk in fail_kind:
+        if kk:
+            kinds[kk] = kinds.get(kk, 0) + 1
     out = {
         "dataset": dataset, "model_folder": model_folder, "model_id": model_id,
         "dtype": dtype, "layer_idx": layer_idx, "param_subset": param_subset,
         "n_beams_scored": int(n), "n_short_completions_lt3_tokens": int(short),
         "finiteness": summarise_finiteness(scores),
+        "failure_kinds": kinds,
         "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
+        "selection": selection_report(T_all, y, fin),
+        "decomposition": decompose_score(scores, det_k, sigma_max, kappa, T_all, y),
     }
+    a = pooled_auroc(scores[fin], y[fin])
+    w = within_prompt_auroc(scores[fin], y[fin], pid[fin])
+    out["all_beams"] = {
+        "pooled_auroc": a,
+        "pooled_auroc_sign_flipped": None if a is None else 1.0 - a,
+        "within_prompt": w,
+        "within_prompt_sign_flipped": (None if w["within_prompt_auroc"] is None
+                                       else 1.0 - w["within_prompt_auroc"]),
+    }
+    if a is not None and a < 0.5:
+        out["all_beams"]["orientation_note"] = (
+            "AUROC below 0.5: their score is HIGHER for truthful answers than hallucinated ones "
+            "under our label convention (1 = hallucinated). Report the orientation explicitly "
+            "rather than flipping silently -- a flipped score is a different detector, and which "
+            "direction their paper intends has to be checked against the paper, not assumed.")
     if fin.sum() < n:
-        out["note"] = ("AUROC computed over finite scores only; %d of %d beams excluded. This is "
-                       "reported rather than hidden -- a method failing on some beams is not "
-                       "directly comparable to one that does not." % (n - int(fin.sum()), n))
-    out["all_beams"] = {"pooled_auroc": pooled_auroc(scores[fin], y[fin]),
-                        "within_prompt": within_prompt_auroc(scores[fin], y[fin], pid[fin])}
-    return out, scores, y, pid
+        out["note"] = ("%d of %d beams have no score. These are NOT missing at random -- see "
+                       "'selection'. An AUROC over the survivors describes a different population "
+                       "than the one we set out to evaluate." % (n - int(fin.sum()), n))
+    comp = {"score": scores, "label": y, "prompt_id": pid, "T": T_all, "det_k": det_k,
+            "log_det": log_det, "sigma_max": sigma_max, "kappa": kappa,
+            "fail_kind": np.array([str(x) for x in fail_kind])}
+    return out, comp
 
 
 def load_split_fns():
@@ -449,6 +572,49 @@ def self_test():
     except Exception as e:
         print("  [SKIP] split-restricted evaluation (%s: %s)" % (type(e).__name__, e))
 
+    # ---- selection_report ------------------------------------------------------------------
+    # The pilot's actual failure mode: long completions OOM, and length carries label info.
+    T_s = np.array([5, 6, 7, 8, 40, 45, 50, 55])
+    y_s = np.array([0, 0, 0, 0, 1, 1, 1, 1])          # long answers are the hallucinated ones
+    fin_s = np.array([True] * 4 + [False] * 4)         # ... and exactly those failed
+    sr = selection_report(T_s, y_s, fin_s)
+    assert sr["halluc_rate_scored_pct"] == 0.0 and sr["halluc_rate_failed_pct"] == 100.0
+    assert sr["halluc_rate_shift_pts"] == 100.0
+    assert sr["length_separates_failure"] is True
+    sr2 = selection_report(T_s, y_s, np.array([True] * 8))
+    assert sr2["n_failed"] == 0 and sr2["halluc_rate_failed_pct"] is None
+    print("  [PASS] selection_report: catches length-driven failure and the label shift it causes")
+
+    # ---- decompose_score -------------------------------------------------------------------
+    # det(K) underflowed to 0 for every beam -> it can explain none of the ranking, and the score
+    # is exactly log(sigma_max) - 2log(kappa). This is the pilot's suspected regime.
+    T_d = np.arange(4, 24)
+    sm_d = np.exp(rng.normal(size=20))
+    ka_d = np.full(20, 5e7)
+    dk_d = np.zeros(20)
+    sc_d = dk_d + np.log(sm_d + 1e-8) - 2.0 * np.log(ka_d + 1e-8)
+    y_d = (rng.uniform(size=20) < 0.5).astype(int)
+    dd = decompose_score(sc_d, dk_d, sm_d, ka_d, T_d, y_d)
+    assert dd["det_k_share_of_spread"] == 0.0, dd["det_k_share_of_spread"]
+    assert dd["frac_det_k_below_1e-6"] == 1.0
+    assert abs(dd["spearman_score_vs_reduced"] - 1.0) < 1e-9, dd["spearman_score_vs_reduced"]
+    print("  [PASS] decompose_score: a vanished det(K) is reported as 0 share of the spread")
+
+    # Contrast: when det(K) genuinely drives the score, the share is near 1 and the reduced form
+    # no longer tracks it. Without this the test above would pass on a function that always says 0.
+    dk_e = rng.normal(size=20) * 10.0
+    sc_e = dk_e + np.log(sm_d + 1e-8) - 2.0 * np.log(ka_d + 1e-8)
+    de = decompose_score(sc_e, dk_e, sm_d, ka_d, T_d, y_d)
+    assert de["det_k_share_of_spread"] > 0.9, de["det_k_share_of_spread"]
+    assert de["spearman_score_vs_reduced"] < 0.6, de["spearman_score_vs_reduced"]
+    print("  [PASS] decompose_score: a dominant det(K) gives share %.2f, not 0" %
+          de["det_k_share_of_spread"])
+
+    # Length as a standalone predictor -- the baseline a reviewer reaches for first.
+    dl = decompose_score(sc_d, dk_d, sm_d, ka_d, np.arange(20), np.array([0] * 10 + [1] * 10))
+    assert dl["auroc_length_alone"] == 1.0, dl["auroc_length_alone"]
+    print("  [PASS] decompose_score: recovers length-alone AUROC of 1.00 when length IS the label")
+
     f = summarise_finiteness([1.0, float("nan"), float("inf"), 2.0])
     assert f["n_finite"] == 2 and f["n_nan"] == 1 and f["n_inf"] == 1 and f["finite_pct"] == 50.0
     print("  [PASS] summarise_finiteness: counts NaN and inf separately")
@@ -491,9 +657,10 @@ def main():
     print("  reported over all beams AND over both protocols' test rows (seeds %s)" % HARP_SEEDS)
     print("=" * 78, flush=True)
 
-    out, scores, y, pid = score_dataset(a.dataset, a.model_folder, data_dir, hg,
-                                        a.device, a.dtype, a.limit, a.layer_idx, a.param_subset,
-                                        log_every=a.log_every)
+    out, comp = score_dataset(a.dataset, a.model_folder, data_dir, hg,
+                              a.device, a.dtype, a.limit, a.layer_idx, a.param_subset,
+                              log_every=a.log_every)
+    scores, y, pid = comp["score"], comp["label"], comp["prompt_id"]
 
     # Same test rows HARP and our method are scored on. Skipped for --limit runs, where the
     # truncated beam set no longer contains whole prompts and the split would be meaningless.
@@ -512,19 +679,46 @@ def main():
 
     os.makedirs(a.out_dir, exist_ok=True)
     stem = "halluguard_%s_%s" % (a.model_folder, a.dataset)
-    np.savez_compressed(os.path.join(a.out_dir, stem + "_scores.npz"),
-                        score=scores, label=y, prompt_id=pid)
+    np.savez_compressed(os.path.join(a.out_dir, stem + "_scores.npz"), **comp)
     with open(os.path.join(a.out_dir, stem + ".json"), "w") as f:
         json.dump(out, f, indent=2)
 
-    print("\n  finite      : %d/%d (%.2f%%)" % (out["finiteness"]["n_finite"],
-                                                out["finiteness"]["n_total"],
-                                                out["finiteness"]["finite_pct"]))
+    print("\n  finite      : %d/%d (%.2f%%)  failures: %s" % (
+        out["finiteness"]["n_finite"], out["finiteness"]["n_total"],
+        out["finiteness"]["finite_pct"], out["failure_kinds"] or "none"))
     print("  short (<3 tok, degenerate sigma_max): %d" % out["n_short_completions_lt3_tokens"])
+
+    sel = out["selection"]
+    if sel["n_failed"]:
+        print("  SELECTION  scored T=%.1f avg (max %.0f) | failed T=%.1f avg (min %.0f)" % (
+            sel["mean_T_scored"], sel["max_T_scored"], sel["mean_T_failed"], sel["min_T_failed"]))
+        print("             halluc rate %.1f%% among scored vs %.1f%% among failed (%+.1f pts)" % (
+            sel["halluc_rate_scored_pct"], sel["halluc_rate_failed_pct"],
+            sel["halluc_rate_shift_pts"]))
+        if sel.get("length_separates_failure"):
+            print("             -> failure is length, not chance: every failed beam is longer "
+                  "than the mean scored beam")
+
+    dc = out["decomposition"]
+    if dc.get("det_k_share_of_spread") is not None:
+        print("  TERMS      det(K) contributes %.4f of the score's spread; median det(K)=%.3g, "
+              "kappa=%.3g" % (dc["det_k_share_of_spread"], dc["median_det_k"], dc["median_kappa"]))
+        if dc.get("auroc_reduced_only") is not None:
+            print("             AUROC of log(sigma_max)-2log(kappa) alone: %.4f" %
+                  dc["auroc_reduced_only"])
+        if dc.get("auroc_length_alone") is not None:
+            print("             AUROC of completion LENGTH alone: %.4f (flipped %.4f), "
+                  "rho(score,T)=%+.3f" % (dc["auroc_length_alone"],
+                                          dc["auroc_length_alone_flipped"],
+                                          dc["spearman_score_vs_T"]))
+
     ab = out["all_beams"]
     print("  ALL BEAMS          pooled %s | within-prompt %s (%d pairs)" % (
         ab["pooled_auroc"], ab["within_prompt"]["within_prompt_auroc"],
         ab["within_prompt"]["n_pairs"]))
+    if "orientation_note" in ab:
+        print("             sign-flipped: pooled %.4f | within-prompt %.4f" % (
+            ab["pooled_auroc_sign_flipped"], ab["within_prompt_sign_flipped"]))
     tr = out.get("on_test_rows")
     if tr:
         for arm in ("question", "answer"):

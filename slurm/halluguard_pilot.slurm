@@ -1,36 +1,50 @@
 #!/bin/bash
-#SBATCH --job-name=hg-pilot
+#SBATCH --job-name=hg-pilot2
 #SBATCH -p highgpu
 #SBATCH --nodes=1
 #SBATCH --mem=80G
 #SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00
-#SBATCH --output=slurm_logs/hg-pilot_%j/hg-pilot_%j.out
-#SBATCH --error=slurm_logs/hg-pilot_%j/hg-pilot_%j.err
+#SBATCH --output=slurm_logs/hg-pilot2_%j/hg-pilot2_%j.out
+#SBATCH --error=slurm_logs/hg-pilot2_%j/hg-pilot2_%j.err
 
-# PILOT ONLY -- deliberately does not attempt a full dataset.
+# PILOT 2 -- diagnostic. Pilot 1 (job 774134) answered the sizing question and raised three
+# larger ones; this run measures those instead of guessing at them.
 #
-# HalluGuard takes one autograd.grad call PER GENERATED TOKEN (halluguard_true.py:103-113), so
-# cost scales with beams x tokens, not beams. Our completions average 8-14 tokens, which puts the
-# full four-dataset sweep somewhere between 3 and 20 hours per model depending on per-backward
-# cost -- a range too wide to budget from. This measures it on 200 beams and stops.
+# WHAT PILOT 1 SETTLED, so we do not pay for it again:
 #
-# Three things this pilot answers, all of which decide whether the full run is worth firing:
-#   1. seconds/beam, so the real sweep can be budgeted instead of guessed
-#   2. how many scores come back non-finite -- their models/_load_model.py defaults to float16
-#      and this code path takes GRADIENTS, where fp16 can overflow in ways a forward-only
-#      pipeline never shows. If many are non-finite we rerun with --dtype float32.
-#   3. whether the AUROC is even in a plausible range on our data
+#   fp16 is impossible, not merely lossy. Their line 126 calls torch.linalg.eigvalsh, which has no
+#   half-precision kernel on EITHER device -- "linalg_eigh_cuda"/"linalg_eigh_cpu" not implemented
+#   for 'Half', and the same for 'BFloat16'. All 200/200 beams raised NotImplementedError. This is
+#   the dtype their own and only call site uses (ntk_reward.py:26 loads fp16 whenever device ==
+#   "cuda", then calls with param_subset="last_block"), so the released path cannot run as shipped.
+#   The fp16 arm is therefore dropped -- it is a proven crash, not a measurement.
 #
-# Only the ALL BEAMS line appears below. 53 deliberately skips the split-restricted numbers under
-# --limit: truncating at 200 beams cuts a prompt in half, so the question/answer partitions would
-# not be the ones HARP and our method were scored on, and a number that looks comparable but is
-# not is worse than no number. The full run prints all three plus the composition effect.
+#   fp32 runs but lost 64 of 200 beams to CUDA OOM. Their line 124 stacks T per-token gradients
+#   into a [T, P] tensor while the list of T separate vectors is still alive, so peak is ~2*T*P*4
+#   bytes on top of the 30GB fp32 model. The allocator log gives P directly: single-gradient
+#   requests of 933,232,640 bytes => P ~ 233M (Qwen's last block), i.e. ~0.93GB PER GENERATED
+#   TOKEN. Failed requests ran up to 48.5GB, so a ~52-token completion needs ~97GB of headroom
+#   against the ~49GB left after the model. Length decides whether a beam scores at all.
 #
-# PREREQUISITE. The repo must be cloned ON THE CLUSTER, next to HARP-Code:
-#   cd ~/Hallucination-Detection && git clone https://github.com/Susan571/HalluGuard-ICLR2026.git
-# Only Score/halluguard_true.py is imported -- it depends on torch alone, so none of their
-# requirements.txt, dataloaders or model wrappers are needed.
+# WHAT THIS RUN MEASURES -- all three now emitted by 53 for every beam, including failed ones:
+#   1. SELECTION. Failure is a deterministic function of completion length, so the survivors are
+#      not a random sample. The run prints mean T and hallucination rate for scored vs failed
+#      beams. If those rates differ, pilot 1's 0.3162 describes a different population than the
+#      one HARP and our method are evaluated on, and is not comparable to either.
+#   2. WHICH TERM RANKS. K = G G^T has unit-norm rows, so trace(K) = T and det(K) <= 1; collinear
+#      gradients push eigenvalues onto the 1e-8 clamp and det_k = exp(log_det) underflows to 0. If
+#      std(det_k)/std(score) is ~0 then the determinant -- the reason for T autograd passes at
+#      0.93GB each -- does no ranking, and the score is just log(sigma_max) - 2log(kappa).
+#   3. LENGTH ALONE. AUROC using nothing but the token count. If that matches the method, it is
+#      the baseline a reviewer reaches for first.
+#
+# 400 beams, not 200: pilot 1 left only 77 within-prompt pairs, too few to read anything from.
+# Still TyDiQA, still the smallest dataset, so this stays a real sample rather than a corner.
+#
+# PREREQUISITE (already satisfied on the cluster): the repo cloned next to HARP-Code at
+#   ~/Hallucination-Detection/HalluGuard-ICLR2026
+# Only Score/halluguard_true.py is imported, and it is imported UNMODIFIED.
 
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 REPO=/home/de807845/Hallucination-Detection/hallucination-detection
@@ -42,6 +56,11 @@ conda activate hal-det
 
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
+# Their peak is one huge contiguous [T, P] block. Fragmentation, not total free memory, is what
+# turns a 19GB request into an OOM on a card with 49GB free -- see the pilot-1 allocator log, where
+# requests failed against 12GB free while the run continued. Expandable segments let the allocator
+# grow a segment instead of demanding one contiguous slab.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$MPLCONFIGDIR"
 
 cd $REPO
@@ -52,21 +71,14 @@ echo "repo HEAD: $(git -C $REPO log --oneline -1 2>/dev/null)"
     exit 1; }
 nvidia-smi
 
-# TyDiQA is the smallest dataset, so 200 beams is a real sample of it rather than a corner.
 echo ""
-echo "### PILOT 1/2: fp16 (their default), 200 beams"
+echo "### fp32, 400 beams, full diagnostics"
 python 53_halluguard_score.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct \
-    --hg-dir "$HG" --dtype float16 --limit 200 --log-every 50 || exit 1
-
-# Same 200 beams in fp32. If fp16 lost scores to overflow, this says so directly and tells us
-# what the full run should use -- measured, not assumed.
-echo ""
-echo "### PILOT 2/2: fp32, same 200 beams, for comparison"
-python 53_halluguard_score.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct \
-    --hg-dir "$HG" --dtype float32 --limit 200 --log-every 50 \
+    --hg-dir "$HG" --dtype float32 --limit 400 --log-every 50 \
     --out-dir "$REPO/results/halluguard_fp32" || exit 1
 
 echo ""
-echo "Compare the two 'finite' lines and the seconds/beam above before firing the full sweep."
+echo "Read the SELECTION and TERMS blocks before the AUROC. If the hallucination rate differs"
+echo "between scored and failed beams, the AUROC is not yet comparable to HARP's or ours."
 conda deactivate
 echo "${TIMESTAMP}: Env Deactivated.. "
