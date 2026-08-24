@@ -228,7 +228,7 @@ def selection_report(T, labels, finite):
     return r
 
 
-def decompose_score(score, det_k, sigma_max, kappa, T, labels):
+def decompose_score(score, det_k, sigma_max, kappa, T, labels, prompt_ids=None):
     """Which term of  score = det(K) + log(sigma_max) - 2 log(kappa)  actually does the ranking?
 
     K = G G^T with the rows of G unit-normalised (their line 122), so trace(K) = T and, by AM-GM,
@@ -275,6 +275,14 @@ def decompose_score(score, det_k, sigma_max, kappa, T, labels):
     r["auroc_length_alone"] = pooled_auroc(t[f], y[f])
     r["auroc_length_alone_flipped"] = (None if r["auroc_length_alone"] is None
                                        else 1.0 - r["auroc_length_alone"])
+    # Within-prompt too. Pooled length AUROC can be inflated by question difficulty -- easy
+    # questions get short confident answers -- so the honest length baseline has to be measured
+    # under the same difficulty control we hold the method to.
+    if prompt_ids is not None:
+        wl = within_prompt_auroc(t[f], y[f], np.asarray(prompt_ids)[f])
+        r["within_prompt_length_alone"] = wl["within_prompt_auroc"]
+        r["within_prompt_length_alone_flipped"] = (None if wl["within_prompt_auroc"] is None
+                                                   else 1.0 - wl["within_prompt_auroc"])
     return r
 
 
@@ -382,7 +390,7 @@ def score_dataset(dataset, model_folder, data_dir, hg, device, dtype, limit=None
         "failure_kinds": kinds,
         "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
         "selection": selection_report(T_all, y, fin),
-        "decomposition": decompose_score(scores, det_k, sigma_max, kappa, T_all, y),
+        "decomposition": decompose_score(scores, det_k, sigma_max, kappa, T_all, y, pid),
     }
     a = pooled_auroc(scores[fin], y[fin])
     w = within_prompt_auroc(scores[fin], y[fin], pid[fin])
@@ -611,9 +619,16 @@ def self_test():
           de["det_k_share_of_spread"])
 
     # Length as a standalone predictor -- the baseline a reviewer reaches for first.
-    dl = decompose_score(sc_d, dk_d, sm_d, ka_d, np.arange(20), np.array([0] * 10 + [1] * 10))
-    assert dl["auroc_length_alone"] == 1.0, dl["auroc_length_alone"]
-    print("  [PASS] decompose_score: recovers length-alone AUROC of 1.00 when length IS the label")
+    # Ten prompts, each holding one truthful beam and one hallucinated beam one token longer.
+    # WITHIN a prompt, length is a perfect predictor. POOLED it is only 0.55, because a short
+    # hallucinated answer to an early question still loses to a long truthful answer to a later
+    # one. The two must disagree here -- if they agreed, the test could not tell a correct
+    # within-prompt restriction from one that quietly pooled everything.
+    dl = decompose_score(sc_d, dk_d, sm_d, ka_d, np.arange(20), np.array([0, 1] * 10),
+                         prompt_ids=np.repeat(np.arange(10), 2))
+    assert dl["within_prompt_length_alone"] == 1.0, dl["within_prompt_length_alone"]
+    assert abs(dl["auroc_length_alone"] - 0.55) < 1e-12, dl["auroc_length_alone"]
+    print("  [PASS] decompose_score: length baseline is 1.00 within-prompt but 0.55 pooled -- the two must disagree or the restriction is not being applied")
 
     f = summarise_finiteness([1.0, float("nan"), float("inf"), 2.0])
     assert f["n_finite"] == 2 and f["n_nan"] == 1 and f["n_inf"] == 1 and f["finite_pct"] == 50.0
@@ -711,6 +726,9 @@ def main():
                   "rho(score,T)=%+.3f" % (dc["auroc_length_alone"],
                                           dc["auroc_length_alone_flipped"],
                                           dc["spearman_score_vs_T"]))
+        if dc.get("within_prompt_length_alone") is not None:
+            print("             within-prompt LENGTH alone: %.4f (flipped %.4f)" % (
+                dc["within_prompt_length_alone"], dc["within_prompt_length_alone_flipped"]))
 
     ab = out["all_beams"]
     print("  ALL BEAMS          pooled %s | within-prompt %s (%d pairs)" % (
