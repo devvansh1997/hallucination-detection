@@ -90,7 +90,15 @@ so it is a validated control. Our method loses 1.35–11.75 (Qwen) and 5.15–7.
 the same correction — **this is a property of the protocol, not of their method, and we are not
 exempt from it.**
 
-### 2.2b The control for §2.2: does the gap come from leakage or from a different test set?
+### 2.2b ~~The control for §2.2~~ — **RETRACTED 2026-08-24, see §2.9**
+
+> The argument below rests on HalluGuard being training-free. It is not: the paper's
+> Appendix C.1 says *"We train only HALLUGUARD's lightweight projection layers using
+> AdamW."* A fitted score carries a leakage term, so it cannot isolate the composition
+> term. The three-way AUROC reporting in `53_halluguard_score.py` is still useful for
+> comparability, but the **control claim is withdrawn**. Kept below for the record.
+
+#### (retracted) The control for §2.2: does the gap come from leakage or a different test set?
 
 The obvious objection to §2.2, and the first one a reviewer will raise: the two arms are not
 evaluated on the same rows, so maybe the 3.8–13.3 points is just the two test populations being
@@ -224,7 +232,12 @@ data collected for another purpose, which is what makes it worth something.
 
 ---
 
-### 2.8 HalluGuard (ICLR 2026): the released code cannot run, and the score loses to token count
+### 2.8 `halluguard_true.py`: the file implementing the paper's formula cannot scale
+
+> **Scope corrected 2026-08-24.** Everything in this section is about the file
+> `Score/halluguard_true.py`, which is **not** the code path behind the paper's published
+> numbers. See §2.9. The findings stand as statements about that file; they are *not* a
+> critique of HalluGuard's reported results.
 
 Pilot 1 (job 774134) and pilot 2 (774273), TyDiQA-GP, Qwen2.5-7B-Instruct, our pinned generations,
 their `Score/halluguard_true.py` imported **unmodified**.
@@ -276,6 +289,63 @@ strongest and we had nothing to compare it to. Added in `e64595c`, not yet measu
 
 ---
 
+### 2.9 HalluGuard's repo contains two different scores, and the paper's formula is not the one that ran
+
+Devansh asked the obvious question — *they report Llama2-70B, so how did they afford this?* The
+answer is that they did not run the expensive thing. Their repo holds two implementations:
+
+| | `Score/func/metric.py::getNTKS3Score` (default) | `Score/halluguard_true.py` |
+|---|---|---|
+| what K is | covariance over the **10 sampled generations** | `G Gᵀ` over the **T decoding steps** |
+| needs gradients | **no** — forward hidden states only | yes, `∇_θ log p(y_t)` per token |
+| cost at 7B | negligible | **0.93 GB per generated token** |
+| runs on 70B | yes | no |
+
+**The default path never computes the published formula.** Read `func/metric.py:196-215`: it builds
+`CovMatrix = np.cov(...) + 1e-3·I` — and then **discards it**. The next line is
+
+```python
+# For now, use a simplified approach: just the norm of the embedding
+# This avoids the matrix dimension issues while maintaining the concept
+residual = np.sqrt(emb @ emb)
+```
+
+so `det(K)` is never computed, `κ(K)` is never computed, and the score reduces to
+
+> `‖mean-pooled hidden state at layer L/2‖ × mean_t exp(‖h_t − h_{t−1}‖)`
+
+against the paper's `det(K) + log σ_max − log κ(K)²`. Note also **mean** where the paper specifies
+**max** over t (`metric.py:240`).
+
+**Their own repo documents this.** `Score/TECHNICAL_SPEC_VERIFICATION.md` grades `getNTKS3Score` as
+"❌ Not NTK: no θ-Jacobians; over sequences, not steps; amplification is mean, not max", and
+concludes: *"Satisfied only when using `halluguard_true.py`. Default scripts still use the proxy."*
+
+**Which one produced the tables?** Not verified, but the evidence points one way: the paper's own
+Appendix C.1 describes the proxy's structure, not the true one — middle layer `L/2`, ridge
+`α = 1e-3`, `K = 10` generations per input, fp16, "for each **set** of generations we form a
+task-specific NTK feature matrix". The README says K is "the NTK Gram matrix (**over generated
+outputs**)". And the proxy is the only path that can run Llama2-70B at all.
+
+**Also: HalluGuard is not training-free.** Appendix C.1: *"We train only HALLUGUARD's lightweight
+projection layers using AdamW, learning rate from {1e-5, 5e-5, 1e-4}, weight decay from {0, 0.01}.
+The best setting is chosen on a held-out validation split."* No such layer exists anywhere in the
+released code, and no weights are published. So the released code is missing a trained component
+that the paper's numbers depend on.
+
+**Useful alignments for us.** Their decoding config is temperature 0.5, top-p 0.95, top-k 10, and
+**K = 10 candidates per input** — very close to our 10 beams. They evaluate on NQ-Open and
+TruthfulQA, both of which we have. And they label with the dual ROUGE / LLM-judge regime from
+Janiak et al. 2025, the same "Illusion of Progress" paper already in our landscape notes.
+
+**Consequence for our plan.** There is no "rerun their code" option, because the two candidate
+codes compute different things and neither is the paper. The choices are: reimplement the proxy
+(cheap — needs only forward hidden states we may already have), reimplement the paper's formula, or
+report the discrepancy itself. My recommendation is the third plus the first: the discrepancy is
+the finding, and the proxy is cheap enough to measure alongside it.
+
+---
+
 ## 3. Retracted / corrected
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
@@ -287,6 +357,9 @@ Kept deliberately. Each cost time and each would have been caught by a reviewer.
 | Leakage effect scales with the *share of test answers* drawn from seen questions | **refuted by data** | NQ-Open has the smallest share (2.7%) and the largest effect (−13.30). Every AUROC pair needs a correct answer, and correct answers exist only inside known questions — so unknown questions contribute no discriminative pairs at all, and the leakage touches nearly all usable signal everywhere. |
 | Effect size tracks the *number of known questions*, inversely | **does not replicate** | Fitted to 4 Qwen points. LLaMA base gives 404→7.77, 506→5.15, 1,267→6.60 — non-monotonic. What modulates the size is unexplained. |
 | Qwen TriviaQA `joint_tensor` OOM'd at **200 GB** | **wrong figure** | The run that produced that cell is `slurm/phase3_answersplit_trivia.slurm`, which requested `--mem=128G`. 200G is `harp_qwen_triviaqa.slurm`, a different job; the per-condition question-level jobs ran 48G–192G (`joint_tensor` at 160G). Quoted wrong in the log and in `harp_paper_vs_code.tex`; both fixed 2026-08-24. Noted as caught in a prior session but never actually corrected in the artifacts — the same follow-through failure as the truncated-npz guard. |
+| "HalluGuard is training-free — nothing is fitted" | **wrong** | Appendix C.1: *"We train only HALLUGUARD's lightweight projection layers using AdamW."* I searched the repo for checkpoints, found none, and concluded training-free. The correct conclusion was that the **released code omits a trained component**. This was the sole basis for the §2.2b control, which is withdrawn. |
+| "HalluGuard's released path cannot run as shipped, so they never ran it at scale" | **wrong framing** | True of `halluguard_true.py`; false of the method. The default proxy needs no gradients and runs on 70B trivially. I generalised from the one file I had chosen to the paper as a whole. Devansh caught it by checking the results section against my claim. |
+| "det(K) is inert / completion length beats HalluGuard" | **scope corrected** | Measured on `halluguard_true.py`, which is not the code behind the published numbers. Stands as a statement about that file only. See §2.8, §2.9. |
 | HARP's subspace is the trailing `d − 0.95d` directions | **imprecise** | That is their §4.3 rule (~179/205 dims). Their §5.3 fixes **256** globally and every Table-1 number is at it. |
 
 ---
