@@ -4,13 +4,13 @@ Running record of findings, corrections and operational knowledge, kept current 
 progresses. Every claim here carries its evidence; anything retracted stays visible with the
 reason, because knowing what we got wrong is as load-bearing as knowing what we got right.
 
-Last updated: 2026-08-21.
+Last updated: 2026-08-24.
 
 ---
 
 ## 1. Where things stand
 
-**Models.** `qwen-2.5-7b-instruct` (complete), `llama-3.1-8b` **base** (3 of 4 datasets),
+**Models.** `qwen-2.5-7b-instruct` (complete), `llama-3.1-8b` **base** (4 of 4 datasets; TriviaQA answer-level cell still to transcribe),
 `llama-3.1-8b-instruct` (legacy, kept — *not* the checkpoint HARP evaluates).
 
 **Datasets.** TruthfulQA (817), TriviaQA (9,960 after question_id dedup), NQ-Open (3,610),
@@ -27,12 +27,14 @@ used Instruct, so they were never a like-for-like comparison.
 | Qwen2.5-7B | NQ-Open | 96.9 | 360 | 79.40 | 91.15 | +11.75 |
 | Qwen2.5-7B | TyDiQA-GP | 59.1 | 302 | 88.30 | 94.72 | +6.42 |
 | LLaMA-3.1-8B base | TruthfulQA | 63.0 | 506 | 89.32 | 94.47 | +5.15 |
-| LLaMA-3.1-8B base | TriviaQA | — | — | *running* | *running* | — |
+| LLaMA-3.1-8B base | TriviaQA | 52.5 | 8,220 | 84.79 | *pending* | *pending* |
 | LLaMA-3.1-8B base | NQ-Open | 88.8 | 1,267 | 85.36 | 91.96 | +6.60 |
 | LLaMA-3.1-8B base | TyDiQA-GP | 48.9 | 404 | 83.23 | 91.00 | +7.77 |
 
-TriviaQA/Qwen answer-level covers 5 of 6 conditions (`joint_tensor` OOM'd at 200 GB). It is a
-maximum, so the true value can only be higher and the +1.35 is a lower bound.
+TriviaQA/Qwen answer-level covers 5 of 6 conditions: `joint_tensor` was OOM-killed in
+`slurm/phase3_answersplit_trivia.slurm`, which requested `--mem=128G`. It is a maximum, so the
+true value can only be higher and the +1.35 is a lower bound. LLaMA TriviaQA has all six on
+both arms (180G).
 
 **HARP reproduction (Qwen, their code on our data, proj_dim 256).** TruthfulQA 86.27 vs published
 88.1; TriviaQA 92.89 vs 92.8; NQ-Open 83.12 vs 84.0; TyDiQA-GP 91.87 vs 88.4. Mean signed
@@ -125,6 +127,27 @@ rows / answer-level test rows), using the project's own `original_harp_split` an
 literally the ones the other two methods were scored on. Skipped under `--limit`, where truncation
 cuts a prompt in half and the partitions would no longer correspond.
 
+### 2.2c LLaMA TriviaQA: our smallest margin, on the dataset with the most known questions
+
+Question-level, LLaMA-3.1-8B base, best of six, RF: **84.79 ±0.23** (`q_static`) against HARP's
+**82.54** — a margin of **+2.25**, our narrowest anywhere. Every other cell sits at +4.80 to +9.74.
+
+TriviaQA is also, by a wide distance, the dataset with the most known questions (8,220, against
+404–1,267 elsewhere; 82.5% of its prompts are known vs Qwen's 63.4%). Two readings, and we cannot
+yet separate them: either the margin narrows where there is enough question diversity that HARP's
+detector is pushed toward a transferable rule, or TriviaQA is simply the dataset where their
+features suit the task. Note this is the *question-level* margin, so it is not a leakage artifact.
+
+Do not fold this into §2.7's known-question story — that relationship was about the *size of the
+leakage cost* and has already been retracted as non-replicating (§3). This is a different quantity
+(our margin, not their inflation) and one data point. It is recorded as an observation to check
+against the answer-level cell when it lands, not as a mechanism.
+
+**Readout, question-level.** LR beats RF on 5 of 6 conditions (core_max +0.35, q_static +0.25,
+core_concat +0.65, joint_tensor +0.91, triple_concat +0.48), `q_velocity` the exception at −0.19.
+On Qwen it was 6 of 6. The memorisation argument rests on the RF/LR ranking *flipping* between
+protocols, so it stays untestable on LLaMA until the answer-level cell is transcribed.
+
 ### 2.3 Under matched protocols we beat HARP on all four datasets
 
 Qwen, question-level: 87.8 vs 77.54, 92.7 vs 88.75, 79.4 vs 67.73, 88.3 vs 79.90.
@@ -211,6 +234,7 @@ Kept deliberately. Each cost time and each would have been caught by a reviewer.
 | "HARP's code randomly splits the data — there is no known/unknown set" | **overstated** | The grouping is correct; only the sub-split within the known group is at answer granularity. |
 | Leakage effect scales with the *share of test answers* drawn from seen questions | **refuted by data** | NQ-Open has the smallest share (2.7%) and the largest effect (−13.30). Every AUROC pair needs a correct answer, and correct answers exist only inside known questions — so unknown questions contribute no discriminative pairs at all, and the leakage touches nearly all usable signal everywhere. |
 | Effect size tracks the *number of known questions*, inversely | **does not replicate** | Fitted to 4 Qwen points. LLaMA base gives 404→7.77, 506→5.15, 1,267→6.60 — non-monotonic. What modulates the size is unexplained. |
+| Qwen TriviaQA `joint_tensor` OOM'd at **200 GB** | **wrong figure** | The run that produced that cell is `slurm/phase3_answersplit_trivia.slurm`, which requested `--mem=128G`. 200G is `harp_qwen_triviaqa.slurm`, a different job; the per-condition question-level jobs ran 48G–192G (`joint_tensor` at 160G). Quoted wrong in the log and in `harp_paper_vs_code.tex`; both fixed 2026-08-24. Noted as caught in a prior session but never actually corrected in the artifacts — the same follow-through failure as the truncated-npz guard. |
 | HARP's subspace is the trailing `d − 0.95d` directions | **imprecise** | That is their §4.3 rule (~179/205 dims). Their §5.3 fixes **256** globally and every Table-1 number is at it. |
 
 ---
