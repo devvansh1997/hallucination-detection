@@ -44,7 +44,7 @@ deviation **+0.21** — no systematic bias, which is what licenses everything do
 |---|---|---|---|---|
 | answer-level (their split) | 84.84 | 88.08 | 86.56 | 85.65 |
 | question-level (paper) | 79.58 | 82.54 | 80.56 | 74.99 |
-| **cost** | −5.26 | −5.54 | −6.00 | −10.66 |
+| **cost** | −5.26 | −5.54 | −5.99 | −10.66 |
 | published | 88.5 | 92.9 | 89.4 | 86.6 |
 | vs published | −3.66 | −4.82 | −2.84 | −0.95 |
 
@@ -87,6 +87,43 @@ The `answer` arm calls **their** `utils.split_data` and reproduces what their `m
 so it is a validated control. Our method loses 1.35–11.75 (Qwen) and 5.15–7.77 (LLaMA base) under
 the same correction — **this is a property of the protocol, not of their method, and we are not
 exempt from it.**
+
+### 2.2b The control for §2.2: does the gap come from leakage or from a different test set?
+
+The obvious objection to §2.2, and the first one a reviewer will raise: the two arms are not
+evaluated on the same rows, so maybe the 3.8–13.3 points is just the two test populations being
+different rather than train/test contamination. Decompose it:
+
+> answer-level − question-level = **leakage** + **population composition**
+
+We could not separate those two terms with HARP and our method alone, because both are fitted and
+both carry a leakage term. HalluGuard can, because **it fits nothing** — its per-beam score is a
+deterministic function of (prompt, answer) and does not change between arms. Its leakage term is
+identically zero, so its delta estimates the composition term on its own. If that delta is small,
+the whole of HARP's gap is leakage.
+
+Two facts make the control tighter than it first looks, both verified numerically in
+`53_halluguard_score.py --self-test` on 200 synthetic prompts × 10 beams:
+
+- The two arms' valid sets hold **the same number of known-prompt rows** (25% of them) and both
+  take **all** unknown rows. They differ only in *which* known rows — so composition differs at
+  second order, not first.
+- Where they differ sharply is question coverage: the question-level valid set touches **35 of 140**
+  known questions, the answer-level one **130 of 140** — 25% vs 93%, against the predicted
+  1 − 0.75¹⁰ = 94.4%.
+
+On synthetic data with a fixed score, the measured delta was **−0.12 points**. That is the number
+HalluGuard on real data has to be compared against; a similarly small value converts §2.2 from
+"the number moves when we change the protocol" into "the number moves *because of leakage*".
+
+Caveat to keep: this assumes the composition effect is of comparable magnitude across methods. Not
+guaranteed — but it is a bound where we currently have nothing.
+
+Implemented as three AUROCs from one deterministic scoring pass (all beams / question-level test
+rows / answer-level test rows), using the project's own `original_harp_split` and
+`answer_level_harp_split` and the same `HARP_SEEDS = [42, 0, 1, 2, 3]`, so the row sets are
+literally the ones the other two methods were scored on. Skipped under `--limit`, where truncation
+cuts a prompt in half and the partitions would no longer correspond.
 
 ### 2.3 Under matched protocols we beat HARP on all four datasets
 

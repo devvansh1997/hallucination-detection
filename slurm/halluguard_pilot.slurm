@@ -22,6 +22,11 @@
 #      pipeline never shows. If many are non-finite we rerun with --dtype float32.
 #   3. whether the AUROC is even in a plausible range on our data
 #
+# Only the ALL BEAMS line appears below. 53 deliberately skips the split-restricted numbers under
+# --limit: truncating at 200 beams cuts a prompt in half, so the question/answer partitions would
+# not be the ones HARP and our method were scored on, and a number that looks comparable but is
+# not is worse than no number. The full run prints all three plus the composition effect.
+#
 # PREREQUISITE. The repo must be cloned ON THE CLUSTER, next to HARP-Code:
 #   cd ~/Hallucination-Detection && git clone https://github.com/Susan571/HalluGuard-ICLR2026.git
 # Only Score/halluguard_true.py is imported -- it depends on torch alone, so none of their
