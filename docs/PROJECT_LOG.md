@@ -132,6 +132,19 @@ This was the load-bearing uncertainty. It decides between two claims:
 - *external* -- "HARP's honest TyDiQA number is 79.9, not the published 88.4" -- needed our
   partition to be the one their judge produces. **It is.** The claim stands as written.
 
+**The two judges are independent implementations, which makes the agreement mean more.** Ours
+(`is_correct_simple`, `39_generate_dataset.py:240`) was written from the paper's §5.1 description
+before we had their code, and uses HuggingFace `evaluate` for both ROUGE and BLEURT-20. Theirs
+(`DatasetJudge.judge`) uses the `rouge` pip package and `bleurt_pytorch`. They share no code, no
+metric library, and no BLEURT wrapper; they differ even in `>=` vs `>` on the ROUGE threshold and
+in how scores are aggregated over a question's alias list. Agreement at 99.3-99.9% is therefore
+evidence the *rubric* is applied faithfully, not that one implementation was run twice.
+
+Worth a look sometime: our ROUGE path calls `rouge.compute()` over all references at once and
+reads `r["rougeL"]`, which under `evaluate`'s default aggregator is a MEAN across references,
+while the docstring says max and their judge takes an explicit max. It evidently does not matter
+empirically -- 99%+ agreement -- but the code and its comment disagree.
+
 The judge is a function of (generated text, reference set), not of the model that produced the
 text, so agreement across 148,270 Qwen beams is strong evidence the implementation matches for
 LLaMA's generations too. Not separately verified there.
