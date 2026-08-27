@@ -300,7 +300,11 @@ strongest and we had nothing to compare it to. Added in `e64595c`, not yet measu
 
 ---
 
-### 2.9 HalluGuard's repo contains two different scores, and the paper's formula is not the one that ran
+### 2.9 HalluGuard's repo contains three scores — **partially retracted, see §2.11**
+
+> The claim that the default path is the proxy is **wrong**. The default path calls
+> `halluguard_true`. What survives: the three implementations exist and differ; the legacy
+> helpers discard the covariance matrix; the method is not training-free. Kept for the record.
 
 Devansh asked the obvious question — *they report Llama2-70B, so how did they afford this?* The
 answer is that they did not run the expensive thing. Their repo holds two implementations:
@@ -357,7 +361,11 @@ the finding, and the proxy is cheap enough to measure alongside it.
 
 ---
 
-### 2.10 Running HalluGuard's default path on our data: no score has a consistent direction
+### 2.10 Running HalluGuard's **legacy proxy** on our data: no score has a consistent direction
+
+> Title corrected 2026-08-27. `54_halluguard_proxy.py` implements the legacy helper, which is
+> **not** the default path. The measurements stand; what they are measurements *of* is narrower
+> than originally stated.
 
 `54_halluguard_proxy.py`, four of eight cells landed (Qwen 3 datasets, LLaMA-3.1-8B base TriviaQA).
 Each cell shows raw AUROC / sign-flipped, per beam except B which is per question.
@@ -404,6 +412,35 @@ is ours. Remaining cells: Qwen TriviaQA, LLaMA on tydiqa/truthfulqa/nq_open.
 
 ---
 
+### 2.11 The default path cannot return a number on a GPU, and that settles it
+
+Corrects §2.9. The default scripts **do** call `halluguard_true`. But:
+
+- `gpu_evaluation_all.py:78` loads `torch_dtype=torch.float16 if device.type == "cuda"`.
+- `torch.linalg.eigvalsh` has no fp16 kernel, so `halluguard_true.py:126` raises every call. Observed
+  directly: 200/200 beams, `NotImplementedError: "linalg_eigh_cuda" not implemented for 'Half'`.
+- `gpu_evaluation_all.py:443-446` catches **every** exception and returns `0.0`. Same handler at
+  `gpu_evaluation_llm.py:534-536` and `evaluation.py:185-187`.
+- The Beam Search driver `run/run_score.py:75` uses `bfloat16` — also no kernel.
+
+**The argument that needs no speculation:** a constant score has an AUROC of exactly 0.5. The paper
+reports 71–90. Therefore the published numbers were not produced by the released default path on a
+GPU. We are *not* claiming their results are zeros — we are claiming that whatever produced them is
+not in the repository in runnable form.
+
+Stronger than the retracted §2.9 story, because it does not depend on guessing which script they ran.
+With the scale arithmetic alongside it (Llama2-70B needs 261 GB for the fp32 model alone, before
+3.19 GB per token of gradients), no released configuration yields a real number at the reported scales.
+
+**Open — the decisive experiment.** Run *their own documented quickstart* and look at the output.
+`Score/README_PIPELINE.md` gives it verbatim: `./Score/run_pipeline.sh --model gpt2 --dataset coqa
+--device cuda --num_generations_per_prompt 2 --fraction_of_data_to_use 0.01`. GPT-2 is small enough
+that memory is not a factor, so this isolates the dtype/exception path cleanly. If every
+`halluguard_score` in the output pickle is 0.0, the finding is settled with their command, their
+model, their data — not our adaptation of anything. Runs on a laptop in minutes.
+
+---
+
 ## 3. Retracted / corrected
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
@@ -418,6 +455,7 @@ Kept deliberately. Each cost time and each would have been caught by a reviewer.
 | "HalluGuard is training-free — nothing is fitted" | **wrong** | Appendix C.1: *"We train only HALLUGUARD's lightweight projection layers using AdamW."* I searched the repo for checkpoints, found none, and concluded training-free. The correct conclusion was that the **released code omits a trained component**. This was the sole basis for the §2.2b control, which is withdrawn. |
 | "HalluGuard's released path cannot run as shipped, so they never ran it at scale" | **wrong framing** | True of `halluguard_true.py`; false of the method. The default proxy needs no gradients and runs on 70B trivially. I generalised from the one file I had chosen to the paper as a whole. Devansh caught it by checking the results section against my claim. |
 | "det(K) is inert / completion length beats HalluGuard" | **scope corrected** | Measured on `halluguard_true.py`, which is not the code behind the published numbers. Stands as a statement about that file only. See §2.8, §2.9. |
+| "HalluGuard's default scripts call the legacy proxy, so their numbers came from it" | **wrong** | Resolved from the imports, not the prose: `evaluation.py:175`, `gpu_evaluation_all.py:434`, `gpu_evaluation_llm.py:524` and all three `pipeline/generate*.py` call `halluguard_true`. Their README says so plainly. I quoted the verdict line of their `TECHNICAL_SPEC_VERIFICATION.md`, which is stale and contradicts its own table two rows above, and did not check the imports. Devansh caught it from the README. **Lesson: their documents disagree with their code; take the code.** Conclusion unchanged, reason stronger — see §2.11. |
 | HARP's subspace is the trailing `d − 0.95d` directions | **imprecise** | That is their §4.3 rule (~179/205 dims). Their §5.3 fixes **256** globally and every Table-1 number is at it. |
 
 ---
