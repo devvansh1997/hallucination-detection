@@ -315,14 +315,22 @@ def run_audit(ds_cfg):
 # ==============================================================================
 
 def run_generation(ds_cfg, model_folder, global_seed, out_dir, force_versions=False,
-                    n_determinism_check=5):
+                    n_determinism_check=5, gen_overrides=None):
     import evaluate
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     with open(os.path.join(HERE, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     model_id = next(m["id"] for m in cfg["models"] if m["folder"] == model_folder)
-    gen_cfg = cfg["generation"]
+    gen_cfg = dict(cfg["generation"])
+    # Decoding overrides, applied over the config so that omitting them reproduces the pinned runs
+    # exactly. decoding_config is saved into the sequences file, so whichever settings were used
+    # travel with the data and every downstream script can see them.
+    if gen_overrides:
+        for k, v in gen_overrides.items():
+            if v is not None:
+                print(f"  [decoding override] {k}: {gen_cfg.get(k)} -> {v}")
+                gen_cfg[k] = v
 
     versions, mismatches = check_versions(force=force_versions)
     if mismatches:
@@ -606,6 +614,12 @@ def main():
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--force-version-mismatch", action="store_true")
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--num-beams", type=int, default=None,
+                         help="override config generation.num_beams (1 = plain sampling)")
+    parser.add_argument("--top-p", type=float, default=None, help="override generation.top_p")
+    parser.add_argument("--top-k", type=int, default=None, help="override generation.top_k")
+    parser.add_argument("--temperature", type=float, default=None,
+                         help="override generation.temperature")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -628,8 +642,16 @@ def main():
         raise RuntimeError("CUDA required for generation (only --audit-only is CPU-only).")
 
     out_dir = args.output_dir or os.path.join(cfg["output"]["data_dir"], args.model_folder)
+    overrides = {"num_beams": args.num_beams, "top_p": args.top_p, "top_k": args.top_k,
+                 "temperature": args.temperature}
+    if any(v is not None for v in overrides.values()) and not args.output_dir:
+        print("ERROR: decoding overrides change the generations, so --output-dir is required. "
+              "Writing them into the default directory would silently overwrite the pinned "
+              "beam-search data every downstream result depends on.")
+        sys.exit(1)
     gen_result = run_generation(ds_cfg, args.model_folder, args.global_seed, out_dir,
-                                 force_versions=args.force_version_mismatch)
+                                 force_versions=args.force_version_mismatch,
+                                 gen_overrides=overrides)
     manifest, manifest_path = build_manifest(gen_result, ds_cfg, out_dir)
     print(f"\nWrote manifest: {manifest_path}")
     print(f"Next: run 40_validate_dataset.py --manifest {manifest_path}")
