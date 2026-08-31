@@ -441,6 +441,67 @@ model, their data — not our adaptation of anything. Runs on a laptop in minute
 
 ---
 
+### 2.12 HalluGuard, run as its authors specify: it reduces to counting distinct answers
+
+`55_halluguard_rebuttal.py` implements the OpenReview rebuttal spec — no gradients, K = H Hᵀ/d over
+the final-layer states of the K sampled trajectories, then slogdet / svdvals / eigvalsh. Run on
+TyDiQA-GP / Qwen under **both** decodings, three configurations each.
+
+**My prediction was backwards, and the inversion is the finding.**
+
+| decoding | mean rank of K | rank-deficient | distinct answers/question | all 10 identical | halluc. rate |
+|---|---|---|---|---|---|
+| beam search (ours) | **10.00 / 10** | 0 of 440 | 7.58 | 0 / 440 | 31.4% |
+| nucleus (their C.1) | **3.98 / 10** | 420 of 440 | 3.66 | **115 / 440** | 55.0% |
+
+I expected beam search to collapse the cloud. It cannot: beam search returns ten *distinct token
+sequences* by construction, so K is full rank whatever the answers look like. Nucleus sampling at
+temperature 0.5 on short-answer QA returns **duplicates** — 26% of questions get ten identical
+answers. Similar ≠ linearly dependent; rank measures the latter. I conflated them.
+
+Note beam gives 7.58 distinct *strings* but rank 10: identical text can come from different token
+sequences (EOS placement, whitespace), and we pool over tokens.
+
+**On their decoding config, the method is at chance, and it is a diversity counter.**
+
+| | AUROC |
+|---|---|
+| HalluGuard (rebuttal spec, final/mean) | 0.5265 |
+| `log det K` alone | 0.5272 |
+| **distinct-answer count alone** | **0.5237** |
+| ρ(log det K, distinct-answer count) | **+0.940** |
+| NULL: mean completion length | 0.5750 |
+
+`log det K` tracks the full score to three decimals in every configuration — σ_max and κ add nothing.
+And on nucleus data `log det K` is rank-equivalent to counting distinct strings. The method scores
+within **0.003** of that count. All three ablations agree (final/mean 0.5265, final/last 0.5329,
+middle/mean 0.5303), so the paper-vs-rebuttal disagreement about layer and pooling does not matter
+here.
+
+**Why chance is the expected answer on this dataset, not a scandal.** TyDiQA-GP is extractive
+short-answer QA at a 55% hallucination rate. Confidently wrong produces ten identical wrong answers;
+confidently right produces ten identical right ones. Diversity cannot separate those, and that is the
+known blind spot of every consistency-based detector. This is a **scope finding**, not a verdict.
+
+**What it does mean.** HalluGuard is presented as capturing representation adequacy through NTK
+geometry. On this data it is measuring sample diversity — the same quantity semantic entropy and
+lexical similarity measure, both of which are its baselines. That is a substantive characterisation
+and it is verifiable: ρ = 0.940.
+
+**What it does not establish.** Nothing about their benchmarks, which lean on reasoning (MATH-500,
+GSM8K, BBH) where ten samples genuinely diverge and K would be full rank. Nothing about the
+projection layer, which we ran as identity. The remaining ~12% of rank variance is real geometry
+beyond counting — it just buys 0.003 AUROC here.
+
+**Also note the two arms are not comparable to each other**: different generations, different labels,
+31.4% vs 55.0% hallucination. Only the nucleus column speaks to their setup.
+
+**Open.** TruthfulQA and NQ-Open have more answer diversity than TyDiQA. If rank recovers toward 10
+and AUROC moves off chance, the scope story is confirmed and we can say where the method works. If
+rank stays low across three datasets, the claim is much stronger. ~6h.
+
+---
+
 ## 3. Retracted / corrected
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
