@@ -44,10 +44,16 @@ PART="${PART:-highgpu}"
 STAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/hgreb_stage.slurm"
 [ -f "$STAGE" ] || { echo "ERROR: $STAGE not found" >&2; exit 1; }
 
-gen_time()   { case "$1" in tydiqa_gp) echo "00:45:00";; truthfulqa) echo "01:15:00";;
+# GEN_TIME / SCORE_TIME override every dataset at once, e.g.
+#     SCORE_TIME=03:00:00 DATASETS="truthfulqa nq_open" bash submit_hgreb.sh
+# Check what the last run actually took before trusting the defaults:
+#     sacct -u $USER --format=JobName%18,Elapsed,State,MaxRSS | grep hgr-
+gen_time()   { [ -n "${GEN_TIME:-}" ] && { echo "$GEN_TIME"; return; }
+               case "$1" in tydiqa_gp) echo "00:45:00";; truthfulqa) echo "01:15:00";;
                             nq_open) echo "03:00:00";; triviaqa) echo "09:00:00";;
                             *) echo "04:00:00";; esac; }
-score_time() { case "$1" in tydiqa_gp) echo "00:30:00";; truthfulqa) echo "00:40:00";;
+score_time() { [ -n "${SCORE_TIME:-}" ] && { echo "$SCORE_TIME"; return; }
+               case "$1" in tydiqa_gp) echo "00:30:00";; truthfulqa) echo "00:40:00";;
                             nq_open) echo "01:30:00";; triviaqa) echo "04:00:00";;
                             *) echo "02:00:00";; esac; }
 
