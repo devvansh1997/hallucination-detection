@@ -91,8 +91,16 @@ for M in $MODELS; do
     printf "  %-22s -> %s\n" "score (beam search)" "$JOBID"; N=$((N+1))
 
     # (b) regenerate with nucleus sampling, then (c) score it -- chained
+    #
+    # SHARED job name + --dependency=singleton, deliberately. 39 loads BLEURT-20 (4.2 GB,
+    # 39_generate_dataset.py:350) before generating, and two generation jobs starting together both
+    # fall through to re-downloading it, split the ~4 MB/s link, and both die on fsspec's 300s
+    # timeout. Run alone it reads from cache in 437s with no download. singleton makes SLURM run
+    # these one at a time; the cost is that squeue shows one name for all of them, which is a fair
+    # trade for not losing the jobs. Scoring jobs keep distinct names -- 55 never loads the judge.
     sub "-p $PART --mem=80G --gres=gpu:1 --time=$(gen_time $DS) \
-         --job-name=hgr-ngen-${DS:0:4} --export=ALL,FORCE=${FORCE:-0}" nucleus_gen "$M" "$DS"
+         --job-name=hgr-ngen --dependency=singleton \
+         --export=ALL,FORCE=${FORCE:-0}" nucleus_gen "$M" "$DS"
     GEN=$JOBID
     printf "  %-22s -> %s\n" "nucleus generation" "$GEN"; N=$((N+1))
 
@@ -110,3 +118,7 @@ echo "Results: results/halluguard_rebuttal/hgreb_<model>_<dataset>[_nucleus][_la
 echo
 echo "READ 'mean numerical rank of K' FIRST, in both runs. If the beam-search run shows a rank well"
 echo "below 10 and the nucleus run does not, the decoder was the story and the beam number is void."
+echo
+echo "Nucleus-generation jobs share the name hgr-ngen and run ONE AT A TIME (--dependency=singleton),"
+echo "because each loads BLEURT-20 and concurrent loads re-download it and time out. Expect them to"
+echo "queue behind each other; that is intended, not a stuck job."

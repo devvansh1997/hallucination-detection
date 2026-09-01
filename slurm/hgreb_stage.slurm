@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --mem=80G
 #SBATCH --gres=gpu:1
-#SBATCH --output=slurm_logs/hgreb_%j/hgreb_%j.out
-#SBATCH --error=slurm_logs/hgreb_%j/hgreb_%j.err
+#SBATCH --output=slurm_logs/%x_%j/%x_%j.out
+#SBATCH --error=slurm_logs/%x_%j/%x_%j.err
 #
 # usage (via submit_hgreb.sh, not directly):
 #   sbatch hgreb_stage.slurm <stage> <model_folder> <dataset> [tag]
@@ -45,6 +45,10 @@ conda activate hal-det
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
 export HF_HUB_DOWNLOAD_TIMEOUT=1800
+# BLEURT-20 is fetched from Google Cloud Storage, not the HF hub, so HF_HUB_DOWNLOAD_TIMEOUT does
+# not cover it -- this one does. Compute-node egress is ~2 MB/s and the archive is 2.14 GB, so the
+# default 300s fsspec timeout cannot possibly complete it if a download is ever actually needed.
+export HF_DATASETS_DOWNLOAD_TIMEOUT=1800
 mkdir -p "$MPLCONFIGDIR"
 
 cd "$REPO"
