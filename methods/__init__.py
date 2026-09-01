@@ -23,9 +23,23 @@ def register(cls):
     return cls
 
 
-from .halluguard import HalluGuard   # noqa: E402
+from .eigenscore import EigenScore                    # noqa: E402
+from .lexical_similarity import LexicalSimilarity    # noqa: E402
+from .ln_entropy import LNEntropy                    # noqa: E402
+from .perplexity import Perplexity                   # noqa: E402
 
-register(HalluGuard)
+register(Perplexity)
+register(LNEntropy)
+register(LexicalSimilarity)
+register(EigenScore)
+
+# HalluGuard is DROPPED FROM THE COMPARISON TABLE (decision, 2026-08-31). The code and the
+# findings stay: PROJECT_LOG 2.9-2.12 record that its released implementations disagree with its
+# own paper, and that under the authors' rebuttal spec it reduces to counting distinct answers.
+# That is a reproducibility result, not a baseline row, and it does not belong in a column of
+# AUROCs. Re-enable by uncommenting; methods/halluguard.py is unchanged and still self-tests.
+# from .halluguard import HalluGuard                 # noqa: E402
+# register(HalluGuard)
 
 
 def get(name):
