@@ -69,6 +69,57 @@ prerequisite of it. The live pipeline is roughly `39 -> 40 -> 42 -> 44`.
 
 ---
 
+## 3b. Adding a new detection method — start here
+
+**Do not write a standalone script.** Use the harness:
+
+```bash
+python 56_run_method.py --list
+python 56_run_method.py --method halluguard --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct
+```
+
+`--method` is the only thing that changes between rows of the comparison table. The runner owns the
+data loading, both split protocols, the AUROC and the output schema; a method owns exactly one
+thing — turning the pinned generations into a number per row. It is never handed the split or the
+metric, so it cannot accidentally define its own.
+
+To add one:
+
+1. `methods/<name>.py` with a `Method` subclass — see `methods/halluguard.py`, which is the
+   reference implementation and is commented as such.
+2. One line in `methods/__init__.py`.
+
+The interface:
+
+```python
+class MyMethod(Method):
+    name        = "my_method"
+    granularity = "beam"          # or "question"
+    def precompute(self, data): ...                      # expensive, split-free, runs ONCE
+    def score(self, data, pre, train_idx, test_idx): ... # cheap, runs per split
+    def self_test(self): ...                             # required
+```
+
+`precompute`/`score` are separate on purpose. A training-free scorer does all its work in
+`precompute` and `score` just indexes — otherwise the forward pass repeats once per seed, five times
+over. A trained probe loads features in `precompute` and does fit/predict in `score`. Both fit.
+
+**`data.model()` and `data.features()` are lazy.** Most methods need neither; the features file is
+1.3–33 GB per dataset, so it is only read if you ask.
+
+**Granularity is not cosmetic.** `beam` scores answers (label: 1 = hallucinated). `question` scores
+questions (label: 1 = the model never got it right). They are not comparable to each other and must
+not share a column. The runner records which in every output file.
+
+**The harness self-test checks the plumbing, not just the methods.** It runs a perfect oracle and an
+inverted oracle through the full path and asserts 1.000 and 0.000 under both protocols, and asserts
+that the two protocols really do differ in how many questions straddle the split. Run it after any
+change:
+
+```bash
+python 56_run_method.py --self-test
+```
+
 ## 4. Where AUROC actually lives
 
 Three implementations exist. They are not redundant — know which is which.
