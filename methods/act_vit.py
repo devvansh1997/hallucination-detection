@@ -119,7 +119,7 @@ def _auc(y, s):
 
 
 def train_and_score(at, labels, prompt_id, tr, te, l_pool, n_pool, device, seed,
-                    llm_index=0, epochs=EPOCHS, log=None):
+                    llm_index=0, epochs=EPOCHS, log=None, order=None):
     """Their recipe. Returns P(hallucinated) for rows `te`, in that order.
 
     llm_index picks which of their per-LLM Linear Adapters runs. With one model it changes
@@ -142,7 +142,11 @@ def train_and_score(at, labels, prompt_id, tr, te, l_pool, n_pool, device, seed,
                           batch_size=BATCH, shuffle=shuffle)
 
     def forward(rows):
-        x = torch.from_numpy(np.asarray(at[rows], dtype=np.float32)).to(device)
+        # `order` maps bundle row -> extraction row, applied per BATCH. Reordering the whole array
+        # up front would be simpler but doubles peak memory while both copies exist: 43.6 GB
+        # becomes 87 GB at N_eff=100 on TruthfulQA. A batch is 128 rows, so this costs nothing.
+        src = rows if order is None else order[rows]
+        x = torch.from_numpy(np.asarray(at[src], dtype=np.float32)).to(device)
         x = pad_features(x)
         return model(x, llm_idx[:len(rows)]).reshape(-1)
 
@@ -242,11 +246,10 @@ class ActViT(Method):
         if not np.array_equal(z["prompt_id"][order], data.prompt_id):
             raise SystemExit("prompt_id in %s disagrees with the pinned generations" % path)
 
-        # Reorder ONCE, here, not inside score(). Fancy indexing COPIES, and score() runs ten
-        # times (five seeds x two protocols), so doing it there would allocate 4.7 GB ten times
-        # over at N_eff=20 -- 23.5 GB ten times at N_eff=100.
-        at = at[order]
-
+        # The array stays in EXTRACTION order and `order` is applied per batch inside
+        # train_and_score. Reordering here would copy: 43.6 GB becomes 87 GB at N_eff=100 on
+        # TruthfulQA while both arrays are alive. Reordering inside score() would be worse still,
+        # since score() runs ten times (five seeds x two protocols).
         self._diag = {"at_path": path, "l_eff": int(at.shape[1]), "n_eff": int(at.shape[2]),
                       "hidden": int(at.shape[3]), "gb": round(at.nbytes / 1024 ** 3, 2),
                       "llm_adapter_index": LLM_INDEX.get(data.model_folder, 0),
@@ -254,15 +257,15 @@ class ActViT(Method):
         print("    [act_vit] %s  %s  %.1f GB  adapter index %d"
               % (os.path.basename(path), at.shape, at.nbytes / 1024 ** 3,
                  LLM_INDEX.get(data.model_folder, 0)), flush=True)
-        return {"at": at}
+        return {"at": at, "order": order}
 
     def score(self, data, pre, train_idx, test_idx):
-        at = pre["at"]        # already in bundle row order; see precompute
+        at, order = pre["at"], pre["order"]     # at is in EXTRACTION order; see precompute
         return train_and_score(at, data.labels, data.prompt_id, train_idx, test_idx,
                                at.shape[1], at.shape[2], data.device,
                                seed=int(train_idx[0]) if len(train_idx) else 0,
                                llm_index=LLM_INDEX.get(data.model_folder, 0),
-                               epochs=getattr(self, "epochs", EPOCHS), log=print)
+                               epochs=getattr(self, "epochs", EPOCHS), log=print, order=order)
 
     def meta(self):
         return {"orientation": "trained on label 1 = hallucinated, so output is P(hallucinated); "
@@ -324,3 +327,15 @@ class ActViT(Method):
         assert a > 0.9, ("orientation looks INVERTED or the model did not learn: AUROC %.3f. "
                          "High score must mean hallucinated." % a)
         print("    [PASS] end to end on separable data: AUROC %.3f, high score = hallucinated" % a)
+
+        # The per-batch `order` indirection must give the SAME answer as pre-permuting the array.
+        # order=None above tested only the identity path; a shuffled order is where a bug would be.
+        perm = rng.permutation(n)
+        inv = np.empty(n, dtype=np.int64)
+        inv[perm] = np.arange(n)            # at_shuffled[inv[i]] == at[i]
+        s2 = train_and_score(at[perm], y, pid, tr, te, L, N, "cpu", seed=0,
+                             llm_index=LLM_INDEX["qwen-2.5-7b-instruct"], epochs=4, order=inv)
+        assert np.allclose(s, s2, atol=1e-5), (
+            "per-batch order indexing disagrees with an identity layout (max diff %.2e) -- rows "
+            "are being fed to the model in the wrong order" % np.abs(s - s2).max())
+        print("    [PASS] per-batch `order` indexing matches the identity layout exactly")
