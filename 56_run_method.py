@@ -103,8 +103,18 @@ def evaluate(method, data, pre, seeds=None):
                 "n_pairs": None if q_gran else w["n_pairs"],
                 "n_scored": int(f.sum()), "n_non_finite": int((~f).sum())}
 
+    # all_rows scores every row with train_idx == test_idx. For a training-free method that is a
+    # convenient full-data pass. For a method that FITS in score() it is train-on-test, and the
+    # number it produces is both inflated and expensive -- one extra full training run. Skipped,
+    # with the reason recorded in its place so nobody reads the absence as an oversight.
     all_rows = np.arange(n)
-    out = {"all_rows": measure(method.score(data, pre, all_rows, all_rows), all_rows)}
+    if getattr(method, "trains", False):
+        out = {"all_rows": {"skipped": True,
+                            "reason": ("%s fits on train_idx, so scoring with train_idx == "
+                                       "test_idx would be train-on-test. Use the protocol arms."
+                                       % method.name)}}
+    else:
+        out = {"all_rows": measure(method.score(data, pre, all_rows, all_rows), all_rows)}
 
     out["protocols"] = {}
     for arm, fn in (("question", c["question_split"]), ("answer", c["answer_split"])):

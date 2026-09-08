@@ -193,6 +193,7 @@ def train_and_score(at, labels, prompt_id, tr, te, l_pool, n_pool, device, seed,
 class ActViT(Method):
     name = "act_vit"
     granularity = "beam"
+    trains = True               # fits a ViT inside score(); see Method.trains
     description = "ACT-ViT (Bar-Shalom et al. 2025), their architecture, our split and metric"
 
     def add_args(self, parser):

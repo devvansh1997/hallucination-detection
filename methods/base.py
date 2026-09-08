@@ -161,6 +161,12 @@ class Method:
     granularity = "beam"        # "beam" or "question"
     description = ""
 
+    # Set True if score() FITS anything on train_idx. The runner then skips the all_rows pass,
+    # which calls score(data, pre, all_rows, all_rows) -- train and test being the same rows. That
+    # is a harmless "score everything" convenience for a training-free method and pure leakage for
+    # a trained one: act_vit reported 0.950 there against 0.833 under the question protocol.
+    trains = False
+
     # Optional: declare method-specific CLI flags. The runner namespaces them under --m-<flag>.
     def add_args(self, parser):
         pass
