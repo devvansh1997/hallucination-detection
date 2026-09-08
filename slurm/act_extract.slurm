@@ -17,9 +17,10 @@
 # TIMEOUT. Only stderr survived, showing repeated "CondaError: Run 'conda init' before 'conda
 # deactivate'". Three fixes, in order of what actually goes wrong:
 #
-#   1. --export=ALL is passed by submit_act.sh. submit_hgreb.sh, which works, passes it on every
-#      job; this file's driver did not. Without it the module-system shell functions and the HF
-#      cache variables do not reach the job.
+#   1. Inherited CONDA_* variables are stripped before `module load`. Submitting from an activated
+#      env made Lmod loop on `conda deactivate` forever -- 16,958 errors then a TIMEOUT. This was
+#      the real cause of 798664/798665 and 798802/798803; --export=ALL was a red herring, since
+#      sbatch exports the environment by default anyway.
 #   2. Everything is verified BEFORE the GPU does any work, and each check exits non-zero with a
 #      message. A wrong environment is now a five-second failure, not a forty-minute one.
 #   3. PYTHONUNBUFFERED and `set -x` on stderr, so a killed job still leaves a trail. stdout can be
@@ -53,6 +54,23 @@ export PYTHONUNBUFFERED=1
 set -x
 
 echo "$(date +%F_%T): act extract ${MODEL}/${DS}  pool=(8,${NPOOL})  max_gb=${MAXGB}" >&2
+
+# STRIP INHERITED CONDA STATE BEFORE `module load`. THIS IS THE ONE THAT KEPT KILLING THESE JOBS.
+#
+# sbatch exports the submitting shell's environment by default. Submit from a prompt that reads
+# "(hal-det) [user@host]$" and the job inherits CONDA_SHLVL, CONDA_PREFIX, CONDA_PREFIX_1 and
+# CONDA_DEFAULT_ENV. Lmod's anaconda module then tries to unwind that stack with `conda deactivate`,
+# which cannot work in a non-interactive job shell: it errors, retries, and never terminates because
+# CONDA_SHLVL never decrements. Job 798802 wrote 16,958 identical
+#   "CondaError: Run 'conda init' before 'conda deactivate'"
+# and then died on the wall clock. 798664/798665 were the same failure, misread at the time as a
+# missing --export=ALL.
+#
+# Unsetting makes the job's shell look like a fresh login, which is the state module load expects.
+# It also makes the job independent of whether the person submitting had an env active -- which is
+# why this belongs here rather than in a rule about how to submit.
+for _v in $(compgen -v | grep '^CONDA' || true); do unset "$_v"; done
+unset _CE_M _CE_CONDA || true
 
 module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
 conda activate hal-det

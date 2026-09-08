@@ -36,6 +36,16 @@
 - In .slurm files use `set -u`, not `set -euo pipefail`, and put `|| exit 1` on each real command
 - `mkdir -p slurm_logs` belongs in the submit script, on the login node. SLURM does not create the
   directory for `--output`, and a job whose log cannot be opened dies before it runs.
+- EVERY .slurm file must strip inherited conda state before `module load`:
+      for _v in $(compgen -v | grep '^CONDA' || true); do unset "$_v"; done
+      unset _CE_M _CE_CONDA || true
+  sbatch exports the submitting shell's environment, so submitting from a `(hal-det)`
+  prompt hands the job a conda stack it cannot unwind. Lmod's anaconda module retries
+  `conda deactivate` forever: 16,958 identical CondaErrors, then death on the wall clock.
+  Cost four jobs on 2026-09-08 and was misdiagnosed twice as other things. It is
+  INTERMITTENT -- it depends only on whether the submitter had an env active, so the same
+  script appears to work and then hang. `slurm/hgreb_stage.slurm` has the same shape and
+  the same latent bug.
 - Working reference: `slurm/hgreb_stage.slurm`. Copy from it, not from this section.
 - NEVER `pip install` into `hal-det` without checking what it drags in. `pip install
   vit-pytorch` pulled `torchvision==0.28.0` from PyPI, whose build does not match the env's
