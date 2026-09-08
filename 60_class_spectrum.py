@@ -39,6 +39,7 @@ Usage:
   python 60_class_spectrum.py --self-test
   python 60_class_spectrum.py --dataset tydiqa_gp  --model_folder qwen-2.5-7b-instruct
   python 60_class_spectrum.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct --stream q95
+  python 60_class_spectrum.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct --paired
   python 60_class_spectrum.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct --resume
 
 Results are written after EVERY layer, so a run that dies keeps what it had; --resume
@@ -145,6 +146,54 @@ def compare_classes(X, y, n_boot=20, seed=0, k=R_F, frac=0.8):
     return res
 
 
+def compare_paired(X, y, prompt_id, n_boot=20, seed=0, k=R_F):
+    """Per-class spectra with the QUESTION SET held identical, not just the row count.
+
+    WHY THIS EXISTS, and why compare_classes alone is not enough. Truthful answers can only come
+    from KNOWN questions; hallucinated answers come from every question. On TyDiQA that is ~302
+    questions against 440, so the hallucinated cloud covers 46% more topics before hallucination is
+    considered at all. Answers to one question share a prompt and sit close together, so topic
+    coverage drives spread directly -- and matching only the number of ROWS leaves it uncontrolled.
+
+    This is the pooled-versus-within-prompt distinction the paper is built on, reappearing here. An
+    uncontrolled version of this figure invites a reviewer to make our own argument back at us.
+
+    The control: keep only questions holding BOTH a truthful and a hallucinated answer, then draw
+    one of each per question. Both clouds then span the identical question set with identical
+    counts, so any surviving gap is about hallucination rather than about coverage."""
+    rng = np.random.default_rng(seed)
+    qs, t_idx, h_idx = [], {}, {}
+    for q in np.unique(prompt_id):
+        rows = np.flatnonzero(prompt_id == q)
+        t, h = rows[y[rows] == 0], rows[y[rows] == 1]
+        if len(t) and len(h):
+            qs.append(q)
+            t_idx[q], h_idx[q] = t, h
+
+    out = {st: {"0": [], "1": []} for st in ("erank", "participation", "energy")}
+    if len(qs) < 8:
+        return ({st: {c: (float("nan"),) * 3 for c in ("0", "1")} for st in out}
+                | {"n_draw": len(qs), "n_questions_paired": len(qs)})
+
+    for b in range(n_boot):
+        pick_t = np.array([rng.choice(t_idx[q]) for q in qs])
+        pick_h = np.array([rng.choice(h_idx[q]) for q in qs])
+        for cls, sub in (("0", pick_t), ("1", pick_h)):
+            lam = spectrum(X[sub])
+            out["erank"][cls].append(effective_rank(lam))
+            out["participation"][cls].append(participation_ratio(lam))
+            out["energy"][cls].append(energy_at(lam, k))
+
+    def band(v):
+        v = np.asarray(v, dtype=np.float64)
+        return (float(np.mean(v)), float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5)))
+
+    res = {st: {c: band(out[st][c]) for c in ("0", "1")} for st in out}
+    res["n_draw"] = len(qs)
+    res["n_questions_paired"] = len(qs)
+    return res
+
+
 def separated(a, b):
     """True when the two 95% bands do not overlap -- the only claim this figure may make."""
     return a[2] < b[1] or b[2] < a[1]
@@ -175,7 +224,8 @@ def _save(dst, payload):
     os.replace(tmp, dst)
 
 
-def run(dataset, model_folder, in_dir, out_dir, stream, n_boot, seed, layers=None, resume=False):
+def run(dataset, model_folder, in_dir, out_dir, stream, n_boot, seed, layers=None,
+        resume=False, paired=False):
     path = os.path.join(in_dir, model_folder, "%s_alllayers.npz" % dataset)
     if not os.path.exists(path):
         raise SystemExit(
@@ -187,11 +237,14 @@ def run(dataset, model_folder, in_dir, out_dir, stream, n_boot, seed, layers=Non
         raise SystemExit("stream %r not in %s; available: %s"
                          % (stream, path, [k for k in z.files if k in ("core", "q95", "q05")]))
     A, y = z[stream], np.asarray(z["label"], dtype=int)
+    pid = np.asarray(z["prompt_id"])
     n_beams, n_layers, D = A.shape
     todo = list(range(n_layers)) if layers is None else list(layers)
 
     os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "spectrum_%s_%s_%s.json" % (model_folder, dataset, stream))
+    tag = "_paired" if paired else ""
+    dst = os.path.join(out_dir,
+                       "spectrum_%s_%s_%s%s.json" % (model_folder, dataset, stream, tag))
 
     # RESUME. Each layer costs minutes, so a run that dies at layer 27 must not throw away 27
     # layers of work. Results are written after EVERY layer, and --resume skips what is already
@@ -211,13 +264,20 @@ def run(dataset, model_folder, in_dir, out_dir, stream, n_boot, seed, layers=Non
             print("  NOT resuming: %s was written with different settings (stream/n_boot)"
                   % os.path.basename(dst), flush=True)
 
-    print("  [%s/%s] stream=%s  %d answers (%.1f%% hallucinated), %d layers, D=%d"
-          % (model_folder, dataset, stream, n_beams, 100.0 * y.mean(), n_layers, D), flush=True)
+    print("  [%s/%s] stream=%s  %d answers (%.1f%% hallucinated), %d questions, %d layers, D=%d"
+          % (model_folder, dataset, stream, n_beams, 100.0 * y.mean(), len(np.unique(pid)),
+             n_layers, D), flush=True)
+    if paired:
+        n_pair = sum(1 for q in np.unique(pid)
+                     if ((y[pid == q] == 0).any() and (y[pid == q] == 1).any()))
+        print("  PAIRED: %d questions hold both a truthful and a hallucinated answer; both clouds "
+              "are drawn from exactly those, one answer each" % n_pair, flush=True)
 
     t0 = time.time()
     for k, li in enumerate(todo):
         X = robust_scale(np.asarray(A[:, li, :], dtype=np.float32))
-        r = compare_classes(X, y, n_boot=n_boot, seed=seed + li)
+        r = (compare_paired(X, y, pid, n_boot=n_boot, seed=seed + li) if paired
+             else compare_classes(X, y, n_boot=n_boot, seed=seed + li))
         r["layer"] = int(li)
         rows.append(r)
         e0, e1 = r["erank"]["0"], r["erank"]["1"]
@@ -233,11 +293,18 @@ def run(dataset, model_folder, in_dir, out_dir, stream, n_boot, seed, layers=Non
         _save(dst, {"dataset": dataset, "model_folder": model_folder, "stream": stream,
                     "source": os.path.abspath(path), "n_boot": n_boot, "seed": seed,
                     "r_f": R_F, "window": WINDOW, "hallucination_rate": float(y.mean()),
+                    "paired_by_question": bool(paired),
                     "n_layers_done": len(rows), "n_layers_total": int(n_layers),
                     "complete": len(rows) == n_layers,
                     "n_layers_separated": n_sep, "verdict": verdict,
-                    "note": ("classes are subsampled to equal n on every draw; an unmatched "
-                             "comparison would report sample size, not structure"),
+                    "note": (("paired: one truthful and one hallucinated answer drawn per "
+                              "question, so both clouds span the SAME questions -- this controls "
+                              "topic coverage, which the row-matched comparison does not")
+                             if paired else
+                             ("classes are subsampled to equal n on every draw. NOTE this matches "
+                              "the number of ANSWERS, not the number of QUESTIONS: truthful answers "
+                              "come only from known questions, so the hallucinated cloud covers "
+                              "more topics. Run with --paired for the controlled comparison")),
                     "layers": rows, "elapsed_seconds": round(time.time() - t0, 1)})
 
     if rows:
@@ -320,6 +387,58 @@ def self_test():
     print("  [PASS] the same data UNMATCHED shows a spurious gap (%.1f vs %.1f) -- so the null "
           "above is a real check, not a vacuous one" % (unmatched_big, unmatched_small))
 
+    # THE CONFOUND TEST, and the reason compare_paired exists. Build data in which the classes are
+    # IDENTICAL in every respect except which questions they come from -- exactly our situation,
+    # where truthful answers exist only for known questions while hallucinated answers span all of
+    # them. Each question contributes its own direction, so a cloud covering more questions spreads
+    # over more directions with no relationship to the label.
+    #
+    # compare_classes MUST be fooled by this (it matches rows, not questions). compare_paired MUST
+    # NOT be. If the first assertion ever fails the test has stopped being a test.
+    n_known, n_unknown, D = 60, 40, 80
+    topics = rng.standard_normal((n_known + n_unknown, D)) * 5.0
+    rows_X, rows_y, rows_q = [], [], []
+    for q in range(n_known):                 # known: 5 truthful and 5 hallucinated, same topic
+        for cls in (0, 1):
+            for _ in range(5):
+                rows_X.append(topics[q] + rng.standard_normal(D) * 0.3)
+                rows_y.append(cls)
+                rows_q.append(q)
+    for q in range(n_known, n_known + n_unknown):     # unknown: 10 hallucinated only
+        for _ in range(10):
+            rows_X.append(topics[q] + rng.standard_normal(D) * 0.3)
+            rows_y.append(1)
+            rows_q.append(q)
+    Xc = np.asarray(rows_X)
+    yc = np.asarray(rows_y, dtype=int)
+    qc = np.asarray(rows_q)
+
+    naive = compare_classes(Xc, yc, n_boot=10, seed=3)
+    assert separated(naive["erank"]["0"], naive["erank"]["1"]), (
+        "the confound test is not confounding anything -- compare_classes should be fooled here")
+    assert naive["erank"]["1"][0] > naive["erank"]["0"][0]
+    print("    [PASS] row-matched comparison IS fooled by question coverage alone "
+          "(%.1f vs %.1f, no label effect present)"
+          % (naive["erank"]["0"][0], naive["erank"]["1"][0]))
+
+    ctrl = compare_paired(Xc, yc, qc, n_boot=10, seed=3)
+    assert ctrl["n_questions_paired"] == n_known, ctrl["n_questions_paired"]
+    assert not separated(ctrl["erank"]["0"], ctrl["erank"]["1"]), (
+        "PAIRED CONTROL FAILED: it still reports a difference between classes that differ only in "
+        "question coverage (%s). Every paired result would be an artifact." % (ctrl["erank"],))
+    print("    [PASS] paired-by-question control removes it (%.1f vs %.1f over the %d shared "
+          "questions)" % (ctrl["erank"]["0"][0], ctrl["erank"]["1"][0],
+                          ctrl["n_questions_paired"]))
+
+    # And it must still SEE a real effect once one is present, or it is merely insensitive.
+    Xr = Xc.copy()
+    Xr[yc == 1] += rng.standard_normal((int((yc == 1).sum()), D)) * 4.0   # extra spread, all Qs
+    ctrl2 = compare_paired(Xr, yc, qc, n_boot=10, seed=4)
+    assert separated(ctrl2["erank"]["0"], ctrl2["erank"]["1"]), ctrl2["erank"]
+    assert ctrl2["erank"]["1"][0] > ctrl2["erank"]["0"][0]
+    print("    [PASS] paired control still detects a genuine label effect (%.1f vs %.1f)"
+          % (ctrl2["erank"]["0"][0], ctrl2["erank"]["1"][0]))
+
     # Scaling must not itself encode the labels: fitted on all rows, it is one affine map.
     Xs = robust_scale(np.vstack([rng.standard_normal((50, 6)), 100 + rng.standard_normal((50, 6))]))
     assert np.isfinite(Xs).all() and Xs.shape == (100, 6)
@@ -341,6 +460,9 @@ def main():
     p.add_argument("--n-boot", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--layers", type=int, nargs="*", default=None)
+    p.add_argument("--paired", action="store_true",
+                   help="control for topic coverage: draw one truthful and one "
+                        "hallucinated answer per question, same questions both sides")
     p.add_argument("--resume", action="store_true",
                    help="skip layers already present in the output JSON")
     a = p.parse_args()
@@ -350,7 +472,7 @@ def main():
     if not a.dataset or not a.model_folder:
         raise SystemExit("--dataset and --model_folder are required (or use --self-test)")
     run(a.dataset, a.model_folder, a.in_dir, a.out_dir, a.stream, a.n_boot, a.seed,
-        a.layers, a.resume)
+        a.layers, a.resume, a.paired)
 
 
 if __name__ == "__main__":
