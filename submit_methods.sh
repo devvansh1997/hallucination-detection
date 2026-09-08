@@ -6,6 +6,8 @@
 #
 #   bash submit_methods.sh                                   # all registered methods, all cells
 #   METHODS="perplexity eigenscore" bash submit_methods.sh    # a subset
+#   METHODS=act_vit DATASETS="tydiqa_gp truthfulqa" bash submit_methods.sh
+#   METHODS=act_vit TAG=n100 EXTRA="--m-n-eff 100" bash submit_methods.sh   # their default arm
 #   DATASETS=tydiqa_gp MODELS=qwen-2.5-7b-instruct bash submit_methods.sh   # one cell, to smoke-test
 #   FORCE=1 bash submit_methods.sh                            # ignore skip guards
 #
@@ -28,6 +30,8 @@ MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa nq_open triviaqa}"
 PART="${PART:-highgpu}"
 TAG="${TAG:-}"
+# Anything here is appended to 56_run_method.py's command line, e.g. EXTRA="--m-n-eff 100".
+EXTRA="${EXTRA:-}"
 
 # Sized from measured runs: scoring is one forward pass per question and is dominated by model
 # load on the small datasets. TriviaQA is the only one that needs real time.
@@ -35,6 +39,15 @@ job_time() { [ -n "${JOB_TIME:-}" ] && { echo "$JOB_TIME"; return; }
              case "$1" in tydiqa_gp) echo "00:40:00";; truthfulqa) echo "01:00:00";;
                           nq_open) echo "02:00:00";; triviaqa) echo "05:00:00";;
                           *) echo "02:00:00";; esac; }
+
+# Host RAM. Most methods stream from the pinned generations and 80G is ample. act_vit is the
+# exception: it holds a whole activation tensor in RAM, 4.7 GB per dataset at N_eff=20 but
+# 23.5 GB (TyDiQA) and 43.6 GB (TruthfulQA) at N_eff=100. Override with MEM= for anything unusual.
+job_mem() { [ -n "${MEM:-}" ] && { echo "$MEM"; return; }
+            if [ "$1" = "act_vit" ]; then
+                case "$2" in tydiqa_gp) echo "64G";; truthfulqa) echo "110G";;
+                             nq_open) echo "220G";; triviaqa) echo "600G";; *) echo "120G";; esac
+            else echo "80G"; fi; }
 
 # Sets a global rather than echoing: called as J=$(sub ...) this runs in a subshell where `exit`
 # kills only the subshell and the driver reports success for jobs it never queued. That has
@@ -65,11 +78,12 @@ N=0
 for ME in $METHODS; do
   for MO in $MODELS; do
     for DS in $DATASETS; do
-      sub "-p $PART --mem=80G --gres=gpu:1 --time=$(job_time $DS) \
+      sub "-p $PART --mem=$(job_mem $ME $DS) --gres=gpu:1 --time=$(job_time $DS) \
            --job-name=m-${ME:0:6}-${DS:0:4} \
            --export=ALL,HD_REPO=$HD_REPO,HD_DATA=${HD_DATA:-},FORCE=${FORCE:-0}" \
-          "$ME" "$MO" "$DS" "$TAG"
-      printf "  %-20s %-24s %-12s -> %s\n" "$ME" "$MO" "$DS" "$JOBID"
+          "$ME" "$MO" "$DS" "$TAG" ${EXTRA:-}
+      printf "  %-20s %-24s %-12s -> %s  (mem %s, %s)\n" "$ME" "$MO" "$DS" "$JOBID" \
+             "$(job_mem $ME $DS)" "$(job_time $DS)"
       N=$((N+1))
     done
   done

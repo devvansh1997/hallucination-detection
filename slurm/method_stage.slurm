@@ -31,8 +31,24 @@ REPO="${HD_REPO:?set HD_REPO to your clone of hallucination-detection}"
 DATA="${HD_DATA:-}"
 
 echo "$(date +%F_%H-%M-%S): method=$METHOD model=$MODEL dataset=$DS tag=${TAG:-none}"
+
+# STRIP INHERITED CONDA STATE BEFORE `module load`. sbatch exports the submitting shell's
+# environment, so submitting from a "(hal-det)" prompt hands the job a conda stack it cannot
+# unwind: Lmod's anaconda module retries `conda deactivate` forever, writing thousands of
+# "CondaError: Run 'conda init' before 'conda deactivate'" until the wall clock kills it. That
+# cost four extraction jobs on 2026-09-08 and was misdiagnosed twice. It is INTERMITTENT -- it
+# depends only on whether the submitter had an env active -- so this file appearing to work is
+# not evidence that it is safe.
+for _v in $(compgen -v | grep '^CONDA' || true); do unset "$_v"; done
+unset _CE_M _CE_CONDA || true
+
 module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
 conda activate hal-det
+
+if [ "${CONDA_DEFAULT_ENV:-}" != "hal-det" ]; then
+    echo "FATAL: conda env is '${CONDA_DEFAULT_ENV:-<none>}', expected hal-det." >&2
+    exit 1
+fi
 
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
@@ -59,6 +75,8 @@ except Exception as e:
     print("  existing result unreadable (%s) -- recomputing" % e); sys.exit(1)
 if not d.get("all_rows") or not d.get("protocols"):
     print("  existing result incomplete -- recomputing"); sys.exit(1)
+if not all(d["protocols"].get(a, {}).get("per_seed") for a in ("question", "answer")):
+    print("  existing result has an empty protocol arm -- recomputing"); sys.exit(1)
 print("  verified: %s on %d rows already scored" % (d.get("method"), d.get("n_beams", 0)))
 sys.exit(0)
 PYEOF
