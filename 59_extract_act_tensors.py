@@ -80,6 +80,49 @@ def estimate_gb(n_beams, l_pool, n_pool, D, bytes_per=2):
     return n_beams * l_pool * n_pool * D * bytes_per / 1024 ** 3
 
 
+def repool(in_path, n_pool, out_path=None):
+    """Re-derive a smaller N_p from an existing extraction, with no forward pass.
+
+    Valid only when the source file did no token pooling, i.e. every completion was shorter than
+    its N_p so Algorithm 1's f_N was 1 and the stored columns are the real per-token states
+    followed by edge replicas. That holds for our data at N_p = 100 (longest completion is 64) and
+    is CHECKED here rather than assumed -- re-pooling an already-pooled axis would silently take a
+    max of maxima over the wrong block boundaries.
+
+    Why this exists. Our median completion is 16-17 tokens, so N_p = 100 stores roughly six times
+    what the answer contains and hands ACT-ViT's transformer ~670 duplicate activation pixels with
+    distinct positional encodings. N_p = 20 sits inside their own published ablation grid
+    (their Figure 3 sweeps (L_p, N_p) over {4,8} x {20,100}), so it is their hyperparameter chosen
+    for our input lengths, not a deviation from their method.
+    """
+    z = np.load(in_path)
+    at, tok_len = z["at"], z["token_len"]
+    n, l_pool, n_src, D = at.shape
+    if n_pool > n_src:
+        raise SystemExit("cannot repool upward: source has N_p=%d, asked for %d" % (n_src, n_pool))
+    if int(tok_len.max()) > n_src:
+        raise SystemExit(
+            "source at %s was itself token-pooled (longest completion %d > N_p %d), so its columns "
+            "are maxima over blocks and cannot be re-blocked. Re-extract instead."
+            % (in_path, int(tok_len.max()), n_src))
+
+    out = np.empty((n, l_pool, n_pool, D), dtype=at.dtype)
+    for i in range(n):
+        t = max(int(tok_len[i]), 1)
+        # Trim the edge replicas back off, then run Algorithm 1 again at the new target. The layer
+        # axis is already at l_pool, so f_l = 1 there and this touches only the token axis.
+        out[i] = act_pool(at[i, :, :t, :], l_pool, n_pool).astype(at.dtype)
+
+    if out_path is None:
+        out_path = in_path.replace("_N%d.npz" % n_src, "_N%d.npz" % n_pool)
+    np.savez(out_path, at=out, prompt_id=z["prompt_id"], label=z["label"],
+             beam_row=z["beam_row"], token_len=tok_len)
+    print("  repooled %s (N_p %d -> %d): %.1f GB -> %.1f GB"
+          % (os.path.basename(in_path), n_src, n_pool,
+             os.path.getsize(in_path) / 1024 ** 3, os.path.getsize(out_path) / 1024 ** 3))
+    return out_path
+
+
 def run(dataset, model_folder, data_dir, out_dir, device, dtype, l_pool, n_pool, max_gb, limit,
         log_every):
     import torch
@@ -272,6 +315,40 @@ def self_test():
     print("  [PASS] N_p=32 cuts TriviaQA to %.0f GB; N_p is the knob, L_p is already at their "
           "default" % estimate_gb(99600, 8, 32, 3584))
 
+    # repool: deriving a smaller N_p offline must equal extracting at that N_p directly. This is
+    # the property that lets us avoid a second forward pass, so it is asserted, not assumed.
+    import tempfile
+    rng = np.random.default_rng(0)
+    L1, Dt, n_src = 29, 5, 100
+    raws = [rng.standard_normal((L1, int(t), Dt)).astype(np.float32) for t in (3, 16, 17, 64, 1)]
+    src = np.stack([act_pool(r, 8, n_src) for r in raws]).astype(np.float16)
+    direct = np.stack([act_pool(r, 8, 20) for r in raws]).astype(np.float16)
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "x_at_L8_N100.npz")
+        np.savez(p, at=src, prompt_id=np.arange(len(raws)), label=np.zeros(len(raws)),
+                 beam_row=np.arange(len(raws)),
+                 token_len=np.array([r.shape[1] for r in raws], dtype=np.int32))
+        q = repool(p, 20)
+        got = np.load(q)["at"]
+    assert got.shape == direct.shape, (got.shape, direct.shape)
+    assert np.array_equal(got, direct), "repool(N=100 -> 20) != direct extraction at N=20"
+    print("  [PASS] repool from N_p=100 to 20 reproduces direct extraction exactly, T in "
+          "{1,3,16,17,64}")
+
+    # And it must REFUSE when the source really was token-pooled, since re-blocking maxima would
+    # silently take a max over the wrong boundaries and produce a plausible wrong answer.
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "y_at_L8_N8.npz")
+        np.savez(p, at=np.zeros((1, 8, 8, 2), dtype=np.float16), prompt_id=np.array([0]),
+                 label=np.array([0]), beam_row=np.array([0]),
+                 token_len=np.array([64], dtype=np.int32))
+        try:
+            repool(p, 4)
+            raise AssertionError("repool accepted an already-pooled source")
+        except SystemExit as e:
+            assert "token-pooled" in str(e), str(e)
+    print("  [PASS] repool refuses a source whose completions exceeded its own N_p")
+
     print("\n  ALL PASS")
     return True
 
@@ -290,12 +367,18 @@ def main():
     p.add_argument("--l-pool", type=int, default=L_POOL)
     p.add_argument("--n-pool", type=int, default=N_POOL)
     p.add_argument("--max-gb", type=float, default=DEFAULT_MAX_GB)
+    p.add_argument("--repool-from", default=None,
+                   help="existing .npz to re-derive a smaller --n-pool from, CPU only, no "
+                        "model load. Valid only if the source did no token pooling.")
     p.add_argument("--limit", type=int, default=None, help="first N questions only")
     p.add_argument("--log-every", type=int, default=50)
     a = p.parse_args()
 
     if a.self_test:
         raise SystemExit(0 if self_test() else 1)
+    if a.repool_from:
+        repool(a.repool_from, a.n_pool)
+        raise SystemExit(0)
     if not a.dataset or not a.model_folder:
         raise SystemExit("--dataset and --model_folder are required (or use --self-test)")
     run(a.dataset, a.model_folder, a.data_dir, a.out_dir, a.device, a.dtype,
