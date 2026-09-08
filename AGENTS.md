@@ -38,13 +38,21 @@
   directory for `--output`, and a job whose log cannot be opened dies before it runs.
 - Working reference: `slurm/hgreb_stage.slurm`. Copy from it, not from this section.
 - NEVER `pip install` into `hal-det` without checking what it drags in. `pip install
-  vit-pytorch` pulled `torchvision==0.28.0`, built against a different torch than the env's
-  `2.13.0+cu126`. `transformers.image_utils` imports `torchvision.io` unconditionally, so
-  op registration failed with `RuntimeError: operator torchvision::nms does not exist` and
-  EVERY transformers model import in the env broke -- not just the new code. Cost four jobs
-  on 2026-09-08. Use `pip install --no-deps`, or `pip download` first and read the tree.
-- `vit-pytorch` needs only torch + einops for `ViT`; torchvision is a declared dependency it
-  does not actually use. Install it with `--no-deps`.
+  vit-pytorch` pulled `torchvision==0.28.0` from PyPI, whose build does not match the env's
+  `torch 2.13.0+cu126`. Every transformers model import then died with `RuntimeError:
+  operator torchvision::nms does not exist` -- the whole env, not just the new code. Cost
+  four jobs on 2026-09-08. `pip download` first and read the tree.
+- transformers tolerates torchvision being ABSENT; it breaks on one that is present and
+  ABI-mismatched. So `pip uninstall torchvision` restores transformers, and `59`/`42`/`39`
+  work again immediately -- none of them need it.
+- `vit-pytorch` DOES need torchvision: its `__init__.py` imports `dino`, which imports
+  `torchvision.transforms`. `--no-deps` alone is therefore not enough. Install a build that
+  matches the env's torch:
+      pip install --no-deps torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
+  and verify BOTH before submitting anything:
+      python -c "from transformers import AutoModelForCausalLM; from vit_pytorch import ViT"
+  (`from vit_pytorch.vit import ViT` would bypass `dino`, but ACT-ViT's own code uses the
+  package-level import, and their files stay unmodified.)
 - ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 

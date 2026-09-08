@@ -75,12 +75,15 @@ def build_model(l_pool, n_pool, device):
         from utils.Architectures import get_model
     except ImportError as e:
         raise SystemExit(
-            "could not import ACT-ViT's architecture (%s). Install with --no-deps:\n"
+            "could not import ACT-ViT's architecture (%s).\n"
             "    pip install --no-deps vit-pytorch==1.8.9 einops==0.8.0\n"
-            "--no-deps IS REQUIRED. A plain install pulls torchvision, which pip builds\n"
-            "against a different torch than the env has; transformers imports torchvision.io\n"
-            "unconditionally, so every model load in the env then dies with\n"
-            "'operator torchvision::nms does not exist'. vit-pytorch's ViT never uses it." % e)
+            "    pip install --no-deps torchvision==0.28.0 \\\n"
+            "        --index-url https://download.pytorch.org/whl/cu126\n"
+            "TORCHVISION MUST MATCH THE ENV'S TORCH BUILD. vit_pytorch/__init__.py imports\n"
+            "dino, which imports torchvision.transforms, so it is genuinely required -- but a\n"
+            "PyPI build against the wrong torch makes EVERY transformers model load in the env\n"
+            "fail with 'operator torchvision::nms does not exist'. Verify both after installing:\n"
+            "    python -c \"from transformers import AutoModelForCausalLM; from vit_pytorch import ViT\"" % e)
     return get_model(_Args(), input_shape=(l_pool, n_pool, FEATURE_DIM_MAX),
                      input_dim=FEATURE_DIM_MAX).to(device)
 
