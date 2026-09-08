@@ -9,18 +9,32 @@ treatment HARP got via 49_harp_adapter.py. This script produces the input side o
 THE BLOCKER IS STORAGE, NOT COMPUTE. Unpooled, Qwen/TriviaQA is 28 x 64 x 3584 x 2 bytes = 12.9 MB
 per beam, and 99,600 beams is ~1.3 TB. Their own answer is to pool immediately, so we pool INSIDE
 the forward loop and never hold a full-resolution tensor. At (L_p, N_p) = (8, 100) a beam is 5.7 MB:
-TyDiQA 25 GB, TruthfulQA 47 GB, TriviaQA 571 GB. The first two are fine; TriviaQA needs a harder
+TyDiQA 23 GB, TruthfulQA 44 GB, TriviaQA 532 GB. The first two are fine; TriviaQA needs a harder
 pool and is refused by --max-gb until someone decides that deliberately.
 
-POOLING IS THEIRS, NOT OURS. `act_pool` reimplements their Algorithm 1 exactly:
-    permute to [D, L, N] -> pad so L, N are divisible -> max_pool2d(kernel=(ceil(L/L_p),
-    ceil(N/N_p))) -> permute back to [L_p, N_p, D]
-Two details in that algorithm are easy to get wrong and are pinned by the self-test:
-  * the kernel is computed from the PADDED length, and stride equals kernel (non-overlapping), so
-    the output is exactly (L_p, N_p) for any input size;
-  * padding must not invent maxima. F.max_pool2d pads with -inf, but we pad by EDGE REPLICATION
-    before pooling, because a -inf column that survives into an output cell would produce -inf
-    features for short answers -- and our answers are short (<= 64 tokens) relative to N_p = 100.
+POOLING IS THEIRS, NOT OURS, AND IT IS NOT WHAT THE PAPER'S ALGORITHM 1 SUGGESTS. The released
+preprocessing (utils/dataset_preprocess.py, process_file lines 210-221) is TWO padding steps:
+
+    L_for_pad = (int(L / L_eff) + 1) * L_eff      # 29 -> 32; adds a full block even if divisible
+    N_for_pad = N_MAX if N_MAX % N_eff == 0 else (int(N_MAX/N_eff)+1)*N_eff
+    pad_activations_tensor(..., pad_value=0)      # ZERO pad, and TRUNCATE anything past N_MAX
+    patch_down_sample(..., method='max_pool')     # replicate pad to divisibility, then max
+
+The replicate pad in the second step never fires for any configuration we run, because the zero pad
+has already made both axes divisible. So the padding that reaches the data is ZEROS. An earlier
+version of this file read Algorithm 1 from the paper and used edge replication throughout, which
+was wrong twice over:
+
+  * tokens. Our median completion is 16-17 against N_MAX = 100, so 84 of the 100 columns are zero.
+    Edge replication filled them with copies of the last real token instead -- a different tensor,
+    and a different ViT input.
+  * layers. L = 29 zero-pads to 32 and factor_L = 4, so the last of the eight output slots is
+    max(layer 28, 0, 0, 0), an elementwise ReLU on the final layer. Edge replication gave layer 28
+    unchanged.
+
+The self-test asserts bit-identity against their own pad_activations_tensor and patch_down_sample,
+imported from ../ACT-ViT, over 42 combinations of (L, T, N_eff). Nothing here relies on a reading
+of their paper.
 
 WHAT THIS DOES NOT DO. It does not train ACT-ViT. Their Linear Adapter (D -> 128) and ViT backbone
 are supervised and must be fit inside a split, so they belong in the harness as methods/act_vit.py,
@@ -36,7 +50,9 @@ Usage:
   python 59_extract_act_tensors.py --dataset tydiqa_gp  --model_folder qwen-2.5-7b-instruct
   python 59_extract_act_tensors.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct
   python 59_extract_act_tensors.py --dataset triviaqa   --model_folder qwen-2.5-7b-instruct \
-      --n-pool 16 --max-gb 100          # TriviaQA only lands under a harder pool
+      --n-pool 20 --max-gb 150          # TriviaQA only lands under a harder pool
+  python 59_extract_act_tensors.py --repool-from ../data-acttensors/qwen-2.5-7b-instruct/\
+      tydiqa_gp_at_L8_N100.npz --n-pool 20        # CPU only, no model load
 """
 
 import argparse
@@ -52,72 +68,108 @@ DEFAULT_OUT = os.path.abspath(os.path.join(HERE, "..", "data-acttensors"))
 DEFAULT_DATA = os.path.abspath(os.path.join(HERE, "..", "data"))
 
 L_POOL = 8               # ACT-ViT's default L_p
-N_POOL = 100             # ACT-ViT's default N_p
+N_POOL = 100             # ACT-ViT's default N_p (their args.N_eff)
+N_MAX = 100              # their utils/constants.py N_MAX -- the zero-pad target
 DEFAULT_MAX_GB = 60.0
 
 
-def act_pool(A, l_pool=L_POOL, n_pool=N_POOL):
-    """ACT-ViT Algorithm 1. A is (L, N, D) -> returns (l_pool, n_pool, D).
+def act_pool(A, l_pool=L_POOL, n_pool=N_POOL, n_max=N_MAX):
+    """ACT-ViT preprocessing. A is (L, N, D) -> returns (l_pool, n_pool, D).
 
-    Pure numpy so the self-test runs without torch. Edge-replication padding, then non-overlapping
-    max over blocks. See the module docstring for why the padding is replication and not -inf.
+    Faithful to utils/dataset_preprocess.py in their repo, which is TWO padding steps, not one.
+    `process_file` lines 210-221 do:
+
+        L_for_pad = (int(L / L_eff) + 1) * L_eff          # 29 -> 32; always adds >= 1 full block
+        N_for_pad = N_MAX if N_MAX % N_eff == 0 else (int(N_MAX/N_eff)+1)*N_eff
+        pad_activations_tensor(..., pad_value=0)          # ZERO pad, and TRUNCATE if longer
+        patch_down_sample(..., method='max_pool')         # replicate pad to divisibility, then max
+
+    The replicate pad inside `patch_down_sample` is a no-op for every configuration we run, because
+    the zero pad already made both axes divisible. So the padding that actually reaches the data is
+    ZEROS. Getting this backwards matters twice over:
+
+      * tokens. Our median completion is 16-17 against N_MAX = 100, so 84 of the 100 columns are
+        zero. Edge replication would instead fill them with copies of the last real token, which is
+        a different tensor and a different ViT input.
+      * layers. L = 29 zero-pads to 32, factor_L = 4, so the last of the eight output layer slots is
+        max(layer 28, 0, 0, 0) -- an elementwise ReLU on the final layer. Under edge replication it
+        would be layer 28 unchanged.
+
+    The self-test asserts equality against their two functions imported from the cloned repo, so
+    this docstring is not the thing being trusted.
     """
     A = np.asarray(A, dtype=np.float32)
     L, N, D = A.shape
     if L == 0 or N == 0 or D == 0:
         raise ValueError("act_pool got an empty tensor with shape %r" % (A.shape,))
 
-    f_l, f_n = int(math.ceil(L / l_pool)), int(math.ceil(N / n_pool))
-    L_pad, N_pad = f_l * l_pool, f_n * n_pool
-    if L_pad != L or N_pad != N:
-        A = np.pad(A, ((0, L_pad - L), (0, N_pad - N), (0, 0)), mode="edge")
+    l_for_pad = (int(L / l_pool) + 1) * l_pool
+    n_for_pad = n_max if (n_max % n_pool) == 0 else (int(n_max / n_pool) + 1) * n_pool
 
-    # (l_pool, f_l, n_pool, f_n, D) -> max over the two block axes.
-    return A.reshape(l_pool, f_l, n_pool, f_n, D).max(axis=(1, 3))
+    # Zero pad, truncating any axis that is already longer (their pad_activations_tensor takes
+    # min(N, N_max), so a completion beyond N_MAX is CUT, not pooled).
+    P = np.zeros((l_for_pad, n_for_pad, D), dtype=np.float32)
+    P[:min(L, l_for_pad), :min(N, n_for_pad), :] = A[:min(L, l_for_pad), :min(N, n_for_pad), :]
+
+    # patch_down_sample: replicate to divisibility (a no-op once the zero pad has run), then
+    # non-overlapping max over blocks.
+    l_pad = (l_pool - (l_for_pad % l_pool)) % l_pool + l_for_pad
+    n_pad = (n_pool - (n_for_pad % n_pool)) % n_pool + n_for_pad
+    if l_pad != l_for_pad or n_pad != n_for_pad:
+        P = np.pad(P, ((0, l_pad - l_for_pad), (0, n_pad - n_for_pad), (0, 0)), mode="edge")
+
+    f_l, f_n = l_pad // l_pool, n_pad // n_pool
+    return P.reshape(l_pool, f_l, n_pool, f_n, D).max(axis=(1, 3))
 
 
 def estimate_gb(n_beams, l_pool, n_pool, D, bytes_per=2):
     return n_beams * l_pool * n_pool * D * bytes_per / 1024 ** 3
 
 
-def repool(in_path, n_pool, out_path=None):
-    """Re-derive a smaller N_p from an existing extraction, with no forward pass.
+def repool(in_path, n_pool, out_path=None, n_max=N_MAX):
+    """Re-derive a smaller N_eff from an existing extraction, with no forward pass.
 
-    Valid only when the source file did no token pooling, i.e. every completion was shorter than
-    its N_p so Algorithm 1's f_N was 1 and the stored columns are the real per-token states
-    followed by edge replicas. That holds for our data at N_p = 100 (longest completion is 64) and
-    is CHECKED here rather than assumed -- re-pooling an already-pooled axis would silently take a
-    max of maxima over the wrong block boundaries.
+    NOT act_pool applied twice. Their L_for_pad = (int(L/L_eff) + 1) * L_eff adds a full block even
+    when L is already divisible, so act_pool is not idempotent on the layer axis: run it again on an
+    8-layer tensor and it zero-pads to 16 and collapses to 4 real slots plus 4 of zeros. This
+    function therefore touches the TOKEN axis only and leaves the layer axis exactly as extracted.
 
-    Why this exists. Our median completion is 16-17 tokens, so N_p = 100 stores roughly six times
-    what the answer contains and hands ACT-ViT's transformer ~670 duplicate activation pixels with
-    distinct positional encodings. N_p = 20 sits inside their own published ablation grid
-    (their Figure 3 sweeps (L_p, N_p) over {4,8} x {20,100}), so it is their hyperparameter chosen
-    for our input lengths, not a deviation from their method.
+    Valid only when the source did no token pooling, i.e. its factor_N was 1, which holds when the
+    source N_eff equals N_MAX. Then its first token_len columns are the real per-token states and
+    the remainder is their zero pad, so re-blocking is exact: the max over a 5-wide block of
+    singleton maxima is the max over the 5-wide block. Checked below, not assumed.
+
+    Why bother. Our median completion is 16-17 tokens against N_MAX = 100, so at N_eff = 100 the
+    ViT receives 800 activation pixels of which roughly 670 are zeros. N_eff = 20 sits inside their
+    own published ablation grid (Figure 3 sweeps (L_p, N_p) over {4,8} x {20,100}), so it is their
+    hyperparameter chosen for our input lengths rather than a deviation from their method.
     """
     z = np.load(in_path)
     at, tok_len = z["at"], z["token_len"]
     n, l_pool, n_src, D = at.shape
-    if n_pool > n_src:
-        raise SystemExit("cannot repool upward: source has N_p=%d, asked for %d" % (n_src, n_pool))
-    if int(tok_len.max()) > n_src:
+    if n_src != n_max:
         raise SystemExit(
-            "source at %s was itself token-pooled (longest completion %d > N_p %d), so its columns "
-            "are maxima over blocks and cannot be re-blocked. Re-extract instead."
-            % (in_path, int(tok_len.max()), n_src))
+            "repool needs a source extracted at N_eff = N_MAX = %d, so that factor_N was 1 and its "
+            "columns are per-token. This file has N_eff=%d, whose columns are already maxima over "
+            "blocks. Re-extract instead." % (n_max, n_src))
+    if n_pool > n_src:
+        raise SystemExit("cannot repool upward: source has N_eff=%d, asked for %d" % (n_src, n_pool))
+
+    n_for_pad = n_max if (n_max % n_pool) == 0 else (int(n_max / n_pool) + 1) * n_pool
+    f_n = n_for_pad // n_pool
 
     out = np.empty((n, l_pool, n_pool, D), dtype=at.dtype)
     for i in range(n):
-        t = max(int(tok_len[i]), 1)
-        # Trim the edge replicas back off, then run Algorithm 1 again at the new target. The layer
-        # axis is already at l_pool, so f_l = 1 there and this touches only the token axis.
-        out[i] = act_pool(at[i, :, :t, :], l_pool, n_pool).astype(at.dtype)
+        t = min(int(tok_len[i]), n_src)
+        P = np.zeros((l_pool, n_for_pad, D), dtype=np.float32)
+        P[:, :t, :] = at[i, :, :t, :]        # real columns; the rest stays zero, as theirs does
+        out[i] = P.reshape(l_pool, n_pool, f_n, D).max(axis=2).astype(at.dtype)
 
     if out_path is None:
         out_path = in_path.replace("_N%d.npz" % n_src, "_N%d.npz" % n_pool)
     np.savez(out_path, at=out, prompt_id=z["prompt_id"], label=z["label"],
              beam_row=z["beam_row"], token_len=tok_len)
-    print("  repooled %s (N_p %d -> %d): %.1f GB -> %.1f GB"
+    print("  repooled %s (N_eff %d -> %d): %.1f GB -> %.1f GB"
           % (os.path.basename(in_path), n_src, n_pool,
              os.path.getsize(in_path) / 1024 ** 3, os.path.getsize(out_path) / 1024 ** 3))
     return out_path
@@ -250,104 +302,104 @@ def self_test():
     print("  SELF-TEST: 59_extract_act_tensors")
     print("=" * 74)
 
-    # Shape is exact for any input size, which is the whole point of their padding step.
-    for L, N in [(28, 64), (33, 7), (8, 100), (1, 1), (29, 250)]:
-        o = act_pool(np.random.randn(L, N, 3), 8, 100)
-        assert o.shape == (8, 100, 3), (L, N, o.shape)
-    print("  [PASS] act_pool returns exactly (8, 100, D) for L in {1,8,28,29,33}, N in {1,7,64,250}")
+    # DIFFERENTIAL TEST against ACT-ViT's own code. Their preprocessing is two padding steps and
+    # a quirky L_for_pad that always adds a full block; reimplementing it from the paper is how the
+    # first version of this file got both padding value and layer grouping wrong. If the repo is
+    # present we assert exact equality rather than trusting any reading of it.
+    ref = os.path.abspath(os.path.join(HERE, "..", "ACT-ViT"))
+    if os.path.isdir(ref):
+        import sys
+        import torch
+        sys.path.insert(0, ref)
+        from utils.dataset_preprocess import pad_activations_tensor, patch_down_sample
 
-    # Max, not mean, and taken over the right block. With L=4 -> l_pool=2 the blocks are rows
-    # {0,1} and {2,3}; a mean would give 0.5 and 2.5 instead of 1 and 3.
-    A = np.arange(4, dtype=np.float32).reshape(4, 1, 1)
-    o = act_pool(A, 2, 1)
-    assert o.ravel().tolist() == [1.0, 3.0], o.ravel().tolist()
-    print("  [PASS] pooling is max over non-overlapping blocks (1, 3), not mean (0.5, 2.5)")
+        rng = np.random.default_rng(0)
+        checked = 0
+        for L in (29, 33, 8):
+            for T in (1, 3, 16, 17, 64, 100, 137):
+                for n_eff in (100, 20):
+                    A = rng.standard_normal((L, T, 3)).astype(np.float32)
+                    l_for_pad = (int(L / 8) + 1) * 8
+                    n_for_pad = (N_MAX if (N_MAX % n_eff) == 0
+                                 else (int(N_MAX / n_eff) + 1) * n_eff)
+                    theirs = patch_down_sample(
+                        pad_activations_tensor(torch.from_numpy(A), l_for_pad, n_for_pad, 0),
+                        L_new=8, N_new=n_eff, method="max_pool").numpy()
+                    mine = act_pool(A, 8, n_eff)
+                    assert mine.shape == theirs.shape, (L, T, n_eff, mine.shape, theirs.shape)
+                    assert np.allclose(mine, theirs, atol=0, rtol=0),                         "act_pool disagrees with ACT-ViT at L=%d T=%d N_eff=%d (max diff %.3e)" % (
+                            L, T, n_eff, np.abs(mine - theirs).max())
+                    checked += 1
+        sys.path.remove(ref)
+        print("    [PASS] act_pool is bit-identical to ACT-ViT's own pad+patch_down_sample "
+              "on %d configurations (L, T, N_eff), including T > N_MAX" % checked)
+    else:
+        print("    [SKIP] ../ACT-ViT not cloned -- differential test against their code not run")
 
-    # Padding must not invent values. Ten identical rows pooled to 8 must stay at that value:
-    # -inf padding would leave -inf, and zero padding would cap a negative tensor at 0.
-    neg = np.full((10, 3, 2), -5.0, dtype=np.float32)
-    o = act_pool(neg, 8, 100)
-    assert np.all(o == -5.0), "padding leaked a value that is not in the input"
-    assert np.isfinite(o).all()
-    print("  [PASS] edge padding on an all-negative tensor stays at -5.0 (no -inf, no zero cap)")
+    # The two behaviours the differential test exists to pin, stated so they survive the repo
+    # going missing. Zeros in the pad, and a ReLU on the final layer slot.
+    A = np.full((29, 16, 2), -3.0, dtype=np.float32)
+    o = act_pool(A, 8, 100)
+    assert np.all(o[:, 16:, :] == 0.0), "token pad must be ZERO, not an edge replica"
+    assert np.all(o[7, :16, :] == 0.0), "L=29 pads to 32, so slot 7 is max(layer28, 0) = relu"
+    assert np.all(o[6, :16, :] == -3.0), "slot 6 covers real layers only and must pass through"
+    print("    [PASS] zero padding, and slot 7 is relu(final layer) at L=29 -- both would be wrong "
+          "under edge replication")
 
-    # The two axes must not be transposed. Column 1 is large and row 3 is large; a swapped
-    # permute would put the large value in the wrong output cell.
-    B = np.zeros((4, 4, 1), dtype=np.float32)
-    B[3, :, 0] = 7.0        # last LAYER is hot
-    B[:, 1, 0] = 2.0
-    o = act_pool(B, 2, 2)[:, :, 0]
-    assert o[1, 0] == 7.0 and o[0, 0] == 2.0, o.tolist()
-    print("  [PASS] layer axis and token axis are not transposed (hot layer lands in row 1)")
+    # Completions longer than N_MAX are TRUNCATED by their pad_activations_tensor, not pooled.
+    B = np.zeros((29, 137, 2), dtype=np.float32)
+    B[:, 120, :] = 9.0                      # a large value beyond N_MAX must NOT survive
+    assert act_pool(B, 8, 100).max() == 0.0, "content past N_MAX=100 must be dropped"
+    print("    [PASS] tokens beyond N_MAX are truncated, matching pad_activations_tensor")
 
-    # A single token replicates across the whole token axis rather than erroring, so short
-    # answers are representable. Our answers are <= 64 tokens against N_p = 100.
-    one = np.arange(6, dtype=np.float32).reshape(3, 1, 2)
-    o = act_pool(one, 3, 4)
-    assert o.shape == (3, 4, 2) and np.allclose(o[:, 0, :], o[:, 3, :])
-    print("  [PASS] a 1-token completion replicates across N_p rather than failing")
-
-    # Size guard. TyDiQA and TruthfulQA must pass at the default pool; TriviaQA must be refused,
-    # and must become feasible once n_pool drops -- which is the documented escape hatch.
+    # Size guard. TyDiQA and TruthfulQA must pass at the default pool; TriviaQA must be refused.
     tyd = estimate_gb(4400, 8, 100, 3584)
     tqa = estimate_gb(8170, 8, 100, 3584)
     tri = estimate_gb(99600, 8, 100, 3584)
-    tri16 = estimate_gb(99600, 8, 16, 3584)
     assert tyd < DEFAULT_MAX_GB and tqa < DEFAULT_MAX_GB, (tyd, tqa)
     assert tri > DEFAULT_MAX_GB, tri
-    assert tri16 < tri / 5.0, (tri16, tri)
-    print("  [PASS] sizes: TyDiQA %.0f GB, TruthfulQA %.0f GB pass; TriviaQA %.0f GB refused, "
-          "%.0f GB at N_p=16" % (tyd, tqa, tri, tri16))
+    assert estimate_gb(99600, 8, 20, 3584) < tri / 4, "N_eff=20 must be a real reduction"
+    print("    [PASS] sizes: TyDiQA %.0f GB, TruthfulQA %.0f GB pass; TriviaQA %.0f GB refused, "
+          "%.0f GB at N_eff=20" % (tyd, tqa, tri, estimate_gb(99600, 8, 20, 3584)))
 
-    # Pooling at their default buys much less than it looks like it should, and the reason is
-    # worth pinning: N_p = 100 is LARGER than our longest completion (64 new tokens), so the token
-    # axis is replicated rather than compressed and only the layer axis (29 -> 8) actually shrinks.
-    # The saving is ~2.3x, not the ~20x an unexamined reading of "pooling" would suggest.
-    raw = estimate_gb(99600, 29, 64, 3584)
-    assert 2.0 < raw / tri < 3.0, (raw, tri)
-    assert estimate_gb(1, 8, 100, 3584) > estimate_gb(1, 29, 64, 3584) / 3, "layer axis dominates"
-    print("  [PASS] unpooled TriviaQA is %.0f GB, only %.1fx the pooled size -- at N_p=100 the "
-          "token axis is replicated, not compressed" % (raw, raw / tri))
-
-    # N_p at or below the real completion length is where compression actually happens. This is
-    # the knob to turn for TriviaQA, and their own ablation runs (L_p, N_p) down to (4, 20).
-    assert estimate_gb(99600, 8, 32, 3584) < tri / 3, "N_p=32 must be a real reduction"
-    print("  [PASS] N_p=32 cuts TriviaQA to %.0f GB; N_p is the knob, L_p is already at their "
-          "default" % estimate_gb(99600, 8, 32, 3584))
-
-    # repool: deriving a smaller N_p offline must equal extracting at that N_p directly. This is
-    # the property that lets us avoid a second forward pass, so it is asserted, not assumed.
+    # repool must equal a direct extraction at the smaller N_eff. Max is associative, so blocking
+    # five singleton columns of the N_eff=100 file equals blocking five raw columns -- but only if
+    # repool leaves the layer axis alone, which is the bug this pins.
     import tempfile
     rng = np.random.default_rng(0)
-    L1, Dt, n_src = 29, 5, 100
-    raws = [rng.standard_normal((L1, int(t), Dt)).astype(np.float32) for t in (3, 16, 17, 64, 1)]
-    src = np.stack([act_pool(r, 8, n_src) for r in raws]).astype(np.float16)
+    raws = [rng.standard_normal((29, int(t), 4)).astype(np.float32) for t in (1, 3, 16, 17, 64)]
+    src = np.stack([act_pool(r, 8, 100) for r in raws]).astype(np.float16)
     direct = np.stack([act_pool(r, 8, 20) for r in raws]).astype(np.float16)
     with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "x_at_L8_N100.npz")
-        np.savez(p, at=src, prompt_id=np.arange(len(raws)), label=np.zeros(len(raws)),
+        pth = os.path.join(d, "x_at_L8_N100.npz")
+        np.savez(pth, at=src, prompt_id=np.arange(len(raws)), label=np.zeros(len(raws)),
                  beam_row=np.arange(len(raws)),
                  token_len=np.array([r.shape[1] for r in raws], dtype=np.int32))
-        q = repool(p, 20)
-        got = np.load(q)["at"]
+        got = np.load(repool(pth, 20))["at"]
     assert got.shape == direct.shape, (got.shape, direct.shape)
-    assert np.array_equal(got, direct), "repool(N=100 -> 20) != direct extraction at N=20"
-    print("  [PASS] repool from N_p=100 to 20 reproduces direct extraction exactly, T in "
-          "{1,3,16,17,64}")
+    assert np.array_equal(got, direct), "repool(100 -> 20) != direct extraction at N_eff=20"
+    print("    [PASS] repool from N_eff=100 to 20 reproduces direct extraction exactly, "
+          "T in {1,3,16,17,64}")
 
-    # And it must REFUSE when the source really was token-pooled, since re-blocking maxima would
-    # silently take a max over the wrong boundaries and produce a plausible wrong answer.
+    # Applying act_pool a second time would look plausible and be wrong: L_for_pad adds a full
+    # block, so an 8-layer input keeps 4 real slots and zeros the rest. Pinned so that nobody
+    # "simplifies" repool back into a second act_pool call.
+    twice = act_pool(src[2].astype(np.float32), 8, 20)
+    assert np.all(twice[4:] == 0.0), "expected act_pool to zero the top half on a second pass"
+    assert not np.array_equal(twice, direct[2])
+    print("    [PASS] act_pool applied twice zeros the top 4 layer slots -- why repool is separate")
+
     with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "y_at_L8_N8.npz")
-        np.savez(p, at=np.zeros((1, 8, 8, 2), dtype=np.float16), prompt_id=np.array([0]),
+        pth = os.path.join(d, "y_at_L8_N20.npz")
+        np.savez(pth, at=np.zeros((1, 8, 20, 2), dtype=np.float16), prompt_id=np.array([0]),
                  label=np.array([0]), beam_row=np.array([0]),
                  token_len=np.array([64], dtype=np.int32))
         try:
-            repool(p, 4)
-            raise AssertionError("repool accepted an already-pooled source")
+            repool(pth, 10)
+            raise AssertionError("repool accepted a source that was already token-pooled")
         except SystemExit as e:
-            assert "token-pooled" in str(e), str(e)
-    print("  [PASS] repool refuses a source whose completions exceeded its own N_p")
+            assert "N_eff = N_MAX" in str(e), str(e)
+    print("    [PASS] repool refuses a source not extracted at N_eff = N_MAX")
 
     print("\n  ALL PASS")
     return True
