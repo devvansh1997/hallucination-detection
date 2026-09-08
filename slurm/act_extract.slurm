@@ -25,9 +25,12 @@
 #   3. PYTHONUNBUFFERED and `set -x` on stderr, so a killed job still leaves a trail. stdout can be
 #      lost; stderr cannot.
 #
-# The model-cache check matters most. Compute-node egress is ~2 MB/s and Qwen2.5-7B is ~15 GB, so a
-# cache miss is a silent multi-hour stall that looks exactly like a hang. Same failure mode as the
-# BLEURT-20 incident; this refuses instead.
+# The model-cache guard matters most, and it is HF_HUB_OFFLINE=1 rather than a path check. Egress on
+# a compute node is ~2 MB/s and Qwen2.5-7B is ~15 GB, so a cache miss is a multi-hour stall that
+# looks exactly like a hang (the BLEURT-20 failure mode). Offline mode makes that impossible without
+# guessing where the cache lives -- an earlier version guessed with `tr '/' '-'`, missed HF's double
+# hyphen, and refused two jobs whose model was cached all along. Set ALLOW_DOWNLOAD=1 to permit a
+# fetch deliberately.
 #
 # THE SELF-TEST IS NOT RUN HERE. It asserts bit-identity against ../ACT-ViT, which is a development
 # check needing a clone that may not exist on the cluster. It does not belong between a GPU
@@ -71,21 +74,35 @@ print("  python      : %s" % sys.executable)
 print("  torch %s  cuda available: %s" % (torch.__version__, torch.cuda.is_available()))
 PYCHK
 
-# A cache miss here means a ~15 GB download at ~2 MB/s. Refuse rather than stall.
-HF_ROOT="${HF_HOME:-$HOME/.cache/huggingface}"
-MODEL_ID=$(python -c "
+# A cache miss means a ~15 GB download at ~2 MB/s compute-node egress: a multi-hour stall that
+# looks exactly like a hang. HF_HUB_OFFLINE makes that structurally impossible -- from_pretrained
+# raises immediately instead of fetching -- with no path to guess.
+#
+# The previous version of this guard DID guess, building the cache path with `tr '/' '-'`. HF uses a
+# DOUBLE hyphen for the separator (models--Qwen--Qwen2.5-7B-Instruct), so it looked for a directory
+# that never exists and refused two jobs whose model was cached all along. Deleting the guess is the
+# fix; asking the library is the guard.
+export HF_HUB_OFFLINE="${ALLOW_DOWNLOAD:+0}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
+python - "$MODEL" <<'PYCACHE' >&2 || exit 1
+import os
+import sys
 import yaml
-c = yaml.safe_load(open('config.yaml'))
-print(next(m['id'] for m in c['models'] if m['folder'] == '$MODEL'))
-")
-CACHE_DIR="$HF_ROOT/hub/models--$(echo "$MODEL_ID" | tr '/' '-')"
-if [ ! -d "$CACHE_DIR" ]; then
-    echo "FATAL: $MODEL_ID is not in the HF cache at $CACHE_DIR." >&2
-    echo "  Downloading it here would run at ~2 MB/s on a compute node and stall the job for" >&2
-    echo "  hours. Pre-fetch it on a login node, or check that HF_HOME reached the job." >&2
-    exit 1
-fi
-echo "  model cache : $CACHE_DIR" >&2
+cfg = yaml.safe_load(open("config.yaml"))
+model_id = next(m["id"] for m in cfg["models"] if m["folder"] == sys.argv[1])
+print("  model id    : %s" % model_id)
+print("  HF_HOME     : %s" % os.environ.get("HF_HOME", "<unset, using ~/.cache/huggingface>"))
+print("  offline     : HF_HUB_OFFLINE=%s" % os.environ.get("HF_HUB_OFFLINE"))
+try:
+    from huggingface_hub import snapshot_download
+    print("  resolved to : %s" % snapshot_download(model_id, local_files_only=True))
+except Exception as e:
+    print("FATAL: %s is not fully cached (%s: %s)." % (model_id, type(e).__name__, e))
+    print("  Pre-fetch it on a login node, or re-run with ALLOW_DOWNLOAD=1 if a download here")
+    print("  really is intended -- expect hours at ~2 MB/s.")
+    sys.exit(1)
+PYCACHE
 
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader >&2
 echo "  repo HEAD   : $(git -C "$REPO" log --oneline -1 2>/dev/null)" >&2
