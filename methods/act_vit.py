@@ -119,8 +119,13 @@ def _auc(y, s):
 
 
 def train_and_score(at, labels, prompt_id, tr, te, l_pool, n_pool, device, seed,
-                    epochs=EPOCHS, log=None):
-    """Their recipe. Returns P(hallucinated) for rows `te`, in that order."""
+                    llm_index=0, epochs=EPOCHS, log=None):
+    """Their recipe. Returns P(hallucinated) for rows `te`, in that order.
+
+    llm_index picks which of their per-LLM Linear Adapters runs. With one model it changes
+    nothing numerically -- only the selected adapter is ever trained -- but hard-coding 0 would
+    silently mean "Mistral" in their FEATURE_DIMS ordering, and would be wrong the moment anyone
+    trains across models."""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
     from transformers import get_scheduler
@@ -130,7 +135,7 @@ def train_and_score(at, labels, prompt_id, tr, te, l_pool, n_pool, device, seed,
 
     fit_idx, val_idx = grouped_val_split(prompt_id, tr, seed)
     model = build_model(l_pool, n_pool, device)
-    llm_idx = torch.zeros(BATCH, dtype=torch.long, device=device)   # resized per batch below
+    llm_idx = torch.full((BATCH,), int(llm_index), dtype=torch.long, device=device)
 
     def loader(idx, shuffle):
         return DataLoader(TensorDataset(torch.from_numpy(idx.astype(np.int64))),
@@ -191,18 +196,21 @@ class ActViT(Method):
     description = "ACT-ViT (Bar-Shalom et al. 2025), their architecture, our split and metric"
 
     def add_args(self, parser):
-        parser.add_argument("--at-dir", default=DEFAULT_AT_DIR,
+        # The m- prefix is the runner's convention for method-owned flags (56_run_method.py's
+        # docstring shows --m-layer / --m-pool). Without it these share a namespace with the
+        # runner's own arguments and a future collision would be silent.
+        parser.add_argument("--m-at-dir", default=DEFAULT_AT_DIR,
                             help="where 59_extract_act_tensors.py wrote its .npz files")
-        parser.add_argument("--n-eff", type=int, default=20,
+        parser.add_argument("--m-n-eff", type=int, default=20,
                             help="token pooling of the extraction to use (20 or 100)")
-        parser.add_argument("--l-eff", type=int, default=8)
-        parser.add_argument("--epochs", type=int, default=EPOCHS)
+        parser.add_argument("--m-l-eff", type=int, default=8)
+        parser.add_argument("--m-epochs", type=int, default=EPOCHS)
 
     def configure(self, args):
-        self.at_dir = args.at_dir
-        self.n_eff = args.n_eff
-        self.l_eff = args.l_eff
-        self.epochs = args.epochs
+        self.at_dir = args.m_at_dir
+        self.n_eff = args.m_n_eff
+        self.l_eff = args.m_l_eff
+        self.epochs = args.m_epochs
 
     def precompute(self, data):
         path = os.path.join(getattr(self, "at_dir", DEFAULT_AT_DIR), data.model_folder,
@@ -233,20 +241,26 @@ class ActViT(Method):
         if not np.array_equal(z["prompt_id"][order], data.prompt_id):
             raise SystemExit("prompt_id in %s disagrees with the pinned generations" % path)
 
+        # Reorder ONCE, here, not inside score(). Fancy indexing COPIES, and score() runs ten
+        # times (five seeds x two protocols), so doing it there would allocate 4.7 GB ten times
+        # over at N_eff=20 -- 23.5 GB ten times at N_eff=100.
+        at = at[order]
+
         self._diag = {"at_path": path, "l_eff": int(at.shape[1]), "n_eff": int(at.shape[2]),
                       "hidden": int(at.shape[3]), "gb": round(at.nbytes / 1024 ** 3, 2),
+                      "llm_adapter_index": LLM_INDEX.get(data.model_folder, 0),
                       "median_completion_tokens": int(np.median(z["token_len"]))}
-        print("    [act_vit] %s  %s  %.1f GB" % (os.path.basename(path), at.shape,
-                                                 at.nbytes / 1024 ** 3), flush=True)
-        return {"at": at, "order": order}
+        print("    [act_vit] %s  %s  %.1f GB  adapter index %d"
+              % (os.path.basename(path), at.shape, at.nbytes / 1024 ** 3,
+                 LLM_INDEX.get(data.model_folder, 0)), flush=True)
+        return {"at": at}
 
     def score(self, data, pre, train_idx, test_idx):
-        at, order = pre["at"], pre["order"]
-        # at is in extraction order; index it through `order` so row i of the bundle maps correctly.
-        view = at[order]
-        return train_and_score(view, data.labels, data.prompt_id, train_idx, test_idx,
-                               view.shape[1], view.shape[2], data.device,
+        at = pre["at"]        # already in bundle row order; see precompute
+        return train_and_score(at, data.labels, data.prompt_id, train_idx, test_idx,
+                               at.shape[1], at.shape[2], data.device,
                                seed=int(train_idx[0]) if len(train_idx) else 0,
+                               llm_index=LLM_INDEX.get(data.model_folder, 0),
                                epochs=getattr(self, "epochs", EPOCHS), log=print)
 
     def meta(self):
@@ -303,7 +317,8 @@ class ActViT(Method):
         at = rng.standard_normal((n, L, N, D)).astype(np.float32) * 0.01
         at[y == 1] += 3.0
         tr, te = np.arange(0, 48), np.arange(48, n)
-        s = train_and_score(at, y, pid, tr, te, L, N, "cpu", seed=0, epochs=4)
+        s = train_and_score(at, y, pid, tr, te, L, N, "cpu", seed=0,
+                            llm_index=LLM_INDEX["qwen-2.5-7b-instruct"], epochs=4)
         a = _auc(y[te], s)
         assert a > 0.9, ("orientation looks INVERTED or the model did not learn: AUROC %.3f. "
                          "High score must mean hallucinated." % a)
