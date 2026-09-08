@@ -10,17 +10,20 @@
 # WHY ONLY TWO DATASETS BY DEFAULT. Storage, not compute. At ACT-ViT's default (L_p, N_p) = (8, 100)
 # a Qwen beam is 5.5 MiB:
 #
-#   dataset      beams     size @ (8,100)   time (est)
-#   tydiqa_gp    4,400          23 GB        00:40:00
-#   truthfulqa   8,170          44 GB        01:10:00
-#   nq_open     36,100         194 GB        04:00:00     <- needs a decision about disk
-#   triviaqa    99,600         532 GB        09:00:00     <- refused at default --max-gb
+#   dataset      beams     size @ (8,100)   wall
+#   tydiqa_gp    4,400          23 GB        00:25:00    measured 11:16
+#   truthfulqa   8,170          44 GB        00:30:00    measured 12:22
+#   nq_open     36,100         194 GB        01:30:00    <- needs a decision about disk
+#   triviaqa    99,600         532 GB        04:00:00    <- refused at default --max-gb
 #
-# N_p IS THE KNOB. Our completions cap at 64 new tokens, so N_p = 100 pads by replication and only
-# the layer axis (29 -> 8) is actually compressed. N_p = 32 cuts TriviaQA to 170 GB. That changes
-# ACT-ViT's input, so it is a deliberate choice to record in the results, not a silent optimisation
-# -- their own ablation runs (L_p, N_p) down to (4, 20) and still beats the best probe by ~6 points,
-# so a smaller N_p is defensible and cheap to justify.
+# N_eff IS THE KNOB. Their preprocessing ZERO-pads a response to N_MAX = 100 before pooling, and our
+# median completion is 16-17 tokens. So at N_eff = 100 roughly 84 of the 100 columns are zeros and
+# the ViT is handed 800 activation pixels of which most carry nothing. N_eff = 20 sits inside their
+# own published ablation grid (Figure 3 sweeps (L_p, N_p) over {4,8} x {20,100}), so it is their
+# hyperparameter chosen for our input lengths, not a deviation from their method. Extract at 100 and
+# derive 20 on CPU -- no second forward pass:
+#
+#   python 59_extract_act_tensors.py --repool-from <the N100 file> --n-pool 20
 #
 # WHAT THIS DOES NOT DO. It does not train ACT-ViT. Their Linear Adapter and ViT backbone are
 # supervised and must be fit inside a split, so they live in the harness (methods/act_vit.py) and
@@ -45,9 +48,12 @@ mkdir -p "$HERE/slurm_logs"
 # above rather than one flat value -- a flat 80G silently fails on nq_open.
 mem_for()  { case "$1" in tydiqa_gp) echo "80G";; truthfulqa) echo "110G";;
                           nq_open) echo "260G";; triviaqa) echo "600G";; *) echo "120G";; esac; }
-time_for() { case "$1" in tydiqa_gp) echo "00:40:00";; truthfulqa) echo "01:10:00";;
-                          nq_open) echo "04:00:00";; triviaqa) echo "09:00:00";;
-                          *) echo "03:00:00";; esac; }
+# Measured, not guessed: 798638 tydiqa_gp 11:16 and 798639 truthfulqa 12:22, both
+# including model load. Roughly 2x headroom. A short wall is a feature -- a misconfigured
+# job should fail fast, not burn an hour proving it.
+time_for() { case "$1" in tydiqa_gp) echo "00:25:00";; truthfulqa) echo "00:30:00";;
+                          nq_open) echo "01:30:00";; triviaqa) echo "04:00:00";;
+                          *) echo "01:00:00";; esac; }
 
 # Sets a global rather than echoing: called as J=$(sub ...) this would run in a subshell where
 # `exit` kills only the subshell, and the driver would report success for jobs it never queued.
@@ -75,7 +81,7 @@ N=0
 for M in $MODELS; do
   for DS in $DATASETS; do
     sub "-p $PART --gres=gpu:1 --mem=$(mem_for $DS) --time=$(time_for $DS) \
-         --job-name=act-${DS:0:6}" "$M" "$DS" "$NPOOL" "$MAXGB"
+         --job-name=act-${DS:0:6} --export=ALL" "$M" "$DS" "$NPOOL" "$MAXGB"
     printf "  %-28s -> %s  (mem %s, %s)\n" "$M / $DS" "$JOBID" "$(mem_for $DS)" "$(time_for $DS)"
     N=$((N+1))
   done
@@ -87,6 +93,11 @@ echo "Watch:   squeue -u \$USER"
 echo "If squeue is EMPTY, the jobs did not fail to submit -- they failed to START. Check:"
 echo "    sacct -u \$USER --starttime today --format=JobID,JobName%14,State,Elapsed,ExitCode"
 echo "An Elapsed of 00:00:00 or 00:00:01 means the module/conda preamble died; read the .err."
+echo ""
+echo "NOTE: .out is BUFFERED and is discarded if a job is killed on TIMEOUT. The job traces"
+echo "to stderr for that reason, so read the .err first when a job dies."
+echo "The self-test is not run inside the job (it needs the ../ACT-ViT clone). Run it here:"
+echo "    python 59_extract_act_tensors.py --self-test"
 echo "Output:  ../data-acttensors/<model>/<dataset>_at_L8_N${NPOOL}.npz"
 echo
 echo "READ THE 'NOTE:' LINE in each log. If it says n-pool exceeds the longest completion, the token"
