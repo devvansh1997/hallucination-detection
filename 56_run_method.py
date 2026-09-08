@@ -117,6 +117,7 @@ def evaluate(method, data, pre, seeds=None):
         out = {"all_rows": measure(method.score(data, pre, all_rows, all_rows), all_rows)}
 
     out["protocols"] = {}
+    t_eval = time.time()
     for arm, fn in (("question", c["question_split"]), ("answer", c["answer_split"])):
         per_seed = []
         for seed in seeds:
@@ -124,9 +125,12 @@ def evaluate(method, data, pre, seeds=None):
             t_idx, v_idx = np.asarray(t_idx, dtype=int), np.asarray(v_idx, dtype=int)
             assert len(np.intersect1d(t_idx, v_idx)) == 0, \
                 "%s split returned overlapping train/test ROWS at seed %s" % (arm, seed)
+            t_split = time.time()
             r = measure(method.score(data, pre, t_idx, v_idx), v_idx)
+            t_split = time.time() - t_split
             if r:
                 r["seed"] = seed
+                r["score_seconds"] = round(t_split, 1)
                 r["n_train_rows"] = int(len(t_idx))
                 r["n_test_rows"] = int(len(v_idx))
                 r["n_test_questions"] = int(len(np.unique(data.prompt_id[v_idx])))
@@ -141,6 +145,7 @@ def evaluate(method, data, pre, seeds=None):
                 "pooled_auroc_std": float(np.std(vals)) if vals else None,
                 "per_seed": per_seed, "seeds": list(seeds),
             }
+    out["evaluate_seconds"] = round(time.time() - t_eval, 1)
     return out
 
 
@@ -283,6 +288,7 @@ def main():
         "beam_hallucination_rate_pct": round(100.0 * float(data.labels.mean()), 3),
         "question_hallucination_rate_pct": round(100.0 * float(data.question_labels.mean()), 3),
         "precompute_seconds": round(t_pre, 1), "method_meta": method.meta(),
+        "total_seconds": round(time.time() - t0, 1),
     })
 
     os.makedirs(a.out_dir, exist_ok=True)
