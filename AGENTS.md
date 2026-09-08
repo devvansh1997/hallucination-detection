@@ -37,6 +37,14 @@
 - `mkdir -p slurm_logs` belongs in the submit script, on the login node. SLURM does not create the
   directory for `--output`, and a job whose log cannot be opened dies before it runs.
 - Working reference: `slurm/hgreb_stage.slurm`. Copy from it, not from this section.
+- NEVER `pip install` into `hal-det` without checking what it drags in. `pip install
+  vit-pytorch` pulled `torchvision==0.28.0`, built against a different torch than the env's
+  `2.13.0+cu126`. `transformers.image_utils` imports `torchvision.io` unconditionally, so
+  op registration failed with `RuntimeError: operator torchvision::nms does not exist` and
+  EVERY transformers model import in the env broke -- not just the new code. Cost four jobs
+  on 2026-09-08. Use `pip install --no-deps`, or `pip download` first and read the tree.
+- `vit-pytorch` needs only torch + einops for `ViT`; torchvision is a declared dependency it
+  does not actually use. Install it with `--no-deps`.
 - ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 
