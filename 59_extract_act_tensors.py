@@ -287,8 +287,18 @@ def run(dataset, model_folder, data_dir, out_dir, device, dtype, l_pool, n_pool,
             "median_completion_tokens": int(np.median(tok_len)),
             "max_completion_tokens": int(tok_len.max()),
             "source": os.path.abspath(seq_path),
-            "pooling": ("ACT-ViT Algorithm 1, edge-replication padding then non-overlapping max; "
-                        "layer 0 is the embedding output, last layer has no final norm"),
+            "pooling": ("ACT-ViT utils/dataset_preprocess.py process_file: zero-pad to "
+                        "(L_for_pad, N_for_pad) then non-overlapping max. L_for_pad = "
+                        "(int(L/L_eff)+1)*L_eff adds a full block even when divisible, so at L=29 "
+                        "the last of the 8 layer slots is max(layer28, 0) = relu(layer28). The "
+                        "replicate pad inside patch_down_sample never fires at these settings."),
+            "pooling_verified": ("act_pool asserted bit-identical to their pad_activations_tensor "
+                                 "+ patch_down_sample over 42 (L, T, N_eff) combinations; run "
+                                 "59_extract_act_tensors.py --self-test with ../ACT-ViT present"),
+            "layer_indexing": ("layer 0 is the embedding output; the last is the final block "
+                               "WITHOUT the final norm, so not the pinned pipeline's final_norm "
+                               "slice"),
+            "n_max": int(N_MAX),
             "elapsed_seconds": round(time.time() - t0, 1)}
     with open(path.replace(".npz", ".json"), "w") as f:
         json.dump(meta, f, indent=2)
