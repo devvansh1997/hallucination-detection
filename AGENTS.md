@@ -27,10 +27,16 @@
 - `.gitignore` blocks `*.pt`, `*.pth`, `*.safetensors`, `data_unpooled/`
 
 ## CLUSTER
-- Path: `/home/devansh/Hallucination-Detection/hallucination-detection`
-- SLURM template: `-p gpu --gpus=1 --mem-per-cpu=8G -C gmem80`
-- Conda: `source /share/apps/anaconda3-2022.05/etc/profile.d/conda.sh && conda activate hal-det`
-- Modules: `module load anaconda3/2022.05 && module load cuda/12.6`
+- Path: `/home/de807845/Hallucination-Detection/hallucination-detection`
+- SLURM template: `-p highgpu --gres=gpu:1 --mem=80G`
+- Conda: `module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0 && conda activate hal-det`
+- Do NOT `source /share/apps/anaconda3-2022.05/...` -- that path does not exist on Newton. A
+  `source` of it under `set -e` kills the job in under a second, so sbatch returns a job id for a
+  job that never starts and squeue shows nothing. Cost one submission on 2026-09-08.
+- In .slurm files use `set -u`, not `set -euo pipefail`, and put `|| exit 1` on each real command
+- `mkdir -p slurm_logs` belongs in the submit script, on the login node. SLURM does not create the
+  directory for `--output`, and a job whose log cannot be opened dies before it runs.
+- Working reference: `slurm/hgreb_stage.slurm`. Copy from it, not from this section.
 - ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 

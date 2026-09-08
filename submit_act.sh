@@ -33,8 +33,13 @@ DATASETS="${DATASETS:-tydiqa_gp truthfulqa}"
 PART="${PART:-highgpu}"
 NPOOL="${NPOOL:-100}"
 MAXGB="${MAXGB:-60}"
-STAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slurm/act_extract.slurm"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STAGE="$HERE/slurm/act_extract.slurm"
 [ -f "$STAGE" ] || { echo "ERROR: $STAGE not found" >&2; exit 1; }
+
+# SLURM does not create the directory for --output, and a job whose log file cannot be opened dies
+# before it runs. Make it here, on the login node, rather than inside the job where it is too late.
+mkdir -p "$HERE/slurm_logs"
 
 # Host RAM must exceed the array 59 allocates, with headroom for the model. Sized from the table
 # above rather than one flat value -- a flat 80G silently fails on nq_open.
@@ -79,6 +84,9 @@ done
 echo
 echo "Queued $N jobs."
 echo "Watch:   squeue -u \$USER"
+echo "If squeue is EMPTY, the jobs did not fail to submit -- they failed to START. Check:"
+echo "    sacct -u \$USER --starttime today --format=JobID,JobName%14,State,Elapsed,ExitCode"
+echo "An Elapsed of 00:00:00 or 00:00:01 means the module/conda preamble died; read the .err."
 echo "Output:  ../data-acttensors/<model>/<dataset>_at_L8_N${NPOOL}.npz"
 echo
 echo "READ THE 'NOTE:' LINE in each log. If it says n-pool exceeds the longest completion, the token"
