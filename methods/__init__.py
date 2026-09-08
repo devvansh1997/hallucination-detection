@@ -23,6 +23,7 @@ def register(cls):
     return cls
 
 
+from .act_vit import ActViT                          # noqa: E402
 from .eigenscore import EigenScore                    # noqa: E402
 from .lexical_similarity import LexicalSimilarity    # noqa: E402
 from .ln_entropy import LNEntropy                    # noqa: E402
@@ -32,6 +33,7 @@ register(Perplexity)
 register(LNEntropy)
 register(LexicalSimilarity)
 register(EigenScore)
+register(ActViT)
 
 # HalluGuard is DROPPED FROM THE COMPARISON TABLE (decision, 2026-08-31). The code and the
 # findings stay: PROJECT_LOG 2.9-2.12 record that its released implementations disagree with its
