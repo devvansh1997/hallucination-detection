@@ -63,7 +63,10 @@ cd "$REPO" || { echo "FATAL: cannot cd to $REPO" >&2; exit 1; }
 echo "repo HEAD: $(git -C "$REPO" log --oneline -1 2>/dev/null)"
 
 # Skip guard. Re-running the driver after a partial failure redoes only what is missing.
-OUT="${REPO}/results/flatten_control/flatten_${MODEL}_${DS}_${READOUT}.json"
+# $PREFIX, not a hardcoded "flatten": the curve and the control write different files, and
+# checking the control's file before a curve run skips a job that never happened. That
+# shipped once and cost four submissions that reported success having done nothing.
+OUT="${REPO}/results/flatten_control/${PREFIX}_${MODEL}_${DS}_${READOUT}${TAG:+_${TAG}}.json"
 if [ "${FORCE:-0}" != "1" ] && [ -f "$OUT" ]; then
     if python - "$OUT" <<'PYEOF'
 import json, sys
