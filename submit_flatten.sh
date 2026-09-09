@@ -2,7 +2,9 @@
 # submit_flatten.sh -- the matched-width control for the multilinear restriction.
 #
 #   export HD_REPO=$PWD
-#   bash submit_flatten.sh                                   # both datasets, both readouts
+#   bash submit_flatten.sh                                   # 2 models x 2 datasets x 2 readouts
+#   MODELS=llama-3.1-8b bash submit_flatten.sh                # one model
+#   DATASETS="tydiqa_gp truthfulqa nq_open triviaqa" bash submit_flatten.sh
 #   DATASETS=truthfulqa bash submit_flatten.sh               # just the one that has not run
 #   READOUTS=RF bash submit_flatten.sh                       # just the readout the paper reports
 #   FORCE=1 bash submit_flatten.sh                           # ignore the skip guard
@@ -23,7 +25,11 @@ set -euo pipefail
 STAGE="${HD_REPO}/slurm/flatten_stage.slurm"
 [ -f "$STAGE" ] || { echo "ERROR: $STAGE not found -- is HD_REPO right?" >&2; exit 1; }
 
-MODELS="${MODELS:-qwen-2.5-7b-instruct}"
+# BOTH MODELS. A control that rewrites a contribution cannot rest on one model. The first run
+# was Qwen-only because that was this script's default, which was an oversight rather than a
+# decision -- llama-3.1-8b base has the same phase-2 features and is the checkpoint the
+# comparison in the main table uses.
+MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa}"
 READOUTS="${READOUTS:-RF LR}"
 PART="${PART:-highgpu}"
