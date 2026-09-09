@@ -193,6 +193,20 @@ def self_test():
         assert abs(r["protocols"][arm]["pooled_auroc_mean"] - 1.0) < 1e-12, arm
     print("  [PASS] beam oracle scores 1.000 under both protocols -- indexing and alignment correct")
 
+    # A TRAINED oracle, exercising the trains=True path. The skipped-all_rows branch was added
+    # without a test that runs it, and the summary printer then crashed on the cluster with
+    # KeyError: 'within_prompt_auroc' after a 40-minute run. Every branch gets a caller now.
+    class TrainedOracle(Oracle):
+        name, trains = "trained_oracle", True
+    rt = evaluate(TrainedOracle(), data, None)
+    assert rt["all_rows"].get("skipped") is True, rt["all_rows"]
+    assert "pooled_auroc" not in rt["all_rows"]
+    for arm in ("question", "answer"):
+        assert abs(rt["protocols"][arm]["pooled_auroc_mean"] - 1.0) < 1e-12, arm
+        assert all("score_seconds" in sd for sd in rt["protocols"][arm]["per_seed"])
+    assert "evaluate_seconds" in rt
+    print("  [PASS] trains=True skips all_rows, keeps both protocol arms, records timing")
+
     # An inverted oracle must score 0.0, not 1.0. Catches an accidental abs() or sign flip.
     class Inv(Oracle):
         name = "inv"
@@ -305,8 +319,10 @@ def main():
     if res["method_meta"]:
         print("  method: %s" % json.dumps(res["method_meta"], default=float))
     print("\n  %-22s %9s %9s %14s" % ("", "pooled", "flipped", "within-prompt"))
-    ar = res["all_rows"]
-    if ar:
+    ar = res["all_rows"] or {}
+    if ar.get("skipped"):
+        print("  %-22s %s" % ("all rows", "skipped (%s)" % ar.get("reason", "")))
+    elif ar:
         wp = "n/a" if ar["within_prompt_auroc"] is None else "%.4f" % ar["within_prompt_auroc"]
         print("  %-22s %9.4f %9.4f %14s" % ("all rows", ar["pooled_auroc"],
                                             ar["pooled_auroc_flipped"], wp))
@@ -316,7 +332,9 @@ def main():
             print("  %-22s %9.4f %9.4f   (+/- %.4f over %d seeds)"
                   % (arm + "-level split", b["pooled_auroc_mean"],
                      1.0 - b["pooled_auroc_mean"], b["pooled_auroc_std"], len(b["seeds"])))
-    print("\nWrote: %s" % os.path.join(a.out_dir, stem + ".json"))
+    print("\n  precompute %.0fs | evaluate %.0fs | total %.0fs"
+          % (t_pre, res.get("evaluate_seconds", 0.0), res["total_seconds"]))
+    print("Wrote: %s" % os.path.join(a.out_dir, stem + ".json"))
 
 
 if __name__ == "__main__":
