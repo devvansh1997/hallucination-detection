@@ -48,7 +48,11 @@ EPOCHS = 15
 BATCH = 128
 LR = 1e-3
 WEIGHT_DECAY = 1e-3
-PATIENCE = 5
+PATIENCE = 30              # utils/args.py:417. With EPOCHS=15 this NEVER fires: their
+                          # recipe runs all 15 epochs and keeps the best-validation
+                          # checkpoint. An earlier version used 5, which was invented
+                          # here and did fire -- several splits stopped after one epoch
+                          # on a noisy validation curve, understating the method.
 VAL_FRACTION = 1.0 / 5.0        # their TRAIN_VAL_RATIO = 4/5
 
 
