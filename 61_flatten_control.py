@@ -37,6 +37,8 @@ Usage:
   python 61_flatten_control.py --dataset tydiqa_gp  --model_folder qwen-2.5-7b-instruct
   python 61_flatten_control.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct --readout RF
   python 61_flatten_control.py --dataset tydiqa_gp --model_folder llama-3.1-8b --condition triple_concat
+  python 61_flatten_control.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct \
+      --readout RF --arms hosvd best_layer --tag bestlayer
 """
 
 import argparse
@@ -56,6 +58,9 @@ DEFAULT_OUT = os.path.join(HERE, "results", "flatten_control")
 # 5*64 + 5*64 + 4*64 = 896 dimensions.
 DEFAULT_CONDITION = "triple_concat"
 ARMS = ("hosvd", "flat_pca", "layer_mean", "random_proj")
+# best_layer is NOT in the default tuple: adding it would invalidate the four-arm
+# results already on disk. Run it explicitly against hosvd, with a --tag.
+ALL_ARMS = ARMS + ("best_layer",)
 
 
 def _load(name, filename):
@@ -81,7 +86,7 @@ def mods():
 # fits on those rows only, and returns the projected matrix for every row.
 # ---------------------------------------------------------------------------------------------
 
-def reduce_hosvd(X_raw, tr, r_l, r_d, seed):
+def reduce_hosvd(X_raw, tr, r_l, r_d, seed, ctx=None):
     """Ours, exactly as the pipeline computes it -- 43's function, not a reimplementation."""
     return mods()["s43"].fold_pure_core_randomized(X_raw, tr, r_l, r_d, seed)
 
@@ -94,7 +99,7 @@ def _fit_pca(M_train, k, seed):
     return mu, Vt.T
 
 
-def reduce_flat_pca(X_raw, tr, r_l, r_d, seed):
+def reduce_flat_pca(X_raw, tr, r_l, r_d, seed, ctx=None):
     """Flatten (L, F) to L*F, then PCA to r_l * r_d -- the SAME width the core would have."""
     Xs = mods()["s43"].robust_scale_3d(X_raw, tr)
     M = Xs.reshape(Xs.shape[0], -1)
@@ -102,7 +107,7 @@ def reduce_flat_pca(X_raw, tr, r_l, r_d, seed):
     return (M - mu) @ comp
 
 
-def reduce_layer_mean(X_raw, tr, r_l, r_d, seed):
+def reduce_layer_mean(X_raw, tr, r_l, r_d, seed, ctx=None):
     """Average the layer mode away, then PCA to the same width. Depth as nuisance, not as mode."""
     Xs = mods()["s43"].robust_scale_3d(X_raw, tr)
     M = Xs.mean(axis=1)
@@ -110,7 +115,7 @@ def reduce_layer_mean(X_raw, tr, r_l, r_d, seed):
     return (M - mu) @ comp
 
 
-def reduce_random_proj(X_raw, tr, r_l, r_d, seed):
+def reduce_random_proj(X_raw, tr, r_l, r_d, seed, ctx=None):
     """Gaussian random projection of the flattened tensor. Fitted on NOTHING."""
     Xs = mods()["s43"].robust_scale_3d(X_raw, tr)
     M = Xs.reshape(Xs.shape[0], -1)
@@ -120,20 +125,65 @@ def reduce_random_proj(X_raw, tr, r_l, r_d, seed):
     return M @ R
 
 
+def _grouped_carve(prompt_id, tr, seed, frac=0.2):
+    """Hold out whole questions from the training rows. Local rather than imported from
+    methods/act_vit so this file keeps its sklearn-only dependency."""
+    q = np.unique(prompt_id[tr])
+    rng = np.random.default_rng(seed)
+    held = set(rng.permutation(q)[:max(1, int(round(len(q) * frac)))].tolist())
+    m = np.array([int(x) in held for x in prompt_id[tr]])
+    return (tr, None) if (m.all() or not m.any()) else (tr[~m], tr[m])
+
+
+def reduce_best_layer(X_raw, tr, r_l, r_d, seed, ctx=None):
+    """Pick ONE layer, then PCA it to the same width the core would have.
+
+    WHY THIS ARM EXISTS. The per-layer sweep shows the signal concentrated near layers 17-18, which
+    invites the obvious question: if one layer carries it, what is the nine-layer decomposition for?
+    That comparison is only meaningful at matched width and under the same protocol, so it belongs
+    here rather than being read across from the sweep, whose numbers come from a different split and
+    a different readout.
+
+    THE LAYER IS CHOSEN ON TRAINING ROWS ONLY. A grouped carve holds out whole questions from `tr`,
+    every layer is fitted and scored on that carve, the best is taken, and the projection is then
+    refitted on all of `tr`. Selecting on the test rows would hand this arm the answer, and selecting
+    once on one seed would leak that seed's training rows into another seed's test set."""
+    from sklearn.metrics import roc_auc_score
+    m = mods()
+    y, pid, readout = ctx["y"], ctx["prompt_id"], ctx["readout"]
+    k = r_l * r_d
+    fit_idx, val_idx = _grouped_carve(pid, tr, seed)
+
+    best_li, best_auc = 0, -np.inf
+    if val_idx is not None and len(np.unique(y[val_idx])) > 1:
+        for li in range(X_raw.shape[1]):
+            Xi = np.ascontiguousarray(X_raw[:, li:li + 1, :])
+            Zi = reduce_flat_pca(Xi, fit_idx, 1, min(k, Xi.shape[2]), seed)
+            sc = m["s26"].fit_eval(readout, Zi[fit_idx], y[fit_idx], Zi[val_idx], seed)
+            a = roc_auc_score(y[val_idx], sc)
+            if a > best_auc:
+                best_li, best_auc = li, a
+    ctx.setdefault("chosen_layers", []).append({"layer": int(best_li),
+                                                "val_auroc": float(best_auc)})
+    Xb = np.ascontiguousarray(X_raw[:, best_li:best_li + 1, :])
+    return reduce_flat_pca(Xb, tr, 1, min(k, Xb.shape[2]), seed)
+
+
 REDUCERS = {"hosvd": reduce_hosvd, "flat_pca": reduce_flat_pca,
-            "layer_mean": reduce_layer_mean, "random_proj": reduce_random_proj}
+            "layer_mean": reduce_layer_mean, "random_proj": reduce_random_proj,
+            "best_layer": reduce_best_layer}
 
 
-def build(arm, feats, spec, tr, seed):
+def build(arm, feats, spec, tr, seed, ctx=None):
     """Apply one arm to every sub-tensor of the condition and concatenate, as the pipeline does."""
     parts = []
     for i, (key, r_l, r_d) in enumerate(spec):
-        parts.append(REDUCERS[arm](feats[key], tr, r_l, r_d, seed + i))
+        parts.append(REDUCERS[arm](feats[key], tr, r_l, r_d, seed + i, ctx))
     return np.concatenate(parts, axis=1)
 
 
 def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS,
-        condition=DEFAULT_CONDITION):
+        condition=DEFAULT_CONDITION, tag=None):
     m = mods()
     import methods.base as B
     c = B.canonical()
@@ -159,7 +209,8 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
         tr, te = np.asarray(tr, dtype=int), np.asarray(te, dtype=int)
         for arm in arms:
             t1 = time.time()
-            Z = build(arm, feats, spec, tr, seed)
+            ctx = {"y": y, "prompt_id": prompt_id, "readout": readout}
+            Z = build(arm, feats, spec, tr, seed, ctx)
             assert Z.shape[1] == width or arm == "layer_mean", (arm, Z.shape, width)
             sc = m["s26"].fit_eval(readout, Z[tr], y[tr], Z[te], seed)
             # (scores, labels), in that order -- reversing them silently returns 1 - AUROC. And
@@ -170,6 +221,8 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
                  "within_prompt_auroc": wp["within_prompt_auroc"],
                  "n_pairs": wp["n_pairs"],
                  "seconds": round(time.time() - t1, 1)}
+            if ctx.get("chosen_layers"):
+                r["chosen_layers"] = ctx["chosen_layers"]
             res[arm].append(r)
             print("    seed %-3d %-12s pooled %.4f  within %.4f  (%.0fs)"
                   % (seed, arm, r["pooled_auroc"],
@@ -196,7 +249,8 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
     print("  VERDICT: %s" % verdict)
 
     os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "flatten_%s_%s_%s.json" % (model_folder, dataset, readout))
+    dst = os.path.join(out_dir, "flatten_%s_%s_%s%s.json"
+                       % (model_folder, dataset, readout, ("_" + tag) if tag else ""))
     with open(dst, "w") as f:
         json.dump({"dataset": dataset, "model_folder": model_folder, "readout": readout,
                    "condition": condition, "width": width, "seeds": seeds,
@@ -288,6 +342,29 @@ def self_test():
     assert w896 == 896, w896
     print("  [PASS] condition %s read from 44.CONDITION_SPECS, width %d" % (DEFAULT_CONDITION, w896))
 
+    # best_layer must SELECT, not guess. Only layer 3 carries the label here, and the choice is
+    # made on a grouped carve of the training rows, so a bug that selected on test rows or ignored
+    # labels entirely would not land on 3 reliably.
+    n2, L2, D2 = 300, 6, 40
+    y2 = (np.arange(n2) % 2).astype(int)
+    pid2 = np.repeat(np.arange(n2 // 2), 2)
+    X2 = rng.standard_normal((n2, L2, D2)).astype(np.float32)
+    X2[:, 3, :] += y2[:, None] * 4.0
+    tr2 = np.arange(0, 220)
+    ctx2 = {"y": y2, "prompt_id": pid2, "readout": "LR"}
+    Z2 = reduce_best_layer(X2, tr2, 2, 8, 0, ctx2)
+    assert Z2.shape[1] == min(16, D2)
+    assert ctx2["chosen_layers"][0]["layer"] == 3, ctx2["chosen_layers"]
+    print("  [PASS] best_layer selects the only informative layer (3) from a training-only carve, "
+          "val AUROC %.3f" % ctx2["chosen_layers"][0]["val_auroc"])
+
+    # The carve must not hand it test rows.
+    f2, v2 = _grouped_carve(pid2, tr2, 0)
+    assert v2 is not None and not np.intersect1d(f2, v2).size
+    assert not (set(pid2[f2].tolist()) & set(pid2[v2].tolist())), "carve shares questions"
+    assert set(np.concatenate([f2, v2]).tolist()) <= set(tr2.tolist()), "carve escaped train rows"
+    print("  [PASS] the selection carve stays inside training rows and shares no question")
+
     print("\n  ALL PASS")
     return True
 
@@ -301,7 +378,9 @@ def main():
     p.add_argument("--data-dir", default=None)
     p.add_argument("--out-dir", default=DEFAULT_OUT)
     p.add_argument("--readout", default="LR", choices=["LR", "RF"])
-    p.add_argument("--arms", nargs="*", default=list(ARMS))
+    p.add_argument("--arms", nargs="*", default=list(ARMS),
+                   help="subset of %s" % (ALL_ARMS,))
+    p.add_argument("--tag", default=None, help="suffix for the output filename")
     p.add_argument("--condition", default=DEFAULT_CONDITION)
     a = p.parse_args()
 
@@ -315,7 +394,7 @@ def main():
         with open(os.path.join(HERE, "config.yaml")) as f:
             data_dir = yaml.safe_load(f)["output"]["data_dir"]
     run(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout, arms=a.arms,
-        condition=a.condition)
+        condition=a.condition, tag=a.tag)
 
 
 if __name__ == "__main__":
