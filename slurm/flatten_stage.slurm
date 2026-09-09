@@ -25,9 +25,18 @@
 
 set -u
 
-MODEL="${1:?usage: flatten_stage.slurm <model_folder> <dataset> <readout>}"
+MODEL="${1:?usage: flatten_stage.slurm <model_folder> <dataset> <readout> [tag] [extra args...]}"
 DS="${2:?dataset required}"
 READOUT="${3:-RF}"
+TAG="${4:-}"
+shift 4 2>/dev/null || shift $#
+EXTRA="$*"
+
+# 61 writes two different files depending on what it was asked to do: the single-size control goes
+# to flatten_*.json, the sample-efficiency curve to sampeff_*.json. The skip guard has to look for
+# whichever one this invocation will produce, or a resubmit of the curve would find the control
+# already there and skip a run it never did.
+case "$EXTRA" in *--train-frac*) PREFIX=sampeff ;; *) PREFIX=flatten ;; esac
 
 REPO="${HD_REPO:?set HD_REPO to your clone of hallucination-detection}"
 DATA="${HD_DATA:-}"
@@ -63,6 +72,14 @@ try:
 except Exception as e:
     print("  existing result unreadable (%s) -- recomputing" % e); sys.exit(1)
 arms = ("hosvd", "flat_pca", "layer_mean", "random_proj")
+if "by_fraction" in d:
+    if not d["by_fraction"] or not all(
+            f.get("summary", {}).get(a, {}).get("per_seed") for f in d["by_fraction"].values()
+            for a in arms):
+        print("  existing curve is missing an arm -- recomputing"); sys.exit(1)
+    print("  verified: %s / %s / %s curve over %d fractions already complete"
+          % (d["dataset"], d["condition"], d["readout"], len(d["by_fraction"])))
+    sys.exit(0)
 if not all(d.get("summary", {}).get(a, {}).get("per_seed") for a in arms):
     print("  existing result is missing an arm -- recomputing"); sys.exit(1)
 print("  verified: %s / %s / %s already complete" % (d["dataset"], d["condition"], d["readout"]))
@@ -73,7 +90,8 @@ fi
 
 ARGS="--dataset $DS --model_folder $MODEL --readout $READOUT"
 [ -n "$DATA" ] && ARGS="$ARGS --data-dir $DATA"
+[ -n "$TAG" ] && ARGS="$ARGS --tag $TAG"
 
-python 61_flatten_control.py $ARGS || exit 1
+python 61_flatten_control.py $ARGS $EXTRA || exit 1
 
 echo "$(date +%F_%H-%M-%S): done $MODEL/$DS $READOUT"

@@ -9,6 +9,10 @@
 #   READOUTS=RF bash submit_flatten.sh                       # just the readout the paper reports
 #   FORCE=1 bash submit_flatten.sh                           # ignore the skip guard
 #
+#   # the sample-efficiency curve: same four arms, five training sizes, test set held fixed
+#   READOUTS=RF TAG=sampeff JOB_TIME=08:00:00 \
+#     EXTRA="--train-frac 0.05 0.1 0.25 0.5 1.0" bash submit_flatten.sh
+#
 # BOTH READOUTS, DELIBERATELY. The first run used LR only, because that was 61's default. The paper
 # reports RF, and on Qwen/TyDiQA the two differ by about five points for our arm -- triple_concat is
 # 87.9 with RF against 84.1 with LR. A control against a configuration we do not report answers a
@@ -33,6 +37,11 @@ MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa}"
 READOUTS="${READOUTS:-RF LR}"
 PART="${PART:-highgpu}"
+TAG="${TAG:-}"
+# Appended to 61's command line. --train-frac switches it to the sample-efficiency curve, which
+# costs roughly 2-3x the single-size control (the fractions sum to 1.9x the training rows, and the
+# test-side transform is full size at every point), so raise JOB_TIME with it.
+EXTRA="${EXTRA:-}"
 
 mkdir -p "$HD_REPO/slurm_logs" "$HD_REPO/results/flatten_control"
 
@@ -73,7 +82,7 @@ for MO in $MODELS; do
       sub "-p $PART --mem=$(job_mem $DS) --cpus-per-task=8 --time=$(job_time $DS) \
            --job-name=flat-${DS:0:4}-${RO} \
            --export=ALL,HD_REPO=$HD_REPO,HD_DATA=${HD_DATA:-},FORCE=${FORCE:-0}" \
-          "$MO" "$DS" "$RO"
+          "$MO" "$DS" "$RO" "$TAG" ${EXTRA:-}
       printf "  %-24s %-12s %-3s -> %s  (mem %s, %s)\n" "$MO" "$DS" "$RO" "$JOBID" \
              "$(job_mem $DS)" "$(job_time $DS)"
       N=$((N+1))

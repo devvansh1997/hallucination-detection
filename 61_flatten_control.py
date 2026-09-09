@@ -34,6 +34,8 @@ WHAT EACH OUTCOME MEANS.
 
 Usage:
   python 61_flatten_control.py --self-test
+  python 61_flatten_control.py --dataset tydiqa_gp --model_folder llama-3.1-8b \
+      --readout RF --train-frac 0.05 0.1 0.25 0.5 1.0     # sample-efficiency curve
   python 61_flatten_control.py --dataset tydiqa_gp  --model_folder qwen-2.5-7b-instruct
   python 61_flatten_control.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct --readout RF
   python 61_flatten_control.py --dataset tydiqa_gp --model_folder llama-3.1-8b --condition triple_concat
@@ -135,6 +137,24 @@ def _grouped_carve(prompt_id, tr, seed, frac=0.2):
     return (tr, None) if (m.all() or not m.any()) else (tr[~m], tr[m])
 
 
+def _subsample_train(tr, prompt_id, frac, seed):
+    """Keep a fraction of the TRAINING QUESTIONS, with all of their answers. Test rows untouched.
+
+    QUESTIONS, NOT ROWS. Labels are produced per question -- you judge a question's ten answers
+    against one reference together -- so the question is the unit that is actually scarce. Thinning
+    rows inside a question would shrink the training set while leaving it exactly as diverse, which
+    is a different experiment and an easier one.
+
+    The seed is mixed with the fraction so that the 25% draw is not merely the 50% draw truncated;
+    each point on the curve is an independent sample at its own size."""
+    if frac >= 1.0:
+        return tr
+    q = np.unique(prompt_id[tr])
+    rng = np.random.default_rng(1000003 * int(seed) + int(round(frac * 10000)))
+    keep = rng.permutation(q)[:max(2, int(round(len(q) * frac)))]
+    return tr[np.isin(prompt_id[tr], keep)]
+
+
 def reduce_best_layer(X_raw, tr, r_l, r_d, seed, ctx=None):
     """Pick ONE layer, then PCA it to the same width the core would have.
 
@@ -182,6 +202,43 @@ def build(arm, feats, spec, tr, seed, ctx=None):
     return np.concatenate(parts, axis=1)
 
 
+def _score_one(m, c, arm, feats, spec, tr, te, y, prompt_id, readout, seed, width,
+               strict_width=True):
+    """Fit one arm on `tr`, score `te`, return the row. Shared by both drivers.
+
+    strict_width is False only for the sample-efficiency curve, where a projection asked for more
+    components than the training rows can supply legitimately returns fewer -- which is the thing
+    that experiment is measuring, not a bug to assert against."""
+    t1 = time.time()
+    ctx = {"y": y, "prompt_id": prompt_id, "readout": readout}
+    Z = build(arm, feats, spec, tr, seed, ctx)
+    if strict_width:
+        assert Z.shape[1] == width or arm == "layer_mean", (arm, Z.shape, width)
+    sc = m["s26"].fit_eval(readout, Z[tr], y[tr], Z[te], seed)
+    # (scores, labels), in that order -- reversing them silently returns 1 - AUROC. And
+    # within_prompt_auroc returns a dict, not a float. Both pinned by the self-test.
+    wp = c["within_prompt_auroc"](sc, y[te], prompt_id[te])
+    r = {"seed": int(seed), "dim": int(Z.shape[1]),
+         "pooled_auroc": float(c["pooled_auroc"](sc, y[te])),
+         "within_prompt_auroc": wp["within_prompt_auroc"],
+         "n_pairs": wp["n_pairs"],
+         "seconds": round(time.time() - t1, 1)}
+    if ctx.get("chosen_layers"):
+        r["chosen_layers"] = ctx["chosen_layers"]
+    return r
+
+
+def _summarize(res, arms):
+    out = {}
+    for arm in arms:
+        p = np.array([r["pooled_auroc"] for r in res[arm]])
+        w = np.array([r["within_prompt_auroc"] for r in res[arm] if r["within_prompt_auroc"]])
+        out[arm] = {"pooled_mean": float(p.mean()), "pooled_std": float(p.std()),
+                    "within_mean": float(w.mean()) if len(w) else None,
+                    "dim": res[arm][0]["dim"], "per_seed": res[arm]}
+    return out
+
+
 def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS,
         condition=DEFAULT_CONDITION, tag=None):
     m = mods()
@@ -208,34 +265,14 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
         tr, te = c["question_split"](is_known, prompt_id, n, seed)
         tr, te = np.asarray(tr, dtype=int), np.asarray(te, dtype=int)
         for arm in arms:
-            t1 = time.time()
-            ctx = {"y": y, "prompt_id": prompt_id, "readout": readout}
-            Z = build(arm, feats, spec, tr, seed, ctx)
-            assert Z.shape[1] == width or arm == "layer_mean", (arm, Z.shape, width)
-            sc = m["s26"].fit_eval(readout, Z[tr], y[tr], Z[te], seed)
-            # (scores, labels), in that order -- reversing them silently returns 1 - AUROC. And
-            # within_prompt_auroc returns a dict, not a float. Both pinned by the self-test.
-            wp = c["within_prompt_auroc"](sc, y[te], prompt_id[te])
-            r = {"seed": int(seed), "dim": int(Z.shape[1]),
-                 "pooled_auroc": float(c["pooled_auroc"](sc, y[te])),
-                 "within_prompt_auroc": wp["within_prompt_auroc"],
-                 "n_pairs": wp["n_pairs"],
-                 "seconds": round(time.time() - t1, 1)}
-            if ctx.get("chosen_layers"):
-                r["chosen_layers"] = ctx["chosen_layers"]
+            r = _score_one(m, c, arm, feats, spec, tr, te, y, prompt_id, readout, seed, width)
             res[arm].append(r)
             print("    seed %-3d %-12s pooled %.4f  within %.4f  (%.0fs)"
                   % (seed, arm, r["pooled_auroc"],
                      float("nan") if r["within_prompt_auroc"] is None
                      else r["within_prompt_auroc"], r["seconds"]), flush=True)
 
-    summary = {}
-    for arm in arms:
-        p = np.array([r["pooled_auroc"] for r in res[arm]])
-        w = np.array([r["within_prompt_auroc"] for r in res[arm] if r["within_prompt_auroc"]])
-        summary[arm] = {"pooled_mean": float(p.mean()), "pooled_std": float(p.std()),
-                        "within_mean": float(w.mean()) if len(w) else None,
-                        "dim": res[arm][0]["dim"], "per_seed": res[arm]}
+    summary = _summarize(res, arms)
 
     base = summary["hosvd"]["pooled_mean"]
     deltas = {a: round(100.0 * (base - summary[a]["pooled_mean"]), 2)
@@ -260,6 +297,101 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
                    "elapsed_seconds": round(time.time() - t0, 1)}, f, indent=2)
     print("  wrote %s" % dst)
     return summary
+
+
+def run_sample_efficiency(dataset, model_folder, data_dir, out_dir, readout, fracs,
+                          seeds=None, arms=ARMS, condition=DEFAULT_CONDITION, tag=None):
+    """The same four arms, at several training-set sizes.
+
+    WHY. The flattening control showed every fitted reduction tying at matched width, which leaves
+    the decomposition without a claim of its own. The argument we actually make for it is about
+    parameters: a separable basis needs Lr_L + Fr_F numbers where an unrestricted one needs
+    LFr_Lr_F, so it should stay estimable at training sizes where the unrestricted basis cannot be
+    estimated at all. That is a statement about sample size, and it has never been tested -- both
+    arms have only ever been run at 100%.
+
+    WHAT WOULD SETTLE IT. At each fraction the test set is held fixed and only the training
+    questions are thinned. If the gap between hosvd and flat_pca opens as the fraction falls, the
+    parameter argument is real and scoped to the setting that matters, since labelled hallucinations
+    are the scarce resource. If the two arms fall together, the argument is hollow and we should
+    stop making it."""
+    m = mods()
+    import methods.base as B
+    c = B.canonical()
+    seeds = list(seeds or c["seeds"])
+    spec = m["s44"].CONDITION_SPECS[condition]
+    fracs = sorted(float(f) for f in fracs)
+
+    feats, y, prompt_id, is_known = m["s44"].load_new_dataset(
+        dataset, data_dir, model_folder, condition=condition)
+    y = np.asarray(y, dtype=int)
+    prompt_id = np.asarray(prompt_id)
+    n = len(y)
+    width = sum(r_l * r_d for _, r_l, r_d in spec)
+    per_block = [r_l * r_d for _, r_l, r_d in spec]
+    print("  [%s/%s] %d answers, %d questions | condition %s, width %d (blocks %s), readout %s"
+          % (model_folder, dataset, n, len(np.unique(prompt_id)), condition, width,
+             "+".join(str(b) for b in per_block), readout), flush=True)
+    print("  fractions: %s" % ", ".join("%g%%" % (100 * f) for f in fracs), flush=True)
+
+    t0 = time.time()
+    by_frac = {}
+    for frac in fracs:
+        res = {a: [] for a in arms}
+        sizes = []
+        for seed in seeds:
+            tr_full, te = c["question_split"](is_known, prompt_id, n, seed)
+            tr_full, te = np.asarray(tr_full, dtype=int), np.asarray(te, dtype=int)
+            tr = _subsample_train(tr_full, prompt_id, frac, seed)
+            assert len(np.unique(y[tr])) > 1, (
+                "fraction %g left one class in the training rows on seed %d" % (frac, seed))
+            assert not np.intersect1d(tr, te).size, "subsampling leaked test rows into train"
+            sizes.append((len(np.unique(prompt_id[tr])), len(tr)))
+            for arm in arms:
+                r = _score_one(m, c, arm, feats, spec, tr, te, y, prompt_id, readout, seed,
+                               width, strict_width=False)
+                res[arm].append(r)
+        summary = _summarize(res, arms)
+        qs = int(np.mean([a for a, _ in sizes]))
+        rows = int(np.mean([b for _, b in sizes]))
+        by_frac["%g" % frac] = {"frac": frac, "n_train_questions": qs, "n_train_rows": rows,
+                                "rank_ceiling_per_block": max(0, rows - 1),
+                                "components_per_block": per_block, "summary": summary}
+        print("    %5g%%  %4d questions %5d rows | " % (100 * frac, qs, rows)
+              + " | ".join("%s %.4f (dim %d)" % (a, summary[a]["pooled_mean"], summary[a]["dim"])
+                           for a in arms), flush=True)
+
+    # The headline: does the gap between ours and the unrestricted projection widen as data shrinks?
+    gaps = {k: round(100.0 * (v["summary"]["hosvd"]["pooled_mean"]
+                              - v["summary"]["flat_pca"]["pooled_mean"]), 2)
+            for k, v in by_frac.items()} if "flat_pca" in arms and "hosvd" in arms else {}
+    verdict = "no flat_pca/hosvd pair to compare"
+    if gaps:
+        lo, hi = "%g" % fracs[0], "%g" % fracs[-1]
+        verdict = ("gap widens as data shrinks: %+.2f at %g%% against %+.2f at %g%%"
+                   % (gaps[lo], 100 * fracs[0], gaps[hi], 100 * fracs[-1])
+                   if gaps[lo] > gaps[hi] else
+                   "NO crossover: gap is %+.2f at %g%% against %+.2f at %g%% -- the parameter "
+                   "argument is not supported" % (gaps[lo], 100 * fracs[0], gaps[hi],
+                                                  100 * fracs[-1]))
+    print("\n  hosvd minus flat_pca, by fraction: "
+          + ", ".join("%g%% %+.2f" % (100 * float(k), v) for k, v in sorted(
+              gaps.items(), key=lambda kv: float(kv[0]))))
+    print("  VERDICT: %s" % verdict)
+
+    os.makedirs(out_dir, exist_ok=True)
+    dst = os.path.join(out_dir, "sampeff_%s_%s_%s%s.json"
+                       % (model_folder, dataset, readout, ("_" + tag) if tag else ""))
+    with open(dst, "w") as f:
+        json.dump({"dataset": dataset, "model_folder": model_folder, "readout": readout,
+                   "condition": condition, "width": width, "seeds": seeds, "fractions": fracs,
+                   "protocol": "question-level (paper protocol), training questions subsampled, "
+                               "test set held fixed",
+                   "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
+                   "by_fraction": by_frac, "hosvd_minus_flat_pca_pts": gaps, "verdict": verdict,
+                   "elapsed_seconds": round(time.time() - t0, 1)}, f, indent=2)
+    print("  wrote %s" % dst)
+    return by_frac
 
 
 def self_test():
@@ -365,6 +497,34 @@ def self_test():
     assert set(np.concatenate([f2, v2]).tolist()) <= set(tr2.tolist()), "carve escaped train rows"
     print("  [PASS] the selection carve stays inside training rows and shares no question")
 
+    # SUBSAMPLING. Whole questions, a subset of the training rows, never a test row, and the
+    # draws at different fractions must be independent rather than nested truncations.
+    pid3 = np.repeat(np.arange(100), 10)
+    tr3 = np.arange(0, 700)
+    assert _subsample_train(tr3, pid3, 1.0, 0) is tr3
+    half = _subsample_train(tr3, pid3, 0.5, 0)
+    assert set(half.tolist()) <= set(tr3.tolist()), "subsample escaped the training rows"
+    for q in np.unique(pid3[half]):
+        assert (pid3[half] == q).sum() == (pid3[tr3] == q).sum(), (
+            "question %s was split -- subsampling must keep whole questions" % q)
+    assert abs(len(np.unique(pid3[half])) - 35) <= 2, len(np.unique(pid3[half]))
+    print("  [PASS] _subsample_train keeps whole questions, stays inside train, ~50%% of 70 -> %d"
+          % len(np.unique(pid3[half])))
+
+    q25 = set(np.unique(_subsample_train(tr3, pid3, 0.25, 0)).tolist())
+    q50 = set(np.unique(half).tolist())
+    assert not q25 <= q50, "the 25% draw is a truncation of the 50% draw, not an independent sample"
+    print("  [PASS] draws at different fractions are independent, not nested")
+
+    # A projection asked for more components than the training rows can supply must return fewer
+    # rather than raise -- that narrowing is the measurement, so strict_width has to be off.
+    Xn = rng.standard_normal((300, 6, 400)).astype(np.float32)
+    tiny = np.arange(0, 40)
+    Zt = reduce_flat_pca(Xn, tiny, 20, 30, 0)
+    assert Zt.shape[1] <= 600
+    print("  [PASS] flat_pca on %d training rows supplies %d of the 600 components asked for"
+          % (len(tiny), Zt.shape[1]))
+
     print("\n  ALL PASS")
     return True
 
@@ -382,6 +542,9 @@ def main():
                    help="subset of %s" % (ALL_ARMS,))
     p.add_argument("--tag", default=None, help="suffix for the output filename")
     p.add_argument("--condition", default=DEFAULT_CONDITION)
+    p.add_argument("--train-frac", nargs="+", type=float, default=None,
+                   help="fractions of the TRAINING QUESTIONS to keep, e.g. 0.05 0.1 0.25 0.5 1.0. "
+                        "Runs the sample-efficiency curve instead of the single-size control.")
     a = p.parse_args()
 
     if a.self_test:
@@ -393,8 +556,12 @@ def main():
         import yaml
         with open(os.path.join(HERE, "config.yaml")) as f:
             data_dir = yaml.safe_load(f)["output"]["data_dir"]
-    run(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout, arms=a.arms,
-        condition=a.condition, tag=a.tag)
+    if a.train_frac:
+        run_sample_efficiency(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout,
+                              a.train_frac, arms=a.arms, condition=a.condition, tag=a.tag)
+    else:
+        run(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout, arms=a.arms,
+            condition=a.condition, tag=a.tag)
 
 
 if __name__ == "__main__":
