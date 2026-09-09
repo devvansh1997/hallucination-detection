@@ -25,6 +25,14 @@ set -euo pipefail
 STAGE="${HD_REPO}/slurm/method_stage.slurm"
 [ -f "$STAGE" ] || { echo "ERROR: $STAGE not found -- is HD_REPO right?" >&2; exit 1; }
 
+# Slurm resolves --output and --error RELATIVE TO THE SUBMISSION DIRECTORY, not to HD_REPO, and the
+# job inherits that directory as its cwd. Submitting from $HOME therefore scatters logs into
+# $HOME/slurm_logs and hides them when a job dies before its first line -- which reads exactly like
+# "the job never fired". Stand in the repo and create the directories first. submit_act.sh and
+# submit_flatten.sh already do this; this was the one submitter that did neither.
+cd "$HD_REPO"
+mkdir -p "$HD_REPO/slurm_logs" "$HD_REPO/results/methods"
+
 METHODS="${METHODS:-$(cd "$HD_REPO" && python 56_run_method.py --list | tail -n +2 | awk '{print $1}' | tr '\n' ' ')}"
 MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa nq_open triviaqa}"
@@ -85,6 +93,7 @@ echo "data    : ${HD_DATA:-<config.yaml default>}"
 echo "methods : $METHODS"
 echo "models  : $MODELS"
 echo "datasets: $DATASETS"
+echo "logs    : $HD_REPO/slurm_logs/<job-name>_<jobid>/"
 echo
 
 N=0
