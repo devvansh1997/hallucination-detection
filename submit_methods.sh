@@ -21,7 +21,11 @@
 
 set -euo pipefail
 
-: "${HD_REPO:?export HD_REPO=/path/to/your/hallucination-detection}"
+# HD_REPO defaults to the directory this script lives in, which IS the repo root. Requiring it as
+# an environment variable meant a fresh login shell died here with a message that reads like usage
+# text rather than an error, having queued nothing -- three times now, once misdiagnosed as a
+# scheduler problem. An explicit export still wins, so a second person can drive their own clone.
+HD_REPO="${HD_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 STAGE="${HD_REPO}/slurm/method_stage.slurm"
 [ -f "$STAGE" ] || { echo "ERROR: $STAGE not found -- is HD_REPO right?" >&2; exit 1; }
 
