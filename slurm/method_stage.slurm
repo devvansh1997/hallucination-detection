@@ -50,6 +50,10 @@ if [ "${CONDA_DEFAULT_ENV:-}" != "hal-det" ]; then
     exit 1
 fi
 
+# SLURM buffers stdout and DISCARDS it when a job is killed on TIMEOUT. Job 799185 ran for the
+# full hour and its .out stopped at the precompute line, so there was no way to tell whether it
+# was progressing slowly or stuck. act_extract.slurm already had this; it was not carried across.
+export PYTHONUNBUFFERED=1
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
 export HF_HUB_DOWNLOAD_TIMEOUT=1800

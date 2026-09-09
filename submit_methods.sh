@@ -33,12 +33,25 @@ TAG="${TAG:-}"
 # Anything here is appended to 56_run_method.py's command line, e.g. EXTRA="--m-n-eff 100".
 EXTRA="${EXTRA:-}"
 
-# Sized from measured runs: scoring is one forward pass per question and is dominated by model
-# load on the small datasets. TriviaQA is the only one that needs real time.
+# Sized from measured runs. Training-free methods are one forward pass per question, dominated by
+# model load on the small datasets. act_vit TRAINS ten times (five seeds x two protocols) and is
+# far heavier, and heavier again at N_eff=100 where every batch moves five times the bytes.
+#
+# MEASURED, 2026-09-08, Qwen, H100:
+#   truthfulqa N_eff=20    1111s     tydiqa_gp N_eff=100   2291s
+#   truthfulqa N_eff=100   >3600s -- killed on a 1h wall having produced no epoch line
+# Scaling tydiqa N=100 by the row ratio (8170/4400 = 1.86) puts truthfulqa N=100 near 71 minutes,
+# which is why it did not fit. The act_vit walls below carry roughly 2x on the measurements.
 job_time() { [ -n "${JOB_TIME:-}" ] && { echo "$JOB_TIME"; return; }
-             case "$1" in tydiqa_gp) echo "00:40:00";; truthfulqa) echo "01:00:00";;
-                          nq_open) echo "02:00:00";; triviaqa) echo "05:00:00";;
-                          *) echo "02:00:00";; esac; }
+             if [ "${1:-}" = "act_vit" ]; then
+                 case "${2:-}" in tydiqa_gp) echo "02:00:00";; truthfulqa) echo "03:00:00";;
+                                  nq_open) echo "08:00:00";; triviaqa) echo "20:00:00";;
+                                  *) echo "04:00:00";; esac
+             else
+                 case "${2:-}" in tydiqa_gp) echo "00:40:00";; truthfulqa) echo "01:00:00";;
+                                  nq_open) echo "02:00:00";; triviaqa) echo "05:00:00";;
+                                  *) echo "02:00:00";; esac
+             fi; }
 
 # Host RAM. Most methods stream from the pinned generations and 80G is ample. act_vit is the
 # exception: it holds a whole activation tensor in RAM, 4.7 GB per dataset at N_eff=20 but
@@ -78,12 +91,12 @@ N=0
 for ME in $METHODS; do
   for MO in $MODELS; do
     for DS in $DATASETS; do
-      sub "-p $PART --mem=$(job_mem $ME $DS) --gres=gpu:1 --time=$(job_time $DS) \
+      sub "-p $PART --mem=$(job_mem $ME $DS) --gres=gpu:1 --time=$(job_time $ME $DS) \
            --job-name=m-${ME:0:6}-${DS:0:4} \
            --export=ALL,HD_REPO=$HD_REPO,HD_DATA=${HD_DATA:-},FORCE=${FORCE:-0}" \
           "$ME" "$MO" "$DS" "$TAG" ${EXTRA:-}
       printf "  %-20s %-24s %-12s -> %s  (mem %s, %s)\n" "$ME" "$MO" "$DS" "$JOBID" \
-             "$(job_mem $ME $DS)" "$(job_time $DS)"
+             "$(job_mem $ME $DS)" "$(job_time $ME $DS)"
       N=$((N+1))
     done
   done
