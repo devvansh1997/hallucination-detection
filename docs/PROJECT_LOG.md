@@ -4,7 +4,7 @@ Running record of findings, corrections and operational knowledge, kept current 
 progresses. Every claim here carries its evidence; anything retracted stays visible with the
 reason, because knowing what we got wrong is as load-bearing as knowing what we got right.
 
-Last updated: 2026-08-24.
+Last updated: 2026-09-09.
 
 ---
 
@@ -502,7 +502,119 @@ rank stays low across three datasets, the claim is much stronger. ~6h.
 
 ---
 
+### 2.13 ACT-ViT on our data: we beat their single-dataset variant, and the leakage effect replicates on a third method
+
+Their architecture and training recipe imported unmodified from the released repo, driven from our
+harness. We do **not** run their driver: `utils/dataset_preprocess.py:40` splits with
+`StratifiedKFold` flat over responses, which is correct for them (one response per query) and is our
+answer-level protocol on 10-beam data. Running it unmodified would produce a number under the leaky
+split and label it ACT-ViT.
+
+Qwen2.5-7B, question-level, five seeds, `N_eff` = 100 (their default, and their better arm):
+
+| dataset | ours | ACT-ViT(s) | HARP |
+|---|---|---|---|
+| TyDiQA-GP | **88.30** | 84.05 ±0.15 | 79.90 |
+| TruthfulQA | **87.80** | 85.65 ±0.17 | 77.54 |
+
+**The leakage effect appears on a third method.** All eight ACT-ViT cells put answer-level above
+question-level, by **+2.18 to +5.88**, on a method whose own code performs the flat split. It also
+**grows with capacity**: +3.99 at `N_eff` = 20 against +5.88 at `N_eff` = 100, same model and
+dataset. Same mechanism as the RF/LR flip (§2.6), now on a third architecture.
+
+**Their token pooling barely matters on our data, which removes the handicap objection.** `N_eff` =
+100 buys ACT-ViT only **+0.76** over `N_eff` = 20 on TyDiQA for 4x the compute and 5x the disk.
+
+**We evaluate ACT-ViT(s), not ACT-ViT.** Their headline model trains jointly over fifteen
+model-dataset combinations across three model families and five task types; their Table 1 has it
+ahead of the single-dataset variant in 12 of 15. Of those fifteen, exactly one (Qwen2.5-7B-Instruct
+x TriviaQA) is reproducible here, and their LLaMA is 3-8B-Instruct against our 3.1-8B base. The row
+must be labelled ACT-ViT(s).
+
+**Their preprocessing is not what their Algorithm 1 says.** `process_file` zero-pads to
+`(L_for_pad, N_MAX)` *before* the replicate pad, and the replicate pad then never fires at any
+setting we run. So the padding that reaches the data is zeros, not edge replicas. Two consequences:
+`L`=29 pads to 32 with `factor_L`=4, so the last of the eight layer slots is `max(layer28, 0)`, an
+elementwise ReLU on the final layer; and with our median completion at 16-17 tokens against
+`N_MAX`=100, most token columns are zero. `59_extract_act_tensors.py` is asserted bit-identical to
+their two functions over 42 combinations of (L, T, N_eff) rather than to the paper's description.
+
+### 2.14 The multilinear restriction costs nothing and buys nothing — it is a cost argument, not a signal argument
+
+`61_flatten_control.py`, four reductions of the same tensors to the same 896 dimensions, everything
+else held fixed. Question-level, five seeds.
+
+| model | dataset | ours | flattened PCA | layer-mean | random |
+|---|---|---|---|---|---|
+| Qwen | TyDiQA-GP | **.878** | .875 | .870 | .854 |
+| Qwen | TruthfulQA | .878 | **.881** | .879 | .829 |
+| LLaMA | TyDiQA-GP | **.825** | .820 | .809 | .772 |
+| LLaMA | TruthfulQA | **.892** | .884 | .883 | .843 |
+
+Seed standard deviations are 0.009-0.020, so **every gap against the flattened projection is inside
+the noise** (+0.38, -0.33, +0.51, +0.80) and the gaps against the random projection are not (+2.44
+to +5.24).
+
+**The claim that a structure-preserving decomposition recovers signal flattening discards is not
+supported and has been removed from the method section.** What is supported: the same signal from
+1.15M parameters against 45.6M, without labels, and decisively better than an unfitted subspace of
+the same width.
+
+**The readout decides the direction, which is a finding in itself.** Under LR the flattened
+projection wins on **all four** cells by 3.12 to 9.36. Moving LR -> RF gains our core **+6.67**
+points on average and the flattened components **+0.91**. Principal components are already close to
+linearly separable; the Kronecker core holds structure a linear model cannot use. A control run
+under one readout would have reported the opposite conclusion.
+
+### 2.15 The layer window {15..23} is justified, and a spectral gap is not detectability
+
+`58_layer_sweep.py`, Qwen, all 29 depths, single-layer probe at `r_L`=1:
+
+| dataset / stream | best layer | window mean | outside mean | advantage |
+|---|---|---|---|---|
+| TyDiQA core | 18 | .8706 | .8122 | **+5.85** |
+| TyDiQA static | 18 | .8754 | .8301 | +4.52 |
+| TruthfulQA core | 18 | .8690 | .8520 | +1.70 |
+| TruthfulQA static | 17 | .8748 | .8586 | +1.63 |
+
+`peaked_in_window` on all four; range exceeds the mean CI width in all four, so this is not noise.
+
+**Layer 0 has the largest class difference in effective rank and the worst AUROC of any depth.**
+`60_class_spectrum.py --paired` gives hallucinated answers 1.90x more directions than truthful ones
+at layer 0, against 1.56x inside the window -- while layer 0's single-layer AUROC is .765 on TyDiQA
+against .882 at layer 18. A spectral gap is therefore **not** the same thing as detectability, and
+the motivation figure must say so rather than implying otherwise.
+
+**Open and sharp.** The sweep's best single layer reads .8815 (TyDiQA core, layer 18) against our
+nine-layer core's .8782. Those come from different splits and different readouts and are **not**
+comparable, but a reviewer will place them side by side. A `best_layer` arm at matched width, with
+the layer chosen on training rows only, is in `61` and running as of 2026-09-09.
+
+### 2.16 The class-spectrum figure survives its confound but is weakened by depth
+
+Hallucinated answers occupy more directions than truthful ones at every depth. Naively that is 2.17x
+(TyDiQA, layer 17), but truthful answers exist only for known questions, so the hallucinated cloud
+spans ~440 questions against ~302 -- 46% more topics before hallucination is considered. Pairing one
+truthful and one hallucinated answer **per question** over the 222 questions holding both leaves
+**1.60x**, still separated at 29 of 29 depths.
+
+Order-of-magnitude says the confound could explain at most 440/302 = 1.46x, and the residual after
+control is 1.60x, so the two are consistent. `energy@64` -- the fraction of variance inside the
+directions our compression keeps -- is .710 truthful against .641 hallucinated at layer 17.
+
+Caveat that must accompany the figure: effective rank, participation ratio and energy@64 are three
+functions of **one** spectrum, not three independent confirmations, and the effect peaks where
+detectability is worst (see §2.15).
+
 ## 3. Retracted / corrected
+
+| claim | status | why |
+|---|---|---|
+| "A structure-preserving decomposition recovers signal a flattened representation discards" (contribution 1, and the method section through 2026-09-08) | **not supported** | At matched width the flattened projection is within noise of ours on all four cells under RF, and ahead on all four under LR (§2.14). Replaced by a parameter-cost claim. |
+| `core_concat` as the reported configuration | **superseded** | Ranked on Qwen's four cells only, where it placed second. Over all eight cells it is third, and 5th of 6 on LLaMA/TyDiQA. `triple_concat` has mean rank 2.19, is never worse than 3.5 anywhere, and costs at most 0.74 against the per-cell best. |
+| ACT-ViT's pooling follows the paper's Algorithm 1 | **wrong** | Their released `process_file` zero-pads before the replicate pad, and the replicate pad never fires at our settings (§2.13). The first extraction used edge replication throughout and was discarded. |
+| HOSVD attributed to `turney2007empirical` | **wrong citation** | HOSVD is De Lathauwer, De Moor and Vandewalle (2000). Corrected in the method section; fix wherever else it appears. |
+
 
 Kept deliberately. Each cost time and each would have been caught by a reviewer.
 
