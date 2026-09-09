@@ -3,7 +3,7 @@
 =====================================================================================================
 THE CLAIM THIS TESTS. Our contribution says a structure-preserving decomposition recovers signal that
 a flattened representation discards. Nothing in the repo tested it. The obvious reviewer question --
-"you compress to 576 dimensions; what does plain PCA to 576 dimensions do?" -- had no answer.
+"you compress to 896 dimensions; what does plain PCA to 896 dimensions do?" -- had no answer.
 
 FOUR ARMS, identical everywhere except the reduction. Same pinned generations, same robust scaling
 fitted on the same training rows, same output dimension, same readout, same splits, same seeds:
@@ -36,6 +36,7 @@ Usage:
   python 61_flatten_control.py --self-test
   python 61_flatten_control.py --dataset tydiqa_gp  --model_folder qwen-2.5-7b-instruct
   python 61_flatten_control.py --dataset truthfulqa --model_folder qwen-2.5-7b-instruct --readout RF
+  python 61_flatten_control.py --dataset tydiqa_gp --model_folder llama-3.1-8b --condition triple_concat
 """
 
 import argparse
@@ -49,9 +50,11 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT = os.path.join(HERE, "results", "flatten_control")
 
-# core_concat: the condition the paper reports. C (9 x D) at r_L=5 plus V (8 x 2D) at r_L=4,
-# both at r_F=64, so 5*64 + 4*64 = 576 dimensions. Mirrors CONDITION_SPECS in 44_eval_phase3.py.
-CONDITION = [("core", 5, 64), ("velocity", 4, 64)]
+# The condition is read from 44_eval_phase3.CONDITION_SPECS rather than duplicated here, so this
+# file cannot drift from the definition the main results use. triple_concat is the configuration the
+# paper reports: C (9 x D) at r_L=5, S (9 x 2D) at r_L=5, V (8 x 2D) at r_L=4, all at r_F=64, so
+# 5*64 + 5*64 + 4*64 = 896 dimensions.
+DEFAULT_CONDITION = "triple_concat"
 ARMS = ("hosvd", "flat_pca", "layer_mean", "random_proj")
 
 
@@ -121,29 +124,33 @@ REDUCERS = {"hosvd": reduce_hosvd, "flat_pca": reduce_flat_pca,
             "layer_mean": reduce_layer_mean, "random_proj": reduce_random_proj}
 
 
-def build(arm, feats, tr, seed):
+def build(arm, feats, spec, tr, seed):
     """Apply one arm to every sub-tensor of the condition and concatenate, as the pipeline does."""
     parts = []
-    for i, (key, r_l, r_d) in enumerate(CONDITION):
+    for i, (key, r_l, r_d) in enumerate(spec):
         parts.append(REDUCERS[arm](feats[key], tr, r_l, r_d, seed + i))
     return np.concatenate(parts, axis=1)
 
 
-def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS):
+def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS,
+        condition=DEFAULT_CONDITION):
     m = mods()
     import methods.base as B
     c = B.canonical()
     seeds = list(seeds or c["seeds"])
+    spec = m["s44"].CONDITION_SPECS[condition]
 
-    feats, y, prompt_id = m["s44"].load_new_dataset(dataset, data_dir, model_folder)
+    # Four return values, and the condition name matters: without it the loader materialises every
+    # raw tensor type rather than only the ones this condition touches.
+    feats, y, prompt_id, is_known = m["s44"].load_new_dataset(
+        dataset, data_dir, model_folder, condition=condition)
     y = np.asarray(y, dtype=int)
     prompt_id = np.asarray(prompt_id)
-    is_known = c["derive_is_known"](y, prompt_id)
     n = len(y)
-    width = sum(r_l * r_d for _, r_l, r_d in CONDITION)
-    print("  [%s/%s] %d answers, %d questions, %.1f%% hallucinated | condition core_concat, "
+    width = sum(r_l * r_d for _, r_l, r_d in spec)
+    print("  [%s/%s] %d answers, %d questions, %.1f%% hallucinated | condition %s, "
           "width %d, readout %s" % (model_folder, dataset, n, len(np.unique(prompt_id)),
-                                    100.0 * y.mean(), width, readout), flush=True)
+                                    100.0 * y.mean(), condition, width, readout), flush=True)
 
     res = {a: [] for a in arms}
     t0 = time.time()
@@ -152,12 +159,16 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
         tr, te = np.asarray(tr, dtype=int), np.asarray(te, dtype=int)
         for arm in arms:
             t1 = time.time()
-            Z = build(arm, feats, tr, seed)
+            Z = build(arm, feats, spec, tr, seed)
             assert Z.shape[1] == width or arm == "layer_mean", (arm, Z.shape, width)
-            s = m["s26"].fit_eval(readout, Z[tr], y[tr], Z[te], seed)
+            sc = m["s26"].fit_eval(readout, Z[tr], y[tr], Z[te], seed)
+            # (scores, labels), in that order -- reversing them silently returns 1 - AUROC. And
+            # within_prompt_auroc returns a dict, not a float. Both pinned by the self-test.
+            wp = c["within_prompt_auroc"](sc, y[te], prompt_id[te])
             r = {"seed": int(seed), "dim": int(Z.shape[1]),
-                 "pooled_auroc": float(c["pooled_auroc"](y[te], s)),
-                 "within_prompt_auroc": c["within_prompt_auroc"](y[te], s, prompt_id[te]),
+                 "pooled_auroc": float(c["pooled_auroc"](sc, y[te])),
+                 "within_prompt_auroc": wp["within_prompt_auroc"],
+                 "n_pairs": wp["n_pairs"],
                  "seconds": round(time.time() - t1, 1)}
             res[arm].append(r)
             print("    seed %-3d %-12s pooled %.4f  within %.4f  (%.0fs)"
@@ -188,7 +199,7 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
     dst = os.path.join(out_dir, "flatten_%s_%s_%s.json" % (model_folder, dataset, readout))
     with open(dst, "w") as f:
         json.dump({"dataset": dataset, "model_folder": model_folder, "readout": readout,
-                   "condition": "core_concat", "width": width, "seeds": seeds,
+                   "condition": condition, "width": width, "seeds": seeds,
                    "protocol": "question-level (paper protocol), 5 seeds",
                    "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
                    "summary": summary, "delta_vs_hosvd_pts": deltas, "verdict": verdict,
@@ -251,6 +262,32 @@ def self_test():
     print("  [PASS] on a Kronecker-structured signal hosvd (%.3f) beats random_proj (%.3f) at the "
           "same width" % (auc["hosvd"], auc["random_proj"]))
 
+    # SIGNATURE GUARDS. Both bugs this catches were shipped: load_new_dataset returns FOUR values
+    # (that one raised), and the metrics take (scores, labels) -- reversing those returns 1 - AUROC
+    # silently, which is the EigenScore failure mode all over again.
+    import inspect
+    import methods.base as B
+    src = inspect.getsource(mods()["s44"].load_new_dataset)
+    assert src.rstrip().endswith("return feats, y, prompt_idx, is_known"), (
+        "44.load_new_dataset's return signature changed; run() unpacks four values")
+    assert "condition" in inspect.signature(mods()["s44"].load_new_dataset).parameters
+    print("  [PASS] 44.load_new_dataset still returns 4 values and accepts condition=")
+
+    cc = B.canonical()
+    yy = np.array([0, 0, 0, 1, 1])
+    ss = np.array([0.1, 0.2, 0.3, 0.8, 0.9])
+    assert abs(cc["pooled_auroc"](ss, yy) - 1.0) < 1e-12, (
+        "pooled_auroc(scores, labels) did not return 1.0 on a perfectly ordered vector -- the "
+        "argument order is wrong and every number would be 1 - AUROC")
+    w = cc["within_prompt_auroc"](ss, yy, np.array([0, 0, 1, 0, 1]))
+    assert isinstance(w, dict) and "within_prompt_auroc" in w
+    print("  [PASS] metrics take (scores, labels) and within_prompt_auroc returns a dict")
+
+    assert set(mods()["s44"].CONDITION_SPECS) >= {"triple_concat", "core_concat"}
+    w896 = sum(r_l * r_d for _, r_l, r_d in mods()["s44"].CONDITION_SPECS[DEFAULT_CONDITION])
+    assert w896 == 896, w896
+    print("  [PASS] condition %s read from 44.CONDITION_SPECS, width %d" % (DEFAULT_CONDITION, w896))
+
     print("\n  ALL PASS")
     return True
 
@@ -265,6 +302,7 @@ def main():
     p.add_argument("--out-dir", default=DEFAULT_OUT)
     p.add_argument("--readout", default="LR", choices=["LR", "RF"])
     p.add_argument("--arms", nargs="*", default=list(ARMS))
+    p.add_argument("--condition", default=DEFAULT_CONDITION)
     a = p.parse_args()
 
     if a.self_test:
@@ -276,7 +314,8 @@ def main():
         import yaml
         with open(os.path.join(HERE, "config.yaml")) as f:
             data_dir = yaml.safe_load(f)["output"]["data_dir"]
-    run(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout, arms=a.arms)
+    run(a.dataset, a.model_folder, data_dir, a.out_dir, a.readout, arms=a.arms,
+        condition=a.condition)
 
 
 if __name__ == "__main__":
