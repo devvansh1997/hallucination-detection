@@ -31,6 +31,7 @@ TRAINING rows only, grouped by question, at their TRAIN_VAL_RATIO of 4/5.
 
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -67,9 +68,32 @@ class _Args:
     pool = "cls"
 
 
-def build_model(l_pool, n_pool, device):
-    """Import and instantiate THEIR architecture. Kept in one place so the import path is auditable."""
-    if not os.path.isdir(ACT_REPO):
+_GET_MODEL = None
+
+
+def _wait_for_dir(path, attempts=5, wait=20, isdir=os.path.isdir):
+    """True once `path` is visible as a directory, retrying before concluding it is missing.
+
+    os.path.isdir returns False on ANY stat error, not only when the path is absent. On lustre the
+    metadata server can stop answering for a few seconds, and on 2026-09-09 two jobs died mid-run
+    reporting this repo missing after it had already been imported for their first fits."""
+    for i in range(attempts):
+        if isdir(path):
+            return True
+        if i < attempts - 1:
+            print("    %s not visible -- retry %d/%d in %ds" % (path, i + 1, attempts - 1, wait),
+                  flush=True)
+            time.sleep(wait)
+    return False
+
+
+def _load_get_model():
+    """Import their get_model ONCE per process. Every fit used to re-stat the repo directory, which
+    turned a filesystem blink on fit 3 of 10 into a dead job; once imported it cannot go missing."""
+    global _GET_MODEL
+    if _GET_MODEL is not None:
+        return _GET_MODEL
+    if not _wait_for_dir(ACT_REPO):
         raise SystemExit(
             "ACT-ViT not found at %s. Clone it next to HARP-Code:\n"
             "    git clone https://github.com/BarSGuy/ACT-ViT %s" % (ACT_REPO, ACT_REPO))
@@ -88,8 +112,14 @@ def build_model(l_pool, n_pool, device):
             "PyPI build against the wrong torch makes EVERY transformers model load in the env\n"
             "fail with 'operator torchvision::nms does not exist'. Verify both after installing:\n"
             "    python -c \"from transformers import AutoModelForCausalLM; from vit_pytorch import ViT\"" % e)
-    return get_model(_Args(), input_shape=(l_pool, n_pool, FEATURE_DIM_MAX),
-                     input_dim=FEATURE_DIM_MAX).to(device)
+    _GET_MODEL = get_model
+    return get_model
+
+
+def build_model(l_pool, n_pool, device):
+    """Import and instantiate THEIR architecture. Kept in one place so the import path is auditable."""
+    return _load_get_model()(_Args(), input_shape=(l_pool, n_pool, FEATURE_DIM_MAX),
+                             input_dim=FEATURE_DIM_MAX).to(device)
 
 
 def pad_features(batch, target=FEATURE_DIM_MAX):
@@ -283,6 +313,25 @@ class ActViT(Method):
                 **getattr(self, "_diag", {})}
 
     def self_test(self):
+        global _GET_MODEL
+        # Filesystem blinks. A directory that fails to stat twice and then appears must be waited
+        # for, not declared missing; one that never appears must still be reported.
+        seen = {"n": 0}
+        def blinking(_):
+            seen["n"] += 1
+            return seen["n"] >= 3
+        assert _wait_for_dir("/x", attempts=5, wait=0, isdir=blinking) and seen["n"] == 3
+        assert not _wait_for_dir("/x", attempts=3, wait=0, isdir=lambda _: False)
+        # Once imported, the repo must not be re-checked: poison the check and prove it is skipped.
+        saved, _GET_MODEL = _GET_MODEL, (lambda *a, **k: "cached")
+        real = os.path.isdir
+        os.path.isdir = lambda _: (_ for _ in ()).throw(AssertionError("repo was re-checked"))
+        try:
+            assert _load_get_model()() == "cached"
+        finally:
+            os.path.isdir, _GET_MODEL = real, saved
+        print("    [PASS] repo check retries a transient miss, and is skipped once imported")
+
         import torch
 
         # Feature padding to their adapter width, which is max(FEATURE_DIMS) not our hidden size.

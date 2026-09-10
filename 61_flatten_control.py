@@ -202,6 +202,51 @@ def build(arm, feats, spec, tr, seed, ctx=None):
     return np.concatenate(parts, axis=1)
 
 
+def _retry_os(fn, what, attempts=5, wait=20):
+    """Call fn(), retrying on OSError. For filesystem calls on lustre, which can stop answering for
+    a few seconds at a time.
+
+    WHY THIS EXISTS. On 2026-09-09 a sample-efficiency run computed all five fractions over 36
+    minutes and then died at os.makedirs with PermissionError on /lustre/fs1/home/<user> -- a
+    directory that plainly existed. os.path.exists turns ANY stat error into False, so when the
+    metadata server blinked, makedirs believed every ancestor was missing and climbed to the home
+    directory trying to create it. Two ACT-ViT jobs died the same evening reporting their repo
+    missing mid-run, for the same reason. A stat failing briefly should not cost an hour."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except OSError as e:
+            if i == attempts - 1:
+                raise
+            print("  %s failed (%s) -- retry %d/%d in %ds" % (what, e, i + 1, attempts - 1, wait),
+                  flush=True)
+            time.sleep(wait)
+
+
+def _write_result(dst, payload, attempts=5, wait=20):
+    """Write the result JSON, and never lose it.
+
+    Retries the directory and the write. If the file still cannot be written, the whole payload is
+    printed between markers so it survives in the SLURM log, and the job exits non-zero -- so the
+    skip guard does not mistake a result that exists only in a log for a completed run."""
+    text = json.dumps(payload, indent=2)
+
+    def _do():
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w") as f:
+            f.write(text)
+
+    try:
+        _retry_os(_do, "writing %s" % dst, attempts=attempts, wait=wait)
+    except OSError as e:
+        print("  COULD NOT WRITE %s after %d attempts (%s).\n  The full result is below; cut it "
+              "out of this log and save it under that name." % (dst, attempts, e), flush=True)
+        print("-----BEGIN RESULT JSON-----\n%s\n-----END RESULT JSON-----" % text, flush=True)
+        raise SystemExit(1)
+    print("  wrote %s" % dst, flush=True)
+    return dst
+
+
 def _score_one(m, c, arm, feats, spec, tr, te, y, prompt_id, readout, seed, width,
                strict_width=True):
     """Fit one arm on `tr`, score `te`, return the row. Shared by both drivers.
@@ -249,6 +294,10 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
 
     # Four return values, and the condition name matters: without it the loader materialises every
     # raw tensor type rather than only the ones this condition touches.
+    # Up front, so a directory that genuinely cannot be written fails in seconds, not after the
+    # compute. Transient failures are retried here and again at the write.
+    _retry_os(lambda: os.makedirs(out_dir, exist_ok=True), "creating %s" % out_dir)
+
     feats, y, prompt_id, is_known = m["s44"].load_new_dataset(
         dataset, data_dir, model_folder, condition=condition)
     y = np.asarray(y, dtype=int)
@@ -285,17 +334,14 @@ def run(dataset, model_folder, data_dir, out_dir, readout, seeds=None, arms=ARMS
                        for a in arms if a != "hosvd"))
     print("  VERDICT: %s" % verdict)
 
-    os.makedirs(out_dir, exist_ok=True)
     dst = os.path.join(out_dir, "flatten_%s_%s_%s%s.json"
                        % (model_folder, dataset, readout, ("_" + tag) if tag else ""))
-    with open(dst, "w") as f:
-        json.dump({"dataset": dataset, "model_folder": model_folder, "readout": readout,
-                   "condition": condition, "width": width, "seeds": seeds,
-                   "protocol": "question-level (paper protocol), 5 seeds",
-                   "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
-                   "summary": summary, "delta_vs_hosvd_pts": deltas, "verdict": verdict,
-                   "elapsed_seconds": round(time.time() - t0, 1)}, f, indent=2)
-    print("  wrote %s" % dst)
+    _write_result(dst, {"dataset": dataset, "model_folder": model_folder, "readout": readout,
+                        "condition": condition, "width": width, "seeds": seeds,
+                        "protocol": "question-level (paper protocol), 5 seeds",
+                        "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
+                        "summary": summary, "delta_vs_hosvd_pts": deltas, "verdict": verdict,
+                        "elapsed_seconds": round(time.time() - t0, 1)})
     return summary
 
 
@@ -321,6 +367,7 @@ def run_sample_efficiency(dataset, model_folder, data_dir, out_dir, readout, fra
     seeds = list(seeds or c["seeds"])
     spec = m["s44"].CONDITION_SPECS[condition]
     fracs = sorted(float(f) for f in fracs)
+    _retry_os(lambda: os.makedirs(out_dir, exist_ok=True), "creating %s" % out_dir)
 
     feats, y, prompt_id, is_known = m["s44"].load_new_dataset(
         dataset, data_dir, model_folder, condition=condition)
@@ -379,18 +426,16 @@ def run_sample_efficiency(dataset, model_folder, data_dir, out_dir, readout, fra
               gaps.items(), key=lambda kv: float(kv[0]))))
     print("  VERDICT: %s" % verdict)
 
-    os.makedirs(out_dir, exist_ok=True)
     dst = os.path.join(out_dir, "sampeff_%s_%s_%s%s.json"
                        % (model_folder, dataset, readout, ("_" + tag) if tag else ""))
-    with open(dst, "w") as f:
-        json.dump({"dataset": dataset, "model_folder": model_folder, "readout": readout,
-                   "condition": condition, "width": width, "seeds": seeds, "fractions": fracs,
-                   "protocol": "question-level (paper protocol), training questions subsampled, "
-                               "test set held fixed",
-                   "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
-                   "by_fraction": by_frac, "hosvd_minus_flat_pca_pts": gaps, "verdict": verdict,
-                   "elapsed_seconds": round(time.time() - t0, 1)}, f, indent=2)
-    print("  wrote %s" % dst)
+    _write_result(dst, {"dataset": dataset, "model_folder": model_folder, "readout": readout,
+                        "condition": condition, "width": width, "seeds": seeds,
+                        "fractions": fracs,
+                        "protocol": "question-level (paper protocol), training questions "
+                                    "subsampled, test set held fixed",
+                        "hallucination_rate_pct": round(100.0 * float(y.mean()), 3),
+                        "by_fraction": by_frac, "hosvd_minus_flat_pca_pts": gaps,
+                        "verdict": verdict, "elapsed_seconds": round(time.time() - t0, 1)})
     return by_frac
 
 
@@ -524,6 +569,37 @@ def self_test():
     assert Zt.shape[1] <= 600
     print("  [PASS] flat_pca on %d training rows supplies %d of the 600 components asked for"
           % (len(tiny), Zt.shape[1]))
+
+    # WRITE SURVIVAL. A transient failure must be retried, and a permanent one must put the whole
+    # result into the log and exit non-zero rather than silently lose an hour of compute.
+    import contextlib, io as _io, tempfile
+    with tempfile.TemporaryDirectory() as td:
+        ok = os.path.join(td, "a", "b", "r.json")
+        _write_result(ok, {"x": 1}, attempts=2, wait=0)
+        assert json.load(open(ok)) == {"x": 1}
+
+        calls = {"n": 0}
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError("simulated lustre blink")
+            return "ok"
+        assert _retry_os(flaky, "flaky", attempts=5, wait=0) == "ok" and calls["n"] == 3
+
+        blocker = os.path.join(td, "not_a_dir")
+        open(blocker, "w").close()
+        buf = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                _write_result(os.path.join(blocker, "r.json"), {"kept": [1, 2]}, attempts=2, wait=0)
+            raise AssertionError("an unwritable destination did not exit")
+        except SystemExit as e:
+            assert e.code == 1
+        out = buf.getvalue()
+        body = out.split("-----BEGIN RESULT JSON-----")[1].split("-----END RESULT JSON-----")[0]
+        assert json.loads(body) == {"kept": [1, 2]}
+    print("  [PASS] result write retries a transient failure, and on a permanent one prints the "
+          "full JSON to the log and exits 1")
 
     print("\n  ALL PASS")
     return True
