@@ -53,7 +53,10 @@ DEFAULT_IN = os.path.abspath(os.path.join(HERE, "..", "data-alllayers"))
 N_SPLITS = 5
 SEED = 0
 R_D = 64                 # matches CONDITION_SPECS' feature rank in 44_eval_phase3.py
-WINDOW = list(range(15, 24))
+# The pipeline's blocks 15..23 in THIS file's indexing, where index 0 is the embedding output and
+# index l is block l-1. Was range(15, 24) until 2026-09-15, which put window_mean/outside_mean one
+# layer early; the per-layer points were always right.
+WINDOW = list(range(16, 25))
 
 
 def _load(name, filename):

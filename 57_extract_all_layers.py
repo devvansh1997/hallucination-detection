@@ -17,14 +17,21 @@ the first pass already had in memory. This keeps all of it.
 
 WHAT IT STORES, AND WHAT IT LEAVES OUT.
 
-    core   (N, L_tot+1, D)   max over completion tokens
-    q95    (N, L_tot+1, D)   upper quantile over completion tokens
+    core   (N, L_tot+1, D)   max over completion tokens                      --streams core
+    q95    (N, L_tot+1, D)   upper quantile over completion tokens           --streams static
     q05    (N, L_tot+1, D)   lower quantile
+    v95    (N, L_tot,   D)   upper quantile over tokens of h[i+1] - h[i]     --streams velocity
+    v05    (N, L_tot,   D)   lower quantile of the same difference
 
-Velocity is deliberately absent. It is defined between adjacent layers and would add 2(L_tot) more
-slices -- roughly 40% more disk -- to answer a question about WHICH DEPTHS carry signal, which core
-and static already answer. Once the informative band is known, velocity can be extracted there
-specifically.
+Velocity is off by default. The single-layer sweep (58) only asks WHICH DEPTHS carry signal, and core
+and static answer that. It is needed for the window sweep of the full detector (T-012): the reported
+detector concatenates peak, range and update, and the update is defined on token-level states of
+adjacent layers, so it cannot be rebuilt from pooled features. Asking for it here costs no extra
+forward pass. v95[:, i] pools h[i+1] - h[i] in hidden-state indices, so the pinned update stream
+(32_extract_velocity.py, blocks l = 15..22, Delta = h_{l+1} - h_l) is v95[:, 16:24].
+
+--streams velocity alone writes <dataset>_alllayers_velocity.npz, for a model whose core and static
+already exist; an existing file is never overwritten.
 
 LAYER INDEXING. hidden_states has L_tot+1 entries; index 0 is the embedding output, before any
 block, and index l>0 is the output of block l. Index L_tot is the last block's output WITHOUT the
@@ -38,6 +45,8 @@ needs and is not fine for TriviaQA. The script refuses rather than being killed 
 Usage:
   python 57_extract_all_layers.py --self-test
   python 57_extract_all_layers.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct
+  python 57_extract_all_layers.py --dataset tydiqa_gp --model_folder llama-3.1-8b --streams core,static,velocity
+  python 57_extract_all_layers.py --dataset tydiqa_gp --model_folder qwen-2.5-7b-instruct --streams velocity
 """
 
 import argparse
@@ -66,11 +75,58 @@ def pool_completion(h, q_hi=0.95, q_lo=0.05):
             np.quantile(a, q_lo, axis=0).astype(np.float32))
 
 
-def estimate_gb(n_beams, n_layers_plus1, D, n_streams=3, bytes_per=2):
-    return n_beams * n_layers_plus1 * D * n_streams * bytes_per / 1024 ** 3
+def pool_answer(h, streams, q_hi=0.95, q_lo=0.05):
+    """h is (L1, T, D): one answer's completion tokens at every hidden-state index. Returns a dict
+    with core (L1, D), q95/q05 (L1, D) and v95/v05 (L1-1, D), as requested by `streams`.
+
+    Same conventions as pool_completion, applied per index: elementwise over t, and NaN for an
+    empty completion. v95[i] and v05[i] pool h[i+1] - h[i] over tokens, the update of
+    32_extract_velocity.compute_velocity_streams."""
+    a = np.asarray(h, dtype=np.float32)
+    L1, T, D = a.shape
+    out = {}
+    if T == 0:
+        if "core" in streams:
+            out["core"] = np.full((L1, D), np.nan, dtype=np.float32)
+        if "static" in streams:
+            out["q95"] = np.full((L1, D), np.nan, dtype=np.float32)
+            out["q05"] = np.full((L1, D), np.nan, dtype=np.float32)
+        if "velocity" in streams:
+            out["v95"] = np.full((L1 - 1, D), np.nan, dtype=np.float32)
+            out["v05"] = np.full((L1 - 1, D), np.nan, dtype=np.float32)
+        return out
+    if "core" in streams:
+        out["core"] = a.max(axis=1)
+    if "static" in streams:
+        out["q95"] = np.quantile(a, q_hi, axis=1).astype(np.float32)
+        out["q05"] = np.quantile(a, q_lo, axis=1).astype(np.float32)
+    if "velocity" in streams:
+        d = a[1:] - a[:-1]
+        out["v95"] = np.quantile(d, q_hi, axis=1).astype(np.float32)
+        out["v05"] = np.quantile(d, q_lo, axis=1).astype(np.float32)
+    return out
 
 
-def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, log_every):
+STREAMS = ("core", "static", "velocity")
+ARRAYS = {"core": ("core",), "static": ("q95", "q05"), "velocity": ("v95", "v05")}
+
+
+def estimate_gb(n_beams, n_layers_plus1, D, n_streams=3, bytes_per=2, n_velocity=0):
+    """n_streams arrays over all L1 indices, plus n_velocity arrays over the L1-1 differences."""
+    slices = n_layers_plus1 * n_streams + (n_layers_plus1 - 1) * n_velocity
+    return n_beams * slices * D * bytes_per / 1024 ** 3
+
+
+def output_name(dataset, streams):
+    """Core and static keep the original name, so 58 and 60 read the file unchanged. A file without
+    them gets a suffix and can never be mistaken for, or written over, a full one."""
+    if "core" in streams and "static" in streams:
+        return "%s_alllayers.npz" % dataset
+    return "%s_alllayers_%s.npz" % (dataset, "+".join(s for s in STREAMS if s in streams))
+
+
+def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, log_every,
+        streams=("core", "static")):
     import torch
     import yaml
     from transformers import AutoModelForCausalLM
@@ -79,6 +135,10 @@ def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, 
     if not os.path.exists(seq_path):
         raise SystemExit("%s not found. This script scores PINNED generations; it does not create "
                          "them." % seq_path)
+    path = os.path.join(out_dir, model_folder, output_name(dataset, streams))
+    if os.path.exists(path):
+        raise SystemExit("refusing: %s exists. Results already in the paper were computed from "
+                         "files like it; move it aside by hand if it really must be replaced." % path)
     with open(os.path.join(HERE, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     model_id = next(m["id"] for m in cfg["models"] if m["folder"] == model_folder)
@@ -103,9 +163,11 @@ def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, 
     L1 = model.config.num_hidden_layers + 1      # +1: index 0 is the embedding output
     D = model.config.hidden_size
 
-    need = estimate_gb(n_beams, L1, D)
-    print("  [%s/%s] %d answers, %d layers (0..%d), D=%d -> %.1f GB in RAM"
-          % (model_folder, dataset, n_beams, L1, L1 - 1, D, need), flush=True)
+    names = [a for s in STREAMS if s in streams for a in ARRAYS[s]]
+    n_vel = 2 if "velocity" in streams else 0
+    need = estimate_gb(n_beams, L1, D, n_streams=len(names) - n_vel, n_velocity=n_vel)
+    print("  [%s/%s] %d answers, %d layers (0..%d), D=%d, arrays %s -> %.1f GB in RAM"
+          % (model_folder, dataset, n_beams, L1, L1 - 1, D, ",".join(names), need), flush=True)
     if need > max_gb:
         raise SystemExit(
             "refusing: %.1f GB exceeds --max-gb %.1f. This script accumulates in RAM and would be "
@@ -113,9 +175,8 @@ def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, 
             "hit once. Use --limit to shard by question, or raise --max-gb if the node really has "
             "the memory." % (need, max_gb))
 
-    core = np.full((n_beams, L1, D), np.nan, dtype=np.float16)
-    q95 = np.full((n_beams, L1, D), np.nan, dtype=np.float16)
-    q05 = np.full((n_beams, L1, D), np.nan, dtype=np.float16)
+    store = {a: np.full((n_beams, L1 - 1 if a in ARRAYS["velocity"] else L1, D), np.nan,
+                        dtype=np.float16) for a in names}
     row_of = {int(k): i for i, k in enumerate(keep)}
 
     t0, n_empty = time.time(), 0
@@ -132,37 +193,43 @@ def run(dataset, model_folder, data_dir, out_dir, device, dtype, max_gb, limit, 
             att[j, :len(t)] = 1
         with torch.no_grad():
             out = model(ids.to(device), attention_mask=att.to(device), output_hidden_states=True)
-        for li in range(L1):
-            H = out.hidden_states[li].float().cpu().numpy()
-            for j, i in enumerate(idx):
-                s, e = pls[j], len(batch[j])
-                c, hi, lo = pool_completion(H[j, s:e, :])
-                r = row_of[int(i)]
-                core[r, li], q95[r, li], q05[r, li] = c, hi, lo
-                if li == 0 and e - s == 0:
-                    n_empty += 1
+        for j, i in enumerate(idx):
+            s, e = pls[j], len(batch[j])
+            # One answer's completion tokens at every index, sliced on the GPU so only (L1, T, D)
+            # crosses to the host rather than the padded prompt of the whole group.
+            h = torch.stack([out.hidden_states[li][j, s:e, :] for li in range(L1)]).float().cpu().numpy()
+            pooled = pool_answer(h, streams)
+            r = row_of[int(i)]
+            for a in names:
+                store[a][r] = pooled[a]
+            if e - s == 0:
+                n_empty += 1
         del out
         if (gi + 1) % log_every == 0:
             el = time.time() - t0
             print("    %d/%d questions (%.0fs, eta %.0fs)"
                   % (gi + 1, len(groups), el, el / (gi + 1) * (len(groups) - gi - 1)), flush=True)
 
+    # float16 tops out at 65504. A value past it is stored as inf, so count what did not survive
+    # rather than letting a downstream robust scaler quietly absorb it.
+    nonfinite = {a: int((~np.isfinite(store[a])).sum()) for a in names}
     os.makedirs(os.path.join(out_dir, model_folder), exist_ok=True)
-    path = os.path.join(out_dir, model_folder, "%s_alllayers.npz" % dataset)
-    np.savez_compressed(path, core=core, q95=q95, q05=q05,
-                        prompt_id=prompt_id[keep], label=labels[keep],
-                        layer_index=np.arange(L1), beam_row=keep)
+    np.savez_compressed(path, prompt_id=prompt_id[keep], label=labels[keep],
+                        layer_index=np.arange(L1), beam_row=keep, **store)
     meta = {"dataset": dataset, "model_folder": model_folder, "model_id": model_id,
             "dtype": dtype, "n_beams": int(n_beams), "n_layers_plus_embedding": int(L1),
             "hidden_size": int(D), "n_empty_completions": int(n_empty),
+            "streams": [s for s in STREAMS if s in streams], "arrays": names,
+            "nonfinite_entries": nonfinite,
             "source": os.path.abspath(seq_path),
             "note": ("layer 0 is the embedding output; layer L_tot is the last block WITHOUT the "
-                     "final norm, so it is not the pinned pipeline's final_norm slice"),
+                     "final norm, so it is not the pinned pipeline's final_norm slice. v95/v05 "
+                     "index i pools h[i+1] - h[i]; the pinned update window is 16..23"),
             "elapsed_seconds": round(time.time() - t0, 1)}
     with open(path.replace(".npz", ".json"), "w") as f:
         json.dump(meta, f, indent=2)
-    print("\n  wrote %s  (%.1f GB on disk, %d empty completions)"
-          % (path, os.path.getsize(path) / 1024 ** 3, n_empty))
+    print("\n  wrote %s  (%.1f GB on disk, %d empty completions, non-finite entries %s)"
+          % (path, os.path.getsize(path) / 1024 ** 3, n_empty, nonfinite))
     return meta
 
 
@@ -189,6 +256,45 @@ def self_test():
     assert c3.shape == (4,) and np.isnan(c3).all()
     print("  [PASS] empty completion gives NaN, not a zero vector")
 
+    # pool_answer must give exactly what pool_completion gave layer by layer, so core and static from
+    # the new code path are the numbers the existing Qwen files hold.
+    rng = np.random.default_rng(0)
+    h5 = rng.normal(size=(6, 7, 5)).astype(np.float32)
+    pa = pool_answer(h5, STREAMS)
+    for li in range(6):
+        c, hi, lo = pool_completion(h5[li])
+        assert np.array_equal(pa["core"][li], c)
+        assert np.array_equal(pa["q95"][li], hi) and np.array_equal(pa["q05"][li], lo)
+    print("  [PASS] pool_answer core/q95/q05 equal pool_completion at every index, bit for bit")
+
+    # Update on a hand-computable case: h_hi - h_lo = [[1,0],[0,3],[4,0]] over three tokens.
+    lo_ = np.array([[1.0, 9.0], [3.0, 7.0], [5.0, 5.0]], dtype=np.float32)
+    hi_ = np.array([[2.0, 9.0], [3.0, 10.0], [9.0, 5.0]], dtype=np.float32)
+    pv = pool_answer(np.stack([lo_, hi_]), ("velocity",), q_hi=1.0, q_lo=0.0)
+    assert pv["v95"].shape == (1, 2) and list(pv["v95"][0]) == [4.0, 3.0] and list(pv["v05"][0]) == [0.0, 0.0]
+    pm = pool_answer(np.stack([lo_, hi_]), ("velocity",), q_hi=0.5, q_lo=0.5)
+    assert list(pm["v95"][0]) == [1.0, 0.0], pm
+    print("  [PASS] update pools h[i+1] - h[i] per column over tokens (q100 [4,3], q0 [0,0], q50 [1,0])")
+
+    # Index convention, the error that would shift every window by one layer. With h[i] = i^2 the
+    # difference at index i is 2i+1, so index 16 must hold h[17] - h[16] = 33 -- the first slice of
+    # the pinned update window (block 15 -> block 16).
+    hsq = np.stack([np.full((3, 4), float(i * i), dtype=np.float32) for i in range(29)])
+    vi = pool_answer(hsq, ("velocity",))["v95"]
+    assert vi.shape == (28, 4) and vi[16, 0] == 33.0 and vi[23, 0] == 47.0
+    assert "core" not in pool_answer(hsq, ("velocity",))
+    print("  [PASS] v95[i] = h[i+1] - h[i]: index 16 holds 33 = 17^2 - 16^2; pinned update is 16..23")
+
+    e = pool_answer(np.zeros((29, 0, 4), dtype=np.float32), STREAMS)
+    assert e["v95"].shape == (28, 4) and all(np.isnan(v).all() for v in e.values())
+    print("  [PASS] empty completion gives NaN in every stream, including the update")
+
+    # Names: a velocity-only file must never take the name 58 and 60 read, or overwrite it.
+    assert output_name("tydiqa_gp", ("core", "static")) == "tydiqa_gp_alllayers.npz"
+    assert output_name("tydiqa_gp", ("core", "static", "velocity")) == "tydiqa_gp_alllayers.npz"
+    assert output_name("tydiqa_gp", ("velocity",)) == "tydiqa_gp_alllayers_velocity.npz"
+    print("  [PASS] output names: velocity-only writes <dataset>_alllayers_velocity.npz")
+
     # The size guard must fire before allocation, not after. Asserted against the DEFAULT --max-gb
     # rather than a hand-written constant, so the test tracks the guard if the default changes.
     # (The first version of this assertion used 100 GB, carried over from a three-stream estimate;
@@ -201,6 +307,12 @@ def self_test():
     assert tyd < default_max_gb and tqa < default_max_gb, (tyd, tqa)
     print("  [PASS] size guard at --max-gb %.0f: TriviaQA/LLaMA %.1f GB refused; "
           "TyDiQA %.1f GB and TruthfulQA %.1f GB allowed" % (default_max_gb, tri, tyd, tqa))
+    # With the update, LLaMA TruthfulQA -- the largest run the window sweep needs -- must still fit.
+    tqa_l = estimate_gb(8170, 33, 4096, n_streams=3, n_velocity=2)
+    assert abs(estimate_gb(1, 33, 1, n_streams=3, n_velocity=2) * 1024 ** 3 - 2 * (33 * 3 + 32 * 2)) < 1e-6
+    assert tqa_l < default_max_gb, tqa_l
+    print("  [PASS] with the update: LLaMA TruthfulQA %.1f GB allowed (update has L_tot slices, not L_tot+1)"
+          % tqa_l)
 
     # Layer count includes the embedding output. Off by one here silently shifts every layer label
     # in the figure, which is the kind of error that survives to publication.
@@ -225,10 +337,17 @@ def main():
     ap.add_argument("--max-gb", type=float, default=32.0)
     ap.add_argument("--limit", type=int, default=None, help="first N questions")
     ap.add_argument("--log-every", type=int, default=50)
+    ap.add_argument("--streams", default="core,static",
+                    help="comma-separated subset of core,static,velocity; velocity is for the window "
+                         "sweep of the full detector")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         self_test(); return
+    streams = tuple(s.strip() for s in a.streams.split(",") if s.strip())
+    bad = [s for s in streams if s not in STREAMS]
+    if bad or not streams:
+        ap.error("--streams takes a non-empty subset of %s, got %s" % (",".join(STREAMS), a.streams))
 
     data_dir = a.data_dir
     if not data_dir:
@@ -245,7 +364,7 @@ def main():
     print("  out: %s   (pinned features are never written)" % os.path.abspath(a.out_dir))
     print("=" * 78, flush=True)
     run(a.dataset, a.model_folder, data_dir, a.out_dir, a.device, a.dtype,
-        a.max_gb, a.limit, a.log_every)
+        a.max_gb, a.limit, a.log_every, streams)
 
 
 if __name__ == "__main__":

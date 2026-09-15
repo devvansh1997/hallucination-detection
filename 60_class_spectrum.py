@@ -57,7 +57,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_IN = os.path.abspath(os.path.join(HERE, "..", "data-alllayers"))
 DEFAULT_OUT = os.path.join(HERE, "results", "class_spectrum")
 R_F = 64                 # the feature rank the pipeline actually keeps
-WINDOW = list(range(15, 24))
+# Blocks 15..23 in 57's indexing (index 0 = embedding output). Was range(15, 24) until 2026-09-15;
+# only the "window" metadata field used it.
+WINDOW = list(range(16, 25))
 
 
 def robust_scale(X, eps=1e-8):
