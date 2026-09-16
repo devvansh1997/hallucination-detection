@@ -19,6 +19,10 @@ models:
     folder: "llama-3.1-8b-instruct"
   - id: "Qwen/Qwen2.5-7B-Instruct"
     folder: "qwen-2.5-7b-instruct"
+  # Third model (T-014, approved by Dr. Ibrahim 2026-09-16): a hybrid Mamba-2 + attention architecture,
+  # base model like the LLaMA entry. Run 67_pilot_new_model.py before any full generation.
+  - id: "tiiuae/Falcon-H1-7B-Base"
+    folder: "falcon-h1-7b-base"
 
 datasets:
   - name: "truthfulqa"
