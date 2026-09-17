@@ -27,6 +27,9 @@ LLAMA=llama-3.1-8b
 PAIRS="${PAIRS:-$QWEN:$LLAMA $LLAMA:$QWEN}"          # source:target
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa}"
 PART="${PART:-highgpu}"
+# A node to avoid, e.g. EXCLUDE=evc103: on 2026-09-16 every job there spent ~1 h importing torch before
+# doing any work, and the two TyDiQA-GP reads were killed at their 1 h limit with nothing written.
+EXCLUDE="${EXCLUDE:-}"
 
 JOBID=""
 sub() {
@@ -55,12 +58,12 @@ for P in $PAIRS; do
           printf "  %-26s SKIP (exists)\n" "$tag"; continue
         fi
         mem=$([ "$DS" = truthfulqa ] && echo 80G || echo 64G)
-        tim=$([ "$DS" = truthfulqa ] && echo 01:30:00 || echo 01:00:00)
+        tim=03:00:00      # the work takes 5-10 min; the rest is headroom for a slow node (see EXCLUDE)
         if [ "${DRY:-0}" = "1" ]; then
           printf "  %-26s would queue: %s reads %s (mem %s, %s)\n" "$tag" "$SRC" "$TGT" "$mem" "$tim"; continue
         fi
         sub "$HD_REPO/slurm/crossread_extract.slurm" \
-            "-p $PART --gres=gpu:1 --mem=$mem --time=$tim --job-name=xread-${SRC:0:4}-${DS:0:4} --export=ALL,HD_REPO=$HD_REPO" \
+            "-p $PART --gres=gpu:1 --mem=$mem --time=$tim --job-name=xread-${SRC:0:4}-${DS:0:4} ${EXCLUDE:+--exclude=$EXCLUDE} --export=ALL,HD_REPO=$HD_REPO" \
             "$SRC" "$TGT" "$DS"
         printf "  %-26s -> %s  (%s reads %s, mem %s, %s)\n" "$tag" "$JOBID" "$SRC" "$TGT" "$mem" "$tim"
         N=$((N+1)) ;;
@@ -77,7 +80,7 @@ for P in $PAIRS; do
           printf "  %-26s would queue (mem %s)\n" "$tag" "$mem"; continue
         fi
         sub "$HD_REPO/slurm/analysis_stage.slurm" \
-            "-p $PART --mem=$mem --cpus-per-task=8 --time=04:00:00 --job-name=xmod-${SRC:0:4}-${DS:0:4} --export=ALL,HD_REPO=$HD_REPO" \
+            "-p $PART --mem=$mem --cpus-per-task=8 --time=04:00:00 --job-name=xmod-${SRC:0:4}-${DS:0:4} ${EXCLUDE:+--exclude=$EXCLUDE} --export=ALL,HD_REPO=$HD_REPO" \
             66_cross_model.py --source "$SRC" --target "$TGT" --dataset "$DS"
         printf "  %-26s -> %s  (mem %s)\n" "$tag" "$JOBID" "$mem"
         N=$((N+1)) ;;

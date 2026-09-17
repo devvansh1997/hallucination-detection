@@ -48,6 +48,21 @@ def _load(name, filename):
     return m
 
 
+def degenerate(comp_ids, min_len=12, dup_frac=0.5):
+    """A looping answer: at least min_len tokens, and at least dup_frac of its token 3-grams are repeats.
+    'If If If If ...' and 'the spiciest part of the spiciest part of ...' both qualify; a normal
+    sentence does not. Added after the first Falcon-H1 pilot passed G2 while printing exactly those."""
+    c = [int(t) for t in comp_ids]
+    if len(c) < min_len:
+        return False
+    grams = [tuple(c[i:i + 3]) for i in range(len(c) - 2)]
+    return 1.0 - len(set(grams)) / len(grams) >= dup_frac
+
+
+# G2 fails when more than this share of answers is looping, empty, or cut off at max_new_tokens.
+MAX_BAD_SHARE = {"degenerate": 0.10, "empty": 0.20, "hit_max_new_tokens": 0.20}
+
+
 def extrapolate(rates):
     """rates: {'truthfulqa': s/question, 'tydiqa_gp': s/question} -> hours per dataset."""
     out = {}
@@ -116,7 +131,7 @@ def run(model_folder, n_tqa, n_tydi, out_dir):
         except Exception:  # noqa: BLE001
             gate("G2_generate_%s" % ds, False, error="dataset load: " + traceback.format_exc(limit=2))
             continue
-        times, comp_lens, hit_max, empty, shown = [], [], 0, 0, []
+        times, comp_lens, hit_max, empty, loops, shown = [], [], 0, 0, 0, []
         try:
             for sample in samples[:n]:
                 seed = s39.prompt_seed(s39.GEN_SEED_DEFAULT, sample["prompt_id"])
@@ -132,6 +147,7 @@ def run(model_folder, n_tqa, n_tydi, out_dir):
                     raw = outs.sequences[b, pl:].tolist()
                     canon = raw[:s39.find_canonical_length(raw, eos_ids)]
                     hit_max += int(len(canon) >= gen["max_new_tokens"])
+                    loops += int(degenerate(canon))
                     comp_lens.append(len(canon))
                     t = tok.decode(canon, skip_special_tokens=True).strip()
                     empty += int(not t)
@@ -143,9 +159,11 @@ def run(model_folder, n_tqa, n_tydi, out_dir):
             n_ans = len(comp_lens)
             rates[ds] = float(np.mean(times))
             samples_out[ds] = shown
-            gate("G2_generate_%s" % ds, n_ans > 0 and empty < n_ans, questions=len(times), answers=n_ans,
+            bad = {"degenerate": loops, "empty": empty, "hit_max_new_tokens": hit_max}
+            ok = n_ans > 0 and all(bad[k] <= MAX_BAD_SHARE[k] * n_ans for k in bad)
+            gate("G2_generate_%s" % ds, ok, questions=len(times), answers=n_ans,
                  s_per_question=round(rates[ds], 2), mean_answer_tokens=round(float(np.mean(comp_lens)), 1),
-                 hit_max_new_tokens=hit_max, empty=empty)
+                 max_allowed_share=MAX_BAD_SHARE, **bad)
             for s in shown:
                 print("      q%s: %s" % (s["prompt_id"], s["answers"]), flush=True)
         except Exception:  # noqa: BLE001
@@ -235,6 +253,14 @@ def self_test():
     assert h["triviaqa"] == round(9960 * 2.0 / 3600, 2) and h["nq_open"] == round(3610 * 2.0 / 3600, 2)
     assert extrapolate({})["triviaqa"] is None
     print("  [PASS] extrapolation uses the TruthfulQA rate for the short-prompt datasets, TyDiQA-GP its own")
+    word = {w: i for i, w in enumerate("if the spiciest part of veins appear blue because light scatters".split())}
+    enc = lambda s: [word[w] for w in s.lower().split()]  # noqa: E731
+    assert degenerate(enc("if " * 20))
+    assert degenerate(enc("the spiciest part of " * 5))
+    assert not degenerate(enc("veins appear blue because light scatters"))
+    assert not degenerate(enc("if the"))
+    print("  [PASS] degenerate(): catches 'If If If ...' and 'the spiciest part of the spiciest part ...', "
+          "not a normal answer")
     print("\n  ALL PASS")
     return True
 

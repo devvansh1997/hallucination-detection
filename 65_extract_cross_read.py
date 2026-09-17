@@ -78,6 +78,16 @@ def prompt_ids_by_question(seq):
     return out
 
 
+def _prompt_text(tok, ids):
+    """Decoded prompt, compared after Unicode NFC normalisation. Qwen2's tokenizer applies NFC when it
+    encodes and LLaMA-3's does not, so a passage with decomposed accents (TyDiQA-GP has some) decodes to
+    different code points from the two models although it is the same question. NFC is the only
+    normalisation applied; anything else that differs is still a mismatch."""
+    import unicodedata
+    return unicodedata.normalize("NFC", tok.decode(ids, skip_special_tokens=True,
+                                                   clean_up_tokenization_spaces=False)).strip()
+
+
 def check_same_questions(reader_prompts, gen_prompts, reader_tok, gen_tok):
     """The two models must have been asked the same question under the same prompt_id. Returns the
     list of mismatching ids (empty when all agree)."""
@@ -85,11 +95,17 @@ def check_same_questions(reader_prompts, gen_prompts, reader_tok, gen_tok):
         return sorted(set(reader_prompts) ^ set(gen_prompts))
     bad = []
     for q in sorted(reader_prompts):
-        a = reader_tok.decode(reader_prompts[q], skip_special_tokens=True).strip()
-        b = gen_tok.decode(gen_prompts[q], skip_special_tokens=True).strip()
-        if a != b:
+        if _prompt_text(reader_tok, reader_prompts[q]) != _prompt_text(gen_tok, gen_prompts[q]):
             bad.append(q)
     return bad
+
+
+def describe_mismatch(a, b, width=60):
+    """Where two prompt texts first differ, as repr'd snippets -- so a failure names its cause."""
+    i = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+    lo = max(0, i - width)
+    return "first difference at character %d of %d/%d:\n    reader    %r\n    generator %r" % (
+        i, len(a), len(b), a[lo:i + width], b[lo:i + width])
 
 
 def reader_answer_ids(comp_ids, gen_tok, reader_tok):
@@ -193,8 +209,11 @@ def run(reader, generator, dataset, data_dir, out_dir, device, check_questions, 
     rprompts, gprompts = prompt_ids_by_question(rseq), prompt_ids_by_question(gseq)
     bad = check_same_questions(rprompts, gprompts, rtok, gtok)
     if bad:
+        q = bad[0]
         raise SystemExit("%d questions differ between the two sequences files (first: %s) -- the "
-                         "prompt_ids do not refer to the same questions" % (len(bad), bad[:5]))
+                         "prompt_ids do not refer to the same questions. Question %d, %s"
+                         % (len(bad), bad[:5], q, describe_mismatch(_prompt_text(rtok, rprompts[q]),
+                                                                    _prompt_text(gtok, gprompts[q]))))
     print("  [%s reads %s / %s] %d questions, prompts identical in both files"
           % (reader, generator, dataset, len(rprompts)), flush=True)
 
@@ -311,6 +330,12 @@ def self_test():
     assert r.decode(rp[0]) == prompt and check_same_questions(rp, gp, r, g) == []
     gseq_bad = {"input_ids": [g.encode("Q: capital of Spain?\nA:")], "prompt_len": [24], "prompt_id": [0]}
     assert check_same_questions(rp, prompt_ids_by_question(gseq_bad), r, g) == [0]
+    assert "character 14" in describe_mismatch("Q: capital of France?", "Q: capital of Spain?")
+    # The same passage with a precomposed accent on one side and a decomposed one on the other.
+    composed, decomposed = "Q: café?\nA:", "Q: café?\nA:"
+    rs = {"input_ids": [r.encode(composed)], "prompt_len": [len(composed)], "prompt_id": [5]}
+    gs = {"input_ids": [g.encode(decomposed)], "prompt_len": [len(decomposed)], "prompt_id": [5]}
+    assert check_same_questions(prompt_ids_by_question(rs), prompt_ids_by_question(gs), r, g) == []
     try:
         prompt_ids_by_question({"input_ids": [r.encode("ab"), r.encode("ac")], "prompt_len": [2, 2],
                                 "prompt_id": [3, 3]})

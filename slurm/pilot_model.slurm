@@ -9,7 +9,7 @@
 # Pilot of a new model through every model-specific pipeline step (T-014), via 67_pilot_new_model.py.
 #
 # usage:
-#   sbatch -p highgpu --gres=gpu:1 --mem=64G --time=01:30:00 --export=ALL,HD_REPO=$PWD slurm/pilot_model.slurm <model_folder>
+#   sbatch -p highgpu --gres=gpu:1 --mem=64G --time=03:00:00 --export=ALL,HD_REPO=$PWD slurm/pilot_model.slurm <model_folder>
 #
 # The preamble is act_extract.slurm's, for the same reasons -- read that file for the history:
 #   * inherited CONDA_* variables are stripped before `module load`, or Lmod loops on
@@ -62,7 +62,8 @@ echo "  repo HEAD   : $(git -C "$REPO" log --oneline -1 2>/dev/null)" >&2
 set +x
 
 # Exits non-zero if any gate fails; the report is written either way.
-python 67_pilot_new_model.py --model_folder "$MODEL"
+# SCRIPT=68_diagnose_generation.py runs the decoding diagnostic instead of the pilot, same preamble.
+python "${SCRIPT:-67_pilot_new_model.py}" --model_folder "$MODEL"
 status=$?
 
 echo "$(date +%F_%T): done (exit $status). Report: results/pilot/pilot_${MODEL}.json" >&2
