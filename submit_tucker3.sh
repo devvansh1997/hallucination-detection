@@ -1,10 +1,10 @@
 #!/bin/bash
 # submit_tucker3.sh -- the 3-mode Tucker ablation (T-015), extraction and evaluation submitted together.
 #
-#   bash submit_tucker3.sh                       # 2 models x 2 datasets: 4 GPU extractions + 16 CPU evaluations
-#   DRY=1 bash submit_tucker3.sh                 # print the plan, queue nothing
+#   bash submit_tucker3.sh                        # 2 models x 2 datasets: 4 GPU extractions + 32 CPU evaluations
+#   DRY=1 bash submit_tucker3.sh                  # print the plan, queue nothing
+#   FAMILIES=orderstats bash submit_tucker3.sh    # one family only (default: orderstats mean)
 #   MODELS=llama-3.1-8b DATASETS=tydiqa_gp bash submit_tucker3.sh
-#   POOLS="mean max" bash submit_tucker3.sh      # also max-pooling (default: mean only)
 #
 # RUN FROM A NEWTON TERMINAL.
 #
@@ -13,10 +13,12 @@
 #
 # WHAT IS QUEUED, per model and dataset:
 #   1 GPU job    69: token-level window states (skipped if ../data-tokenstates/<model>/<dataset>/meta.json exists)
-#   4 CPU jobs   70: one per token-pool size T', started automatically when the extraction succeeds
-#                    (--dependency=afterok); each runs both token ranks for its T':
-#                    T'=1: R_T 1 | T'=2: R_T 1,2 | T'=4: R_T 2,4 | T'=8: R_T 4,8
-# If an extraction fails, its four evaluations stay PENDING with reason DependencyNeverSatisfied: scancel them,
+#   8 CPU jobs   70: one per (family, T'), started when the extraction succeeds (--dependency=afterok);
+#                    each runs both token ranks for its T':  T'=1: R_T 1 | 2: 1,2 | 4: 2,4 | 8: 4,8
+#                    orderstats = the reported peak/range/update computed within each token bin; its T'=1 job
+#                                 reproduces the reported detector and prints an ANCHOR line -- read it first
+#                    mean       = average pooling within each bin (state + update)
+# If an extraction fails, its evaluations stay PENDING with reason DependencyNeverSatisfied: scancel them,
 # fix, and rerun this script (finished pieces are skipped).
 #
 # DISK. tokens.npy is float16, (total answer tokens) x 9 x D: roughly 10-15 GB per TruthfulQA cell and 2-4 GB
@@ -31,10 +33,22 @@ mkdir -p "$HD_REPO/slurm_logs" "$HD_REPO/results/tensor_tucker"
 
 MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-tydiqa_gp truthfulqa}"
-POOLS="${POOLS:-mean}"
+FAMILIES="${FAMILIES:-orderstats mean}"
 PART="${PART:-highgpu}"
 EXCLUDE="${EXCLUDE:-evc103}"
 TGROUPS="1:1 2:1,2:2 4:2,4:4 8:4,8:8"         # one evaluation job per T' (not GROUPS: that name is a bash builtin)
+
+# Memory and wall time per (dataset, family, T'). orderstats carries range and update at twice the hidden size,
+# so its T'=8 tensors are the largest (~23 GB at float16 for LLaMA TruthfulQA, plus scaling copies).
+eval_mem() {
+    case "$1:$2:$3" in
+        truthfulqa:orderstats:8) echo 192G;; truthfulqa:orderstats:4) echo 128G;; truthfulqa:mean:8) echo 128G;;
+        truthfulqa:*)            echo 96G;;
+        tydiqa_gp:orderstats:8)  echo 128G;; tydiqa_gp:orderstats:4)  echo 96G;;  tydiqa_gp:mean:8)  echo 96G;;
+        *)                       echo 64G;;
+    esac
+}
+eval_time() { case "$1:$2:$3" in truthfulqa:orderstats:8) echo 16:00:00;; *) echo 12:00:00;; esac; }
 
 JOBID=""
 sub() {
@@ -70,26 +84,25 @@ for MO in $MODELS; do
         printf "  %-16s extraction -> %s\n" "$tag" "$EXT"
       fi
     fi
-    for POOL in $POOLS; do
+    for FAM in $FAMILIES; do
       for G in $TGROUPS; do
         T="${G%%:*}"
-        OUT="$HD_REPO/results/tensor_tucker/tucker3_${MO}_${DS}_${POOL}_RF_T${T}.json"
+        OUT="$HD_REPO/results/tensor_tucker/tucker3_${MO}_${DS}_${FAM}_RF_T${T}.json"
         if [ -f "$OUT" ] && grep -q '"complete": true' "$OUT"; then
-          printf "  %-16s %-4s T'=%s SKIP (complete)\n" "$tag" "$POOL" "$T"; continue
+          printf "  %-16s %-10s T'=%s SKIP (complete)\n" "$tag" "$FAM" "$T"; continue
         fi
-        if [ "$DS" = truthfulqa ]; then mem=$([ "$T" = 8 ] && echo 160G || echo 96G)
-        else                            mem=$([ "$T" = 8 ] && echo 96G || echo 64G); fi
+        mem=$(eval_mem "$DS" "$FAM" "$T"); tim=$(eval_time "$DS" "$FAM" "$T")
         dep=""
         [ -n "$EXT" ] && [ "$EXT" != "DRY" ] && dep="--dependency=afterok:$EXT"
         if [ "${DRY:-0}" = "1" ]; then
-          printf "  %-16s %-4s T'=%s settings %-8s would queue (mem %s, 12:00:00%s)\n" "$tag" "$POOL" "$T" "$G" "$mem" \
+          printf "  %-16s %-10s T'=%s settings %-8s would queue (mem %s, %s%s)\n" "$tag" "$FAM" "$T" "$G" "$mem" "$tim" \
               "$([ -n "$EXT" ] && echo ', after extraction')"
           continue
         fi
         sub "$HD_REPO/slurm/analysis_stage.slurm" \
-            "-p $PART --mem=$mem --cpus-per-task=8 --time=12:00:00 --job-name=tk3-${MO:0:4}-${DS:0:4}-T${T} ${dep} ${EXCLUDE:+--exclude=$EXCLUDE} --export=ALL,HD_REPO=$HD_REPO" \
-            70_tensor_tucker.py --dataset "$DS" --model_folder "$MO" --pool "$POOL" --settings "$G"
-        printf "  %-16s %-4s T'=%s -> %s  (mem %s%s)\n" "$tag" "$POOL" "$T" "$JOBID" "$mem" "$([ -n "$dep" ] && echo ", after $EXT")"
+            "-p $PART --mem=$mem --cpus-per-task=8 --time=$tim --job-name=tk3-${MO:0:4}-${DS:0:4}-${FAM:0:3}-T${T} ${dep} ${EXCLUDE:+--exclude=$EXCLUDE} --export=ALL,HD_REPO=$HD_REPO" \
+            70_tensor_tucker.py --dataset "$DS" --model_folder "$MO" --family "$FAM" --settings "$G"
+        printf "  %-16s %-10s T'=%s -> %s  (mem %s, %s%s)\n" "$tag" "$FAM" "$T" "$JOBID" "$mem" "$tim" "$([ -n "$dep" ] && echo ", after $EXT")"
         N=$((N+1))
       done
     done
@@ -98,5 +111,5 @@ done
 
 echo
 echo "Queued $N jobs.  Watch: squeue -u \$USER   (evaluations show PENDING (Dependency) until their extraction ends)"
-echo "Extraction logs print a PREFLIGHT line (stored states reproduce the pinned peak features, corr >= 0.999)."
-echo "Results: results/tensor_tucker/tucker3_<model>_<dataset>_<pool>_RF_T<T'>.json"
+echo "Read first: the extraction PREFLIGHT line, then the ANCHOR line in each orderstats T'=1 log (it must be within 0.5 pts)."
+echo "Results: results/tensor_tucker/tucker3_<model>_<dataset>_<family>_RF_T<T'>.json"
