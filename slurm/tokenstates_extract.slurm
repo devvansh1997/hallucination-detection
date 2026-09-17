@@ -1,15 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=pilot
+#SBATCH --job-name=tokstates
 #SBATCH -p highgpu
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --output=slurm_logs/%x_%j.out
 #SBATCH --error=slurm_logs/%x_%j.err
 #
-# Pilot of a new model through every model-specific pipeline step (T-014), via 67_pilot_new_model.py.
+# Token-level hidden states of the layer window, for the 3-mode Tucker ablation (T-015), via
+# 69_extract_token_states.py. Writes only under ../data-tokenstates; reads the pinned sequences and features.
 #
-# usage:
-#   sbatch -p highgpu --gres=gpu:1 --mem=64G --time=03:00:00 --export=ALL,HD_REPO=$PWD slurm/pilot_model.slurm <model_folder>
+# usage (via submit_tucker3.sh, not directly):
+#   sbatch slurm/tokenstates_extract.slurm <model_folder> <dataset>
 #
 # The preamble is act_extract.slurm's, for the same reasons -- read that file for the history:
 #   * inherited CONDA_* variables are stripped before `module load`, or Lmod loops on
@@ -23,25 +24,24 @@
 
 set -u
 
-MODEL="${1:?usage: pilot_model.slurm <model_folder>}"
+MODEL="${1:?usage: tokenstates_extract.slurm <model_folder> <dataset>}"
+DS="${2:?usage: tokenstates_extract.slurm <model_folder> <dataset>}"
 
 REPO="${HD_REPO:?set HD_REPO to your clone of hallucination-detection}"
 
 export PYTHONUNBUFFERED=1
 set -x
 
-echo "$(date +%F_%T): pilot ${MODEL}" >&2
+echo "$(date +%F_%T): token states ${MODEL} / ${DS}" >&2
 
 for _v in $(compgen -v | grep '^CONDA' || true); do unset "$_v"; done
 unset _CE_M _CE_CONDA || true
 
 module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
-# ENV_NAME picks another conda env, e.g. one with mamba_ssm/causal_conv1d built for Falcon-H1.
-ENV_NAME="${ENV_NAME:-hal-det}"
-conda activate "$ENV_NAME"
+conda activate hal-det
 
-if [ "${CONDA_DEFAULT_ENV:-}" != "$ENV_NAME" ]; then
-    echo "FATAL: conda env is '${CONDA_DEFAULT_ENV:-<none>}', expected $ENV_NAME." >&2
+if [ "${CONDA_DEFAULT_ENV:-}" != "hal-det" ]; then
+    echo "FATAL: conda env is '${CONDA_DEFAULT_ENV:-<none>}', expected hal-det." >&2
     exit 1
 fi
 cd "$REPO" || { echo "FATAL: cannot cd to $REPO -- set HD_REPO" >&2; exit 1; }
@@ -63,10 +63,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader >&2
 echo "  repo HEAD   : $(git -C "$REPO" log --oneline -1 2>/dev/null)" >&2
 set +x
 
-# Exits non-zero if any gate fails; the report is written either way.
-# SCRIPT=68_diagnose_generation.py runs the decoding diagnostic instead of the pilot, same preamble.
-python "${SCRIPT:-67_pilot_new_model.py}" --model_folder "$MODEL"
-status=$?
+python 69_extract_token_states.py \
+    --model_folder "$MODEL" \
+    --dataset "$DS" || exit 1
 
-echo "$(date +%F_%T): done (exit $status). Report: results/pilot/pilot_${MODEL}.json" >&2
-exit $status
+echo "$(date +%F_%T): done. Output under ../data-tokenstates/${MODEL}/${DS}/" >&2
