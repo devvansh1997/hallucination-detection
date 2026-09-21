@@ -14,14 +14,15 @@
 #          --export=ALL,HD_REPO=$PWD slurm/build_h1_env.slurm
 #
 # Knobs: SRC_ENV (hal-det), NEW_ENV (hal-det-h1), MODEL (falcon-h1-7b-base), MAX_JOBS (10 parallel nvcc),
-#        OUT_DIR (results/pilot_kernels), EXTRA_MODULES (e.g. a newer gcc module if a build fails on the
-#        compiler; this log lists the gcc modules available).
+#        OUT_DIR (results/pilot_kernels), EXTRA_MODULES (modules to load before building; if none of them
+#        is a gcc >= 9, step 3 picks a gcc module itself). The modules used are recorded in
+#        $CONDA_PREFIX/.h1_modules, and pilot_model.slurm loads them whenever it activates hal-det-h1.
 #
 # Steps, each logged as a STEP line in .err so a failure is easy to place. A rerun resumes: an existing
 # clone is reused and an importable package is not rebuilt.
 #   1 network      pip needs PyPI from this node
 #   2 clone        conda create --clone
-#   3 toolchain    torch's CUDA and nvcc must share a major version; gcc printed
+#   3 toolchain    torch's CUDA and nvcc must share a major version; gcc 9..13 (loads a module if needed)
 #   4 kernels pkg  with `kernels` installed, transformers ignores local builds -> uninstall (clone only)
 #   5 build        causal-conv1d, then mamba-ssm, --no-build-isolation --no-deps: torch and transformers
 #                  are never touched. Each setup.py first tries a prebuilt wheel for this torch/CUDA and
@@ -99,10 +100,37 @@ assert torch.cuda.is_available(), "no GPU visible to torch"
 PYCHK
 TORCH_CUDA=$(python -c "import torch; print(torch.version.cuda)")
 NVCC_CUDA=$(nvcc --version | sed -n 's/.*release \([0-9][0-9.]*\),.*/\1/p')
-echo "  nvcc $NVCC_CUDA at $CUDA_HOME | $(gcc --version | head -1)" >&2
+echo "  nvcc $NVCC_CUDA at $CUDA_HOME | default $(gcc --version | head -1)" >&2
 [ "${TORCH_CUDA%%.*}" = "${NVCC_CUDA%%.*}" ] || fail "torch was built with CUDA $TORCH_CUDA but nvcc is $NVCC_CUDA; the major versions must match"
-echo "  gcc modules available (for EXTRA_MODULES if a build fails on the compiler):" >&2
-module -t avail gcc 2>&1 | head -20 >&2 || true
+# torch's headers stop with #error below GCC 9 (c10/util/C++17.h), and torch accepts GCC below 14 as nvcc
+# 12.6's host compiler. The node default is GCC 8.5 (job 833215 failed on exactly this), so load a gcc
+# module unless EXTRA_MODULES already brought one. Any of 9..13 works; 11 is tried first, the middle.
+gcc_major() { gcc -dumpversion 2>/dev/null | cut -d. -f1; }
+pick_gcc_module() {
+    local avail want m
+    avail=$(module -t avail gcc 2>&1 | grep -E '^gcc/' | sed 's/(default)//; s/[[:space:]]*$//')
+    for want in 11 12 10 13 9; do
+        m=$(printf '%s\n' "$avail" | grep -E "^gcc/(gcc-)?${want}\." | sort -V | tail -1)
+        if [ -n "$m" ]; then echo "$m"; return; fi
+    done
+}
+H1_MODULES="${EXTRA_MODULES:-}"
+if [ "$(gcc_major)" -lt 9 ]; then
+    GCC_MOD=$(pick_gcc_module)
+    if [ -z "$GCC_MOD" ]; then
+        module -t avail gcc 2>&1 | grep -E '^gcc/' >&2
+        fail "default gcc is below 9 and no gcc module 9..13 was found; set EXTRA_MODULES"
+    fi
+    module load "$GCC_MOD" || fail "module load $GCC_MOD failed"
+    H1_MODULES="${H1_MODULES:+$H1_MODULES }$GCC_MOD"
+fi
+G=$(gcc_major)
+{ [ "$G" -ge 9 ] && [ "$G" -le 13 ]; } || fail "gcc major version is $G; need 9..13"
+export CC="$(command -v gcc)" CXX="$(command -v g++)"
+echo "  host compiler: $CC, version $(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion) | modules added: ${H1_MODULES:-none}" >&2
+# pilot_model.slurm loads these after activating hal-det-h1, so the compiled kernels find the same C++
+# runtime when they run as when they were built.
+echo "$H1_MODULES" > "$CONDA_PREFIX/.h1_modules"
 
 step "4 kernels package"
 if python -c "import kernels" 2>/dev/null; then
@@ -117,6 +145,7 @@ python -c "import einops" 2>/dev/null || $PIP install --no-deps einops >&2 || fa
 python -c "import ninja" 2>/dev/null || $PIP install --no-deps ninja >&2 || fail "ninja install failed"
 export TMPDIR="/tmp/h1build_${JOB}"
 mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
 for pkg in causal-conv1d mamba-ssm; do
     mod="${pkg//-/_}"
     if python -c "import $mod" 2>/dev/null; then

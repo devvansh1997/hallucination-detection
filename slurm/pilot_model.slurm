@@ -45,6 +45,11 @@ if [ "${CONDA_DEFAULT_ENV:-}" != "$ENV_NAME" ]; then
     echo "FATAL: conda env is '${CONDA_DEFAULT_ENV:-<none>}', expected $ENV_NAME." >&2
     exit 1
 fi
+# hal-det-h1 records the modules (a gcc >= 9) its Mamba kernels were compiled with; load them so the
+# kernels find the same C++ runtime. No such file in hal-det, so nothing changes there.
+if [ -s "$CONDA_PREFIX/.h1_modules" ]; then
+    module load $(cat "$CONDA_PREFIX/.h1_modules") || { echo "FATAL: module load $(cat "$CONDA_PREFIX/.h1_modules")" >&2; exit 1; }
+fi
 cd "$REPO" || { echo "FATAL: cannot cd to $REPO -- set HD_REPO" >&2; exit 1; }
 
 python - <<'PYCHK' >&2 || exit 1

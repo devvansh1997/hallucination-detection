@@ -69,6 +69,8 @@
   transformers 5.x fetches these kernels only from the Hub and ignores local builds; (2) a conda clone
   can keep pip launcher scripts that start the ORIGINAL env's python, so in a clone always use
   `python -m pip`, never bare `pip`.
+- Newton's default gcc is 8.5; torch 2.13's headers refuse to compile below GCC 9. Any CUDA/C++ extension
+  build needs a gcc module 9..13 loaded (build_h1_env.slurm picks one) and the same module at run time.
 - ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 
