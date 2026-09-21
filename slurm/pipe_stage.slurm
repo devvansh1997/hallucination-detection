@@ -42,8 +42,20 @@ echo "  stage=${STAGE}  model=${MODEL}  dataset=${DS:-<n/a>}"
 echo "  job=${SLURM_JOB_ID}  submitted from ${SLURM_SUBMIT_DIR}"
 echo "=============================================================="
 
+# Inherited conda state is stripped before `module load` (AGENTS.md, CLUSTER): a job submitted from
+# a shell with an env active otherwise loops in Lmod's `conda deactivate` until the wall clock.
+for _v in $(compgen -v | grep '^CONDA' || true); do unset "$_v"; done
+unset _CE_M _CE_CONDA || true
 module load anaconda/anaconda-2024.10 cuda/cuda-12.6.0
-conda activate hal-det
+# ENV_NAME=hal-det-h1 for Falcon-H1 (its Mamba kernels, T-014; submit_falcon.sh sets it). That env
+# records the gcc module its kernels were compiled with in .h1_modules, loaded here. hal-det has no
+# such file, so every other model runs exactly as before.
+ENV_NAME="${ENV_NAME:-hal-det}"
+conda activate "$ENV_NAME"
+[ "${CONDA_DEFAULT_ENV:-}" = "$ENV_NAME" ] || { echo "ERROR: conda env is '${CONDA_DEFAULT_ENV:-<none>}', expected $ENV_NAME"; exit 1; }
+if [ -s "$CONDA_PREFIX/.h1_modules" ]; then
+    module load $(cat "$CONDA_PREFIX/.h1_modules") || exit 1
+fi
 export MPLCONFIGDIR=/tmp/mpl_${SLURM_JOB_ID}
 export TOKENIZERS_PARALLELISM=false
 # Compute-node egress measured at ~1.5 MB/s, and TriviaQA's rc.nocontext archive is 2.14GB.

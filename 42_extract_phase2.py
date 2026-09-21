@@ -97,7 +97,8 @@ A2_PROBE_TEXTS = [
 # seconds into extraction -- after Phase 1 had already spent GPU-hours. Add new models here.
 CONTEXT_LIMITS = {"llama-3.1-8b": 131072,            # base, same 128k window as Instruct
                   "llama-3.1-8b-instruct": 131072,
-                  "qwen-2.5-7b-instruct": 32768}
+                  "qwen-2.5-7b-instruct": 32768,
+                  "falcon-h1-7b-base": 262144}       # max_position_embeddings in its config.json
 
 
 def _load(name, filename):
