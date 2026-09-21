@@ -63,6 +63,12 @@
       python -c "from transformers import AutoModelForCausalLM; from vit_pytorch import ViT"
   (`from vit_pytorch.vit import ViT` would bypass `dino`, but ACT-ViT's own code uses the
   package-level import, and their files stay unmodified.)
+- Hybrid Mamba models (Falcon-H1) need causal-conv1d and mamba-ssm or transformers runs a slow PyTorch
+  path whose batched decoding loops (T-014). They live ONLY in the clone `hal-det-h1`
+  (`slurm/build_h1_env.slurm`), never in hal-det. Two traps: (1) if the `kernels` package is installed,
+  transformers 5.x fetches these kernels only from the Hub and ignores local builds; (2) a conda clone
+  can keep pip launcher scripts that start the ORIGINAL env's python, so in a clone always use
+  `python -m pip`, never bare `pip`.
 - ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 

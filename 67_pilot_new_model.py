@@ -19,7 +19,9 @@ shows everything that needs fixing.
   G4 plumbing    27_extract_band.verify_post_norm_route (used by 42 before extraction) and
                  compute_bases (the lm_head SVD HARP also relies on) run on this model.
   G5 cost        Seconds per question for generation and for the extraction forward pass, extrapolated
-                 to all four datasets.
+                 to all four datasets. The extrapolation uses the MEDIAN question: with the Mamba kernels
+                 installed, the first calls also compile Triton kernels, which would inflate a mean over a
+                 few questions. The mean is reported too.
 
 Labels are not computed (BLEURT is the same for every model); answers are printed for a sanity read.
 
@@ -157,12 +159,13 @@ def run(model_folder, n_tqa, n_tydi, out_dir):
                 if first is None:
                     first = (sample, seed, outs.sequences.cpu(), fulls, pl)
             n_ans = len(comp_lens)
-            rates[ds] = float(np.mean(times))
+            rates[ds] = float(np.median(times))
             samples_out[ds] = shown
             bad = {"degenerate": loops, "empty": empty, "hit_max_new_tokens": hit_max}
             ok = n_ans > 0 and all(bad[k] <= MAX_BAD_SHARE[k] * n_ans for k in bad)
             gate("G2_generate_%s" % ds, ok, questions=len(times), answers=n_ans,
-                 s_per_question=round(rates[ds], 2), mean_answer_tokens=round(float(np.mean(comp_lens)), 1),
+                 s_per_question_median=round(rates[ds], 2), s_per_question_mean=round(float(np.mean(times)), 2),
+                 s_first_question=round(times[0], 2), mean_answer_tokens=round(float(np.mean(comp_lens)), 1),
                  max_allowed_share=MAX_BAD_SHARE, **bad)
             for s in shown:
                 print("      q%s: %s" % (s["prompt_id"], s["answers"]), flush=True)
@@ -233,7 +236,7 @@ def run(model_folder, n_tqa, n_tydi, out_dir):
     report["peak_gpu_gb"] = round(torch.cuda.max_memory_allocated() / 1024 ** 3, 1)
     report["samples"] = samples_out
     report["extraction_forward_s_first_question"] = fwd_rates
-    gate("G5_cost", bool(rates), generation_s_per_question=rates,
+    gate("G5_cost", bool(rates), generation_s_per_question_median=rates,
          generation_hours_if_run_alone=report["generation_hours_estimate"],
          reference_rates_qwen_llama="TruthfulQA 2.55 s/q, short-answer datasets 1.29 s/q (39_generate_dataset.py)",
          peak_gpu_gb=report["peak_gpu_gb"])

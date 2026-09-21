@@ -10,6 +10,7 @@
 #
 # usage:
 #   sbatch -p highgpu --gres=gpu:1 --mem=64G --time=03:00:00 --export=ALL,HD_REPO=$PWD slurm/pilot_model.slurm <model_folder>
+#   (submit_h1.sh runs it on hal-det-h1 with ENV_NAME, N_TQA, N_TYDI and OUT_DIR set)
 #
 # The preamble is act_extract.slurm's, for the same reasons -- read that file for the history:
 #   * inherited CONDA_* variables are stripped before `module load`, or Lmod loops on
@@ -65,8 +66,11 @@ set +x
 
 # Exits non-zero if any gate fails; the report is written either way.
 # SCRIPT=68_diagnose_generation.py runs the decoding diagnostic instead of the pilot, same preamble.
-python "${SCRIPT:-67_pilot_new_model.py}" --model_folder "$MODEL"
+# N_TQA / N_TYDI (questions per dataset) and OUT_DIR (report folder, default results/pilot) are passed
+# through to either script when set.
+python "${SCRIPT:-67_pilot_new_model.py}" --model_folder "$MODEL" \
+    ${N_TQA:+--n-truthfulqa "$N_TQA"} ${N_TYDI:+--n-tydiqa "$N_TYDI"} ${OUT_DIR:+--out-dir "$OUT_DIR"}
 status=$?
 
-echo "$(date +%F_%T): done (exit $status). Report: results/pilot/pilot_${MODEL}.json" >&2
+echo "$(date +%F_%T): done (exit $status). Report in ${OUT_DIR:-results/pilot}/" >&2
 exit $status
