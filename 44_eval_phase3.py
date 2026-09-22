@@ -368,6 +368,7 @@ def write_condition_result(dataset_name, cond_name, result, results_dir):
               oof_lr=np.asarray(result["oof_lr"], dtype=np.float64))
     summary = {k: v for k, v in result.items() if k not in ("oof_rf", "oof_lr")}
     summary["oof_npz"] = oof_filename
+    summary["split_unit"] = SPLIT_UNIT          # both splits share this file name in different dirs
     out_path = os.path.join(results_dir, f"session06_phase3_partA_{dataset_name}_{cond_name}.json")
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2, default=str)
@@ -1321,6 +1322,7 @@ def main():
                       f"{cond_name}` first."); sys.exit(1)
             per_condition[cond_name] = cond_result
         result = combine_conditions(args.dataset, per_condition, y, prompt_idx)
+        result.update(split_unit=SPLIT_UNIT, model_folder=args.model_folder)
         out_path = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2, default=str)
@@ -1444,6 +1446,10 @@ def main():
                   f"--dataset {args.dataset} --combine-conditions")
             return
         result = run_part_a(args.dataset, feats, y, prompt_idx, is_known)
+        # The question- and answer-level files have the SAME name in different results dirs, so a
+        # copy taken out of its dir cannot be told apart by name (one Falcon download was
+        # overwritten this way, 2026-09-21). The file itself now says which split and model it is.
+        result.update(split_unit=SPLIT_UNIT, model_folder=args.model_folder)
         out_path = os.path.join(args.results_dir, f"session06_phase3_partA_{args.dataset}.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2, default=str)
