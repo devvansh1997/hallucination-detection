@@ -83,6 +83,38 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 _job_id = os.environ.get("SLURM_JOB_ID", "local")
 os.environ["HF_METRICS_CACHE"] = f"/tmp/rouge_cache_{_job_id}"
 
+# The BLEURT-20 checkpoint (~2.1 GB) is downloaded into the metrics cache, and that cache is per job
+# (/tmp, above, for the ROUGE race), so EVERY generation job downloaded the checkpoint again into
+# node-local /tmp. At the ~1.5-2 MB/s compute-node egress, aiohttp's default 300 s total timeout then
+# killed both Falcon NQ-Open and TriviaQA generations (FSTimeoutError at 5:01, 2026-09-22). The judge
+# checkpoint now downloads once into this persistent folder, shared by all jobs; ROUGE's compute cache
+# stays per job. `--prefetch-only` fills it on a CPU node before any GPU job starts.
+JUDGE_DOWNLOAD_CACHE = os.environ.get(
+    "HD_JUDGE_DOWNLOAD_CACHE",
+    os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hd_judge_downloads"))
+
+
+def _lift_download_timeout():
+    """aiohttp caps a whole download at 300 s by default, and HF_DATASETS_DOWNLOAD_TIMEOUT does not
+    reach that cap. Lift the total limit (keep the connect and per-read limits) so a large first
+    download on a slow link finishes instead of dying at five minutes."""
+    try:
+        import aiohttp.client
+        aiohttp.client.DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=60, sock_read=600)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [WARN] could not lift the aiohttp download timeout ({type(e).__name__}: {e})")
+
+
+def load_judges(bleurt_model):
+    """ROUGE and BLEURT as before; only the BLEURT checkpoint's download location changed."""
+    import evaluate
+    from datasets import DownloadConfig
+    _lift_download_timeout()
+    rouge = evaluate.load("rouge")
+    bleurt = evaluate.load("bleurt", config_name=bleurt_model,
+                           download_config=DownloadConfig(cache_dir=JUDGE_DOWNLOAD_CACHE))
+    return rouge, bleurt
+
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -310,6 +342,20 @@ def run_audit(ds_cfg):
     return {"raw_split_len": raw_split_len, "n_final": n_final}
 
 
+def run_prefetch(ds_cfg, cfg):
+    """CPU only: fill the dataset cache and the judge download cache (JUDGE_DOWNLOAD_CACHE), so that a
+    slow download costs a CPU slot rather than a GPU job. Loads exactly what run_generation loads."""
+    _lift_download_timeout()
+    t0 = time.time()
+    samples, _ = load_dataset_samples(ds_cfg)
+    print(f"[prefetch] {ds_cfg['name']}: {len(samples)} prompts in the dataset cache ({time.time()-t0:.0f}s)")
+    t0 = time.time()
+    _, bleurt = load_judges(cfg["judge"]["bleurt_model"])
+    probe = bleurt.compute(predictions=["Paris"], references=["Paris"])["scores"][0]
+    print(f"[prefetch] judges ready ({time.time()-t0:.0f}s); BLEURT checkpoint under {JUDGE_DOWNLOAD_CACHE}; "
+          f"BLEURT('Paris', 'Paris') = {probe:.3f}")
+
+
 # ==============================================================================
 # STEP 2 -- GENERATE + LABEL + PIN (GPU)
 # ==============================================================================
@@ -341,13 +387,13 @@ def run_generation(ds_cfg, model_folder, global_seed, out_dir, force_versions=Fa
     print(f"  [Cross-check] 01_generate_full_beams.py:60-69 reads the SAME config.yaml entry "
           f"(hf_path={ds_cfg['hf_path']}, hf_config={ds_cfg['hf_config']}) -- confirmed identical "
           f"by inspection, not independently hardcoded elsewhere.")
+    _lift_download_timeout()
     samples, raw_split_len = load_dataset_samples(ds_cfg)
     print(f"[Step 2] {ds_cfg['name']}: {len(samples)} prompts (full validation split, no subsampling; "
           f"raw split length {raw_split_len})")
     print_resource_estimate(ds_cfg["name"], len(samples))
 
-    rouge = evaluate.load("rouge")
-    bleurt = evaluate.load("bleurt", config_name=cfg["judge"]["bleurt_model"])
+    rouge, bleurt = load_judges(cfg["judge"]["bleurt_model"])
 
     device = torch.device("cuda")
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16,
@@ -612,6 +658,8 @@ def main():
     parser.add_argument("--model_folder", type=str, default="llama-3.1-8b-instruct")
     parser.add_argument("--global-seed", type=int, default=GEN_SEED_DEFAULT)
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument("--prefetch-only", action="store_true",
+                         help="CPU: cache the dataset split and the ROUGE/BLEURT judges, then exit")
     parser.add_argument("--force-version-mismatch", action="store_true")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--num-beams", type=int, default=None,
@@ -637,9 +685,12 @@ def main():
     if args.audit_only:
         run_audit(ds_cfg)
         return
+    if args.prefetch_only:
+        run_prefetch(ds_cfg, cfg)
+        return
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA required for generation (only --audit-only is CPU-only).")
+        raise RuntimeError("CUDA required for generation (only --audit-only and --prefetch-only are CPU-only).")
 
     out_dir = args.output_dir or os.path.join(cfg["output"]["data_dir"], args.model_folder)
     overrides = {"num_beams": args.num_beams, "top_p": args.top_p, "top_k": args.top_k,

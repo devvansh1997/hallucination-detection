@@ -17,6 +17,8 @@
 #     on Stokes (high RAM, separate scheduler, so it cannot wait on a Newton job): once ext-triviaqa has
 #     succeeded, from a STOKES terminal run   bash submit_trivia_eval.sh falcon-h1-7b-base
 #     (CPU only, so it runs in hal-det; the Mamba kernels are not needed to evaluate);
+#   * each generation waits on a CPU prefetch (39 --prefetch-only): dataset and BLEURT-20 checkpoint are
+#     cached before the GPU job starts (a per-job BLEURT download killed two generations, 2026-09-22);
 #   * after this submission's generations, 72_empty_answers.py counts empty answers for every model
 #     and dataset (results/empty_answers.json);
 #   * logs go to slurm_logs/falcon_<stage>-<dataset>_<jobid>.out / .err.
@@ -92,9 +94,18 @@ for DS in $DATASETS; do
         triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00; EXT_MEM=256G ;;
         *)        GEN_TIME=06:00:00; EXT_TIME=06:00:00; EXT_MEM=100G ;;
     esac
+    # pre: 39 --prefetch-only on a CPU node caches the dataset and the ~2.1 GB BLEURT-20 checkpoint
+    # (persistent JUDGE_DOWNLOAD_CACHE), so generation never downloads on a GPU node -- the cause of
+    # both failed generations on 2026-09-22. Seconds once cached.
+    submit "pre-$DS" -p "$CPU_PART" --mem=32G --cpus-per-task=2 --time=02:00:00 \
+        --job-name="pre-$DS" --output=slurm_logs/falcon_%x_%j.out --error=slurm_logs/falcon_%x_%j.err \
+        --export=ALL,HD_REPO=$HD_REPO \
+        -- "$ANALYSIS_SCRIPT" 39_generate_dataset.py --dataset "$DS" --model_folder "$MODEL" --prefetch-only
+    J_PRE=$JOBID
+    DEP=""; if [ "$J_PRE" != "DRY" ]; then DEP="--dependency=afterok:$J_PRE"; fi
     # gen: 39 generates and labels one question at a time, then 40 validates. extract: 42 re-forwards
     # every answer. eval: 44, both split protocols, CPU.
-    submit "gen-$DS" -p "$GPU_PART" --gres=gpu:1 --mem=80G --time=$GEN_TIME $(common "gen-$DS") \
+    submit "gen-$DS" -p "$GPU_PART" --gres=gpu:1 --mem=80G --time=$GEN_TIME $DEP $(common "gen-$DS") \
         -- "$STAGE_SCRIPT" gen "$MODEL" "$DS"
     J_GEN=$JOBID
     DEP=""

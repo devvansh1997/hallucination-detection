@@ -71,7 +71,11 @@
   `python -m pip`, never bare `pip`.
 - Newton's default gcc is 8.5; torch 2.13's headers refuse to compile below GCC 9. Any CUDA/C++ extension
   build needs a gcc module 9..13 loaded (build_h1_env.slurm picks one) and the same module at run time.
-- ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job
+- ROUGE race condition fix: isolate `HF_METRICS_CACHE` per job. Side effect found 2026-09-22: BLEURT-20's
+  ~2.1 GB checkpoint downloads INTO that per-job cache, so every generation re-downloaded it into /tmp, and
+  at ~1.5-2 MB/s aiohttp's 300 s total cap killed it (FSTimeoutError at 5:01). 39 now downloads judge
+  checkpoints into a persistent `~/.cache/huggingface/hd_judge_downloads` (HD_JUDGE_DOWNLOAD_CACHE),
+  lifts aiohttp's total cap, and `39 --prefetch-only` fills the caches on a CPU node first.
 - Clean `/tmp` after runs: `rm -rf /tmp/rouge_cache_*`
 
 ## BLEURT/ROUGE
