@@ -486,9 +486,12 @@ def main():
     elapsed("F done")
 
     print("\nComputing eyeball examples (recomputes ROUGE-L/BLEURT for 10 examples only) ...")
-    import evaluate
-    rouge = evaluate.load("rouge")
-    bleurt = evaluate.load("bleurt", config_name=cfg["judge"]["bleurt_model"])
+    # Through 39, so the BLEURT checkpoint comes from the persistent judge cache rather than being
+    # downloaded again into this job's /tmp metrics cache. Loading it here with a bare evaluate.load
+    # re-downloaded ~2.1 GB and died on the aiohttp timeout AFTER generation had finished and every
+    # validation check had passed, which left the extraction blocked (job 837658, 2026-09-22).
+    gen_mod = _load("s39", "39_generate_dataset.py")
+    rouge, bleurt = gen_mod.load_judges(cfg["judge"]["bleurt_model"])
     elapsed("rouge/bleurt libraries loaded")
     examples = eyeball_examples(seq_data, source_lookup.get, rouge, bleurt,
                                  cfg["judge"]["rouge_threshold"], cfg["judge"]["sen_sim_threshold"])

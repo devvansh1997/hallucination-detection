@@ -89,6 +89,7 @@ common() {   # common <job name>: options every stage shares
 echo "model=$MODEL  env=$ENV_NAME  datasets=$DATASETS"
 GEN_IDS=()
 TRIVIA=0
+PREV_PRE=""
 for DS in $DATASETS; do
     case "$DS" in
         triviaqa) GEN_TIME=16:00:00; EXT_TIME=12:00:00; EXT_MEM=256G ;;
@@ -97,11 +98,17 @@ for DS in $DATASETS; do
     # pre: 39 --prefetch-only on a CPU node caches the dataset and the ~2.1 GB BLEURT-20 checkpoint
     # (persistent JUDGE_DOWNLOAD_CACHE), so generation never downloads on a GPU node -- the cause of
     # both failed generations on 2026-09-22. Seconds once cached.
-    submit "pre-$DS" -p "$CPU_PART" --mem=32G --cpus-per-task=2 --time=02:00:00 \
+    # SERIALISED (afterany on the previous prefetch): two prefetch jobs downloading the same checkpoint
+    # into the same cache raced, and one moved the finished temp file while the other still wanted it --
+    # FileNotFoundError on a .incomplete file killed pre-triviaqa on 2026-09-22.
+    PRE_DEP=""
+    if [ -n "$PREV_PRE" ]; then PRE_DEP="--dependency=afterany:$PREV_PRE"; fi
+    submit "pre-$DS" -p "$CPU_PART" --mem=32G --cpus-per-task=2 --time=02:00:00 $PRE_DEP \
         --job-name="pre-$DS" --output=slurm_logs/falcon_%x_%j.out --error=slurm_logs/falcon_%x_%j.err \
         --export=ALL,HD_REPO=$HD_REPO \
         -- "$ANALYSIS_SCRIPT" 39_generate_dataset.py --dataset "$DS" --model_folder "$MODEL" --prefetch-only
     J_PRE=$JOBID
+    if [ "$J_PRE" != "DRY" ]; then PREV_PRE="$J_PRE"; fi
     DEP=""; if [ "$J_PRE" != "DRY" ]; then DEP="--dependency=afterok:$J_PRE"; fi
     # gen: 39 generates and labels one question at a time, then 40 validates. extract: 42 re-forwards
     # every answer. eval: 44, both split protocols, CPU.
