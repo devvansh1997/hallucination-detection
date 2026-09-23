@@ -48,12 +48,26 @@ echo "repo HEAD: $(git -C $REPO log --oneline -1 2>/dev/null)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 status=0
-for MODEL in Qwen2.5-7B-Instruct Llama-3.1-8B; do
-    for DS in tydiqa truthful_qa; do
+MODELS="${MODELS:-Qwen2.5-7B-Instruct Llama-3.1-8B}"
+DATASETS="${DATASETS:-tydiqa truthful_qa}"
+for MODEL in $MODELS; do
+    # HARP-Code/dataset/ holds ONE model's jsonl at a time, and 50 reads it to recover the prompt
+    # ids for their flat hidden-state list. On 2026-09-23 the Qwen runs found LLaMA's jsonl there
+    # and stopped on the length assertion (4,040 answers implied against 3,020 states). Copy this
+    # model's own files first, exactly as the harp stage of pipe_stage.slurm does.
+    case "$MODEL" in
+        Qwen2.5-7B-Instruct) OURS=qwen-2.5-7b-instruct ;;
+        Llama-3.1-8B)        OURS=llama-3.1-8b ;;
+        *) echo "ERROR: no harp_input folder known for $MODEL"; exit 1 ;;
+    esac
+    for DS in $DATASETS; do
         echo ""
         echo "############################################################"
         echo "###  $MODEL / $DS"
         echo "############################################################"
+        cp "$REPO/harp_input/$OURS/[known]$DS.jsonl"   "$HARP/dataset/" || { status=1; continue; }
+        cp "$REPO/harp_input/$OURS/[unknown]$DS.jsonl" "$HARP/dataset/" || { status=1; continue; }
+        echo "    dataset jsonl in place from harp_input/$OURS"
         python 50_harp_reeval_prompt_level.py \
             --dataset "$DS" \
             --model_name "$MODEL" \
