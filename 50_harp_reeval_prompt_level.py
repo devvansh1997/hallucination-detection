@@ -189,8 +189,54 @@ def project(harp_utils, V, emb, proj_dim, device):
     return [harp_utils.get_proj(V=Vk, emb=e.to(device), norm=None).clone() for e in emb]
 
 
-def run_one(harp_mlp, sentences, flags_t, train_rows, valid_rows, proj_dim, seed, device, tmp):
-    """Their train() on our row selection. Hyperparameters are theirs, verbatim."""
+def within_prompt_auroc(scores, labels, prompt_ids):
+    """26_grouped_baseline's metric, loaded rather than copied so both report the same thing."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("s26", os.path.join(HERE, "26_grouped_baseline.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.within_prompt_auroc(np.asarray(scores), np.asarray(labels), np.asarray(prompt_ids))
+
+
+def capture_valid_scores(harp_mlp, model, valid_data, reported_auroc):
+    """Their per-answer scores for the validation rows, in valid_data order (T-009).
+
+    Their validate() reduces each answer to one max-over-tokens score and hands the vector to the
+    module-level calculate_auroc; it walks the data in order and never shuffles, so the vector lines
+    up row for row with valid_data. We wrap that function, call their validate() on the model their
+    train() returned, and keep what it was given. Nothing of theirs is modified.
+
+    The AUROC recomputed from these scores must equal the one their trainer reported for the same
+    model, otherwise the vector is not the one behind their number and the within-question value
+    built from it would be meaningless -- so that is an assertion, not a comment."""
+    import numpy as np
+    captured = {}
+    original = harp_mlp.calculate_auroc
+
+    def spy(scores, flags, acc_threshold=None):
+        s = scores.detach().cpu().numpy() if hasattr(scores, "detach") else np.asarray(scores)
+        captured["scores"] = np.asarray(s, dtype=float)
+        return original(scores, flags, acc_threshold=acc_threshold)
+
+    harp_mlp.calculate_auroc = spy
+    try:
+        res = harp_mlp.validate(model, valid_data, batch_size=BATCH)
+    finally:
+        harp_mlp.calculate_auroc = original
+    got = float(res.roc_auc)
+    assert abs(got - reported_auroc) < 1e-6, (
+        "recovered scores give AUROC %.6f but their trainer reported %.6f for this model -- the "
+        "captured vector is not the one behind their number" % (got, reported_auroc))
+    assert len(captured["scores"]) == len(valid_data), (
+        "captured %d scores for %d validation rows" % (len(captured["scores"]), len(valid_data)))
+    return captured["scores"]
+
+
+def run_one(harp_mlp, sentences, flags_t, train_rows, valid_rows, proj_dim, seed, device, tmp,
+            capture=False):
+    """Their train() on our row selection. Hyperparameters are theirs, verbatim.
+
+    capture=True additionally returns one score per validation row (capture_valid_scores)."""
     import torch
     from matplotlib import pyplot as plt
     train_data = [(sentences[r], flags_t[r]) for r in train_rows]
@@ -206,9 +252,10 @@ def run_one(harp_mlp, sentences, flags_t, train_rows, valid_rows, proj_dim, seed
     plt.close("all")
     model = res.model
     auroc = float(res.valid_auroc)
+    scores = capture_valid_scores(harp_mlp, model, valid_data, auroc) if capture else None
     del res
     torch.cuda.empty_cache() if device.startswith("cuda") else None
-    return auroc, model
+    return (auroc, model, scores) if capture else (auroc, model)
 
 
 # ==============================================================================
@@ -338,6 +385,9 @@ def main():
     ap.add_argument("--arms", default="answer,question")
     ap.add_argument("--proj-dims", default=",".join(str(d) for d in PROJ_DIMS))
     ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--within", action="store_true",
+                     help="also report within-question AUROC for the question arm (T-009): their "
+                          "validate() is wrapped to keep the per-answer scores it already computes")
     ap.add_argument("--folds", type=int, default=5, help="groupkfold arm only")
     ap.add_argument("--device", default=None)
     ap.add_argument("--out-dir", default=os.path.join(HERE, "results", "harp_reeval"))
@@ -385,6 +435,7 @@ def main():
 
             for arm in arms:
                 per_seed, overlaps = [], []
+                within_seeds, within_pairs = [], []
                 for s in range(a.seeds):
                     seed = 42 + s
                     harp_utils.seed_everything(seed=seed)
@@ -423,14 +474,32 @@ def main():
 
                     assert not (set(tr) & set(va)), "train/valid rows overlap"
                     overlaps.append(questions_on_both_sides(pid_all, tr, va))
-                    auroc, _ = run_one(harp_mlp, sents, flags_all, tr, va,
-                                       pd_, seed, device, tmp)
+                    # Within-question AUROC needs one score per validation answer, which their
+                    # validate() computes but never returns; capture it for the question arm only,
+                    # which is the protocol every reported number uses (T-009).
+                    want_within = a.within and arm == "question"
+                    out = run_one(harp_mlp, sents, flags_all, tr, va, pd_, seed, device, tmp,
+                                  capture=want_within)
+                    auroc = out[0]
                     per_seed.append(auroc)
+                    if want_within:
+                        wp = within_prompt_auroc(out[2], np.asarray(fl_all)[va],
+                                                 np.asarray(pid_all)[va])
+                        within_seeds.append(wp["within_prompt_auroc"])
+                        within_pairs.append(wp["n_pairs"])
+                        print("    seed %d: pooled %.4f  within-question %.4f  (%d pairs)"
+                              % (seed, auroc, wp["within_prompt_auroc"], wp["n_pairs"]), flush=True)
 
                 m, sd = summarise(per_seed)
                 results.setdefault(arm, {})[pd_] = {
                     "mean": m, "std": sd, "per_seed": per_seed,
                     "questions_on_both_sides": overlaps}
+                if within_seeds:
+                    wm, wsd = summarise(within_seeds)
+                    results[arm][pd_].update(within_mean=wm, within_std=wsd,
+                                             within_per_seed=within_seeds, within_pairs=within_pairs)
+                    print("  %-11s within-question %.4f +/- %.4f   (%d-%d pairs per draw)"
+                          % (arm, wm, wsd, min(within_pairs), max(within_pairs)), flush=True)
                 print("  %-11s AUROC %.4f +/- %.4f   (questions on both sides: %s)"
                       % (arm, m, sd, overlaps[0] if overlaps else "n/a"), flush=True)
 
