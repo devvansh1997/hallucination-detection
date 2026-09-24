@@ -32,6 +32,17 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# HD_REPO MUST REACH THE TRAINING JOB. method_stage.slurm opens with
+#     REPO="${HD_REPO:?set HD_REPO to your clone of hallucination-detection}"
+# so an unset HD_REPO kills it in under a second -- jobs 844990 and 844992 died exactly that way,
+# FAILED with 00:00:00 elapsed, after their extractions had already succeeded. submit_methods.sh
+# passes it on the sbatch line rather than trusting the submitting shell, and so do we. Slurm also
+# resolves --output relative to the SUBMISSION directory, hence the cd.
+HD_REPO="${HD_REPO:-$HERE}"
+HD_DATA="${HD_DATA:-}"
+cd "$HD_REPO"
+mkdir -p "$HD_REPO/slurm_logs" "$HD_REPO/results/methods"
 MODELS="${MODELS:-qwen-2.5-7b-instruct llama-3.1-8b}"
 DATASETS="${DATASETS:-nq_open}"
 PART="${PART:-highgpu}"
@@ -61,7 +72,8 @@ for DS in $DATASETS; do
         EXT_OPTS="-p $PART --gres=gpu:1 --mem=$(mem_for "$DS") --time=$(ext_time "$DS") \
                   --job-name=actext-${DS:0:6}-${M:0:4} --export=ALL"
         TRN_OPTS="-p $PART --gres=gpu:1 --mem=$(mem_for "$DS") --time=$(trn_time "$DS") \
-                  --job-name=actrun-${DS:0:6}-${M:0:4} --export=ALL"
+                  --job-name=actrun-${DS:0:6}-${M:0:4} \
+                  --export=ALL,HD_REPO=$HD_REPO,HD_DATA=$HD_DATA,FORCE=${FORCE:-0}"
         if [ -n "$DRY" ]; then
             echo "would queue: act_extract.slurm $M $DS $NPOOL $(maxgb_for "$DS")   [$(mem_for "$DS"), $(ext_time "$DS")]"
             echo "would queue: method_stage.slurm act_vit $M $DS  (afterok)         [$(mem_for "$DS"), $(trn_time "$DS")]"
