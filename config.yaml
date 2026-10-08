@@ -68,3 +68,20 @@ hosvd:
 output:
   data_dir: "../data"
   dataset_ratio: 1.0
+
+# RAGTruth (Niu et al., ACL 2024): long responses with human-labeled hallucinated spans, each read by the
+# model that generated it (74_extract_ragtruth.py, T-024). Kept apart from `models` above: these are not
+# generators of our QA data. ragtruth_name must equal the "model" field in RAGTruth's response.jsonl --
+# `python 74_extract_ragtruth.py --inspect` lists the values present.
+ragtruth:
+  raw_dir: "../data-ragtruth/RAGTruth/dataset"
+  out_dir: "../data-ragtruth"
+  generators:
+    - folder: "llama-2-7b-chat"
+      id: "meta-llama/Llama-2-7b-chat-hf"
+      ragtruth_name: "llama-2-7b-chat"
+      first_block: 15          # blocks 15..23 of 32: the window of the main experiments
+    - folder: "llama-2-13b-chat"
+      id: "meta-llama/Llama-2-13b-chat-hf"
+      ragtruth_name: "llama-2-13b-chat"
+      first_block: 19          # blocks 19..27 of 40: the same relative depth

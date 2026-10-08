@@ -87,5 +87,5 @@ done
 
 echo
 echo "Queued $N jobs.  Watch: squeue -u \$USER"
-echo "Each log ends with a SUMMARY block (M0 share, M1 index by lag, M2 AUROC by aggregate, M2 gap by position)."
+echo "Each log ends with a SUMMARY block: variance kept per token, token-to-token smoothness, AUROC by tokens used, score gap by position."
 echo "Results: results/token_structure/tokstruct_<model>_<dataset>.json"

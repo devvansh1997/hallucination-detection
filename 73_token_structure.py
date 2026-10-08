@@ -14,23 +14,23 @@ blocks 15..23, completion tokens only, float16. Writes only results/token_struct
 
 WHAT IS MEASURED, per model and dataset, on the paper's question-level split (five draws):
 
-  M0  space.      Per layer: 28's token scaler and a 64-direction PCA basis, both fitted on a subsample of
+  PER-TOKEN COMPRESSION.  Per layer: 28's token scaler and a 64-direction PCA basis, both fitted on a subsample of
                   TRAINING-question tokens, refitted for every draw (no basis sees a test question). Reports
                   the share of variance the 64 directions keep -- the per-token analogue of the 64.7-66.4%
-                  the paper reports for the peak summary. M1 and M2 run in this projected space, which is the
+                  the paper reports for the peak summary. Both tests below run in this projected space, which is the
                   space a functional model would decompose.
 
-  M1  smoothness. Mean cosine similarity between projected states k tokens apart (k = 1..8), averaged
+  TOKEN-TO-TOKEN SMOOTHNESS.  Mean cosine similarity between projected states k tokens apart (k = 1..8), averaged
                   within each answer and then over answers, against a NULL in which each answer's tokens are
                   randomly reordered. Tokens of one answer share their prompt, so they are similar regardless
                   of order; only the excess over the null is order structure:
-                      index(k) = (sim(k) - null(k)) / (1 - null(k))
+                      excess(k) = (similarity(k) - shuffled(k)) / (1 - shuffled(k))
                   1 = adjacent tokens agree fully beyond the shared offset; 0 = order carries nothing.
                   Per layer and per class, on the first draw's space (it is label-free and descriptive).
                   The null reorders WITHIN an answer, so in short answers its random pairs are themselves
-                  close in time: the index is conservative there, and sim(k) is reported alongside it.
+                  close in time: the excess is conservative there, and the raw similarity is reported alongside it.
 
-  M2  position.   A logistic-regression probe on single tokens (all nine layers, 9 x 64 = 576 features;
+  WHERE IN THE ANSWER.  A logistic-regression probe on single tokens (all nine layers, 9 x 64 = 576 features;
                   each token carries its answer's label; weights 1/T so every answer counts once, classes
                   balanced), trained on training questions. Its token scores are aggregated per test answer
                   in ways that differ ONLY in where they look:
@@ -40,12 +40,12 @@ WHAT IS MEASURED, per model and dataset, on the paper's question-level split (fi
                   The mean-aggregate row doubles as a plain token-probe baseline under the paper protocol.
 
 HOW TO READ IT.
-  M1 clearly above zero and decaying over several tokens, AND M2 halves/ends separated by more than their
+  Smoothness clearly above zero and decaying over several tokens, AND halves/ends separated by more than their
       spread over draws  -> the token mode has smoothness and positional signal; a functional model has
       something to fit.
-  M1 near zero  -> token order carries nothing beyond the shared prompt in these answers; a smooth-curve
-      model has no basis here, whatever M2 says.
-  M2 aggregates within each other's spread and class curves parallel  -> the signal is a level shift spread
+  Smoothness near zero  -> token order carries nothing beyond the shared prompt in these answers; a smooth-curve
+      model has no basis here, whatever the position test says.
+  All ways of using the tokens within each other's spread and class curves parallel  -> the signal is a level shift spread
       evenly along the answer, which order statistics already capture (as 70 found). The idea then needs
       longer generations, such as reasoning traces, rather than a new model.
 
@@ -81,7 +81,7 @@ def _load(name, filename):
 
 
 # ---------------------------------------------------------------------------------------------
-# M0: the projected space
+# per-token compression
 # ---------------------------------------------------------------------------------------------
 
 def token_rows(offsets, idx):
@@ -126,7 +126,7 @@ def project_all(tokens, space, s28, chunk=CHUNK):
 
 
 # ---------------------------------------------------------------------------------------------
-# M1: smoothness across tokens
+# token-to-token smoothness
 # ---------------------------------------------------------------------------------------------
 
 def lag_sums(Z, offsets, idx, max_lag, rng=None):
@@ -156,11 +156,12 @@ def smoothness(Z, offsets, idx, max_lag, seed):
     sim = s / np.maximum(c, 1)
     null = sn / np.maximum(cn, 1)
     index = (sim - null) / np.maximum(1.0 - null, 1e-12)
-    return {"sim": sim.tolist(), "null": null.tolist(), "index": index.tolist(), "answers": c.tolist()}
+    return {"similarity": sim.tolist(), "shuffled_baseline": null.tolist(), "excess_similarity": index.tolist(),
+            "answers": c.tolist()}
 
 
 # ---------------------------------------------------------------------------------------------
-# M2: where in the answer the signal sits
+# where in the answer the signal sits
 # ---------------------------------------------------------------------------------------------
 
 def token_weights(offsets, idx, y):
@@ -272,16 +273,16 @@ def run(dataset, model_folder, data_dir, in_dir, out_dir, seeds=None, n_fit=N_FI
         t1 = time.time()
 
         if di == 0:
-            m1 = {}
+            smooth_by_block = {}
             all_idx = np.arange(len(y))
             for j, blk in enumerate(blocks):
                 Zl = np.ascontiguousarray(Z[:, j, :])
-                m1[str(blk)] = {"all": smoothness(Zl, offsets, all_idx, MAX_LAG, seed),
+                smooth_by_block[str(blk)] = {"all": smoothness(Zl, offsets, all_idx, MAX_LAG, seed),
                                 "correct": smoothness(Zl, offsets, all_idx[y == 0], MAX_LAG, seed),
                                 "hallucinated": smoothness(Zl, offsets, all_idx[y == 1], MAX_LAG, seed)}
-            out["M1_smoothness"] = m1
-            print("    M1 index(k=1) by block: %s  (%.0fs)" % (
-                "  ".join("%d:%.3f" % (b, m1[str(b)]["all"]["index"][0]) for b in blocks), time.time() - t1), flush=True)
+            out["token_smoothness"] = smooth_by_block
+            print("    smoothness, excess similarity of adjacent tokens, by block: %s  (%.0fs)" % (
+                "  ".join("%d:%.3f" % (b, smooth_by_block[str(b)]["all"]["excess_similarity"][0]) for b in blocks), time.time() - t1), flush=True)
 
         rows_tr = token_rows(offsets, tr)
         w, yt = token_weights(offsets, tr, y)
@@ -299,16 +300,16 @@ def run(dataset, model_folder, data_dir, in_dir, out_dir, seeds=None, n_fit=N_FI
         curves, cnt = position_curves(s, offsets, te, y, N_BINS)
         curve_rows.append({"correct": curves[0].tolist(), "hallucinated": curves[1].tolist(),
                            "answers": cnt.tolist()})
-        print("    seed %-3d share64 %.3f-%.3f | %s | fit %d tok (%.0fs)" % (
+        print("    seed %-3d variance kept by 64 directions %.3f-%.3f | AUROC %s | fit on %d tokens (%.0fs)" % (
             seed, min(share), max(share), " | ".join(line), used, time.time() - t0), flush=True)
 
-        out["M0_share64"] = {str(b): mean_std([r_[j] for r_ in share_rows]) for j, b in enumerate(blocks)}
-        out["M2_aggregates"] = {a: {"pooled": mean_std([r_["pooled_auroc"] for r_ in agg_rows[a]]),
+        out["variance_kept_by_64_directions"] = {str(b): mean_std([r_[j] for r_ in share_rows]) for j, b in enumerate(blocks)}
+        out["auroc_by_tokens_used"] = {a: {"pooled": mean_std([r_["pooled_auroc"] for r_ in agg_rows[a]]),
                                     "within": mean_std([r_["within_prompt_auroc"] for r_ in agg_rows[a]]),
                                     "per_seed": agg_rows[a]} for a in AGGREGATES}
         cs = np.array([r_["correct"] for r_ in curve_rows])
         hs = np.array([r_["hallucinated"] for r_ in curve_rows])
-        out["M2_position_curves"] = {"bins": N_BINS, "correct": cs.mean(0).tolist(), "hallucinated": hs.mean(0).tolist(),
+        out["score_gap_by_position"] = {"bins": N_BINS, "correct": cs.mean(0).tolist(), "hallucinated": hs.mean(0).tolist(),
                                      "gap": (hs - cs).mean(0).tolist(), "gap_std": (hs - cs).std(0).tolist(),
                                      "per_seed": curve_rows}
         out["elapsed_seconds"] = round(time.time() - t_start, 1)
@@ -318,17 +319,17 @@ def run(dataset, model_folder, data_dir, in_dir, out_dir, seeds=None, n_fit=N_FI
     json.dump(out, open(dst, "w"), indent=1)
 
     print("\n  SUMMARY %s / %s" % (model_folder, dataset))
-    print("    M0 share of variance in 64 directions, by block: %s" % "  ".join(
-        "%s:%.3f" % (b, v[0]) for b, v in out["M0_share64"].items()))
+    print("    variance kept by 64 directions per token, by block: %s" % "  ".join(
+        "%s:%.3f" % (b, v[0]) for b, v in out["variance_kept_by_64_directions"].items()))
     mid = str(blocks[len(blocks) // 2])
-    print("    M1 index(k) at block %s, k=1..%d: %s" % (mid, MAX_LAG, " ".join(
-        "%.3f" % v for v in out["M1_smoothness"][mid]["all"]["index"])))
+    print("    smoothness at block %s, excess similarity at distance 1..%d: %s" % (mid, MAX_LAG, " ".join(
+        "%.3f" % v for v in out["token_smoothness"][mid]["all"]["excess_similarity"])))
     for a in AGGREGATES:
-        p, w_ = out["M2_aggregates"][a]["pooled"], out["M2_aggregates"][a]["within"]
-        print("    M2 %-12s pooled %.4f +- %.4f   within %s" % (
+        p, w_ = out["auroc_by_tokens_used"][a]["pooled"], out["auroc_by_tokens_used"][a]["within"]
+        print("    tokens used %-12s pooled %.4f +- %.4f   within %s" % (
             a, p[0], p[1], "%.4f +- %.4f" % w_ if w_[0] is not None else "n/a"))
-    print("    M2 gap (hallucinated - correct) by position bin: %s" % " ".join(
-        "%.2f" % v for v in out["M2_position_curves"]["gap"]))
+    print("    score gap, hallucinated minus correct, by position (10 bins): %s" % " ".join(
+        "%.2f" % v for v in out["score_gap_by_position"]["gap"]))
     if reference is not None:
         print("    reported detector (flatten_control, Tucker-2 core, RF): %.4f" % reference)
     print("  wrote %s" % dst)
@@ -353,7 +354,7 @@ def self_test():
     np.cumsum(lengths, out=offsets[1:])
     r = 16
 
-    # M1: AR(1) trajectories around an answer-specific offset are smooth; i.i.d. ones are not.
+    # smoothness: AR(1) trajectories around an answer-specific offset are smooth; i.i.d. ones are not.
     def store(rho):
         Z = np.empty((offsets[-1], r), dtype=np.float32)
         for n in range(len(lengths)):
@@ -366,13 +367,13 @@ def self_test():
     idx = np.arange(len(lengths))
     sm = smoothness(store(0.9), offsets, idx, 4, seed=1)
     iid = smoothness(store(0.0), offsets, idx, 4, seed=1)
-    check("smooth trajectories score high at lag 1", sm["index"][0] > 0.5, "index %.3f" % sm["index"][0])
-    check("smooth index decays with lag", sm["index"][0] > sm["index"][3], "k=1 %.3f, k=4 %.3f" % (sm["index"][0], sm["index"][3]))
-    check("i.i.d. tokens score near zero", abs(iid["index"][0]) < 0.06, "index %.3f" % iid["index"][0])
-    check("shared offset alone does not count", iid["sim"][0] > 0.3 and abs(iid["index"][0]) < 0.06,
-          "raw sim %.3f vs index %.3f" % (iid["sim"][0], iid["index"][0]))
+    check("smooth trajectories score high at lag 1", sm["excess_similarity"][0] > 0.5, "excess %.3f" % sm["excess_similarity"][0])
+    check("smoothness decays with lag", sm["excess_similarity"][0] > sm["excess_similarity"][3], "k=1 %.3f, k=4 %.3f" % (sm["excess_similarity"][0], sm["excess_similarity"][3]))
+    check("i.i.d. tokens score near zero", abs(iid["excess_similarity"][0]) < 0.06, "excess %.3f" % iid["excess_similarity"][0])
+    check("shared offset alone does not count", iid["similarity"][0] > 0.3 and abs(iid["excess_similarity"][0]) < 0.06,
+          "raw similarity %.3f vs excess %.3f" % (iid["similarity"][0], iid["excess_similarity"][0]))
 
-    # M2: hallucinated answers differ only in their second half.
+    # position: hallucinated answers differ only in their second half.
     y = rng.integers(0, 2, size=len(lengths))
     s = rng.normal(size=offsets[-1])
     for n in range(len(lengths)):
@@ -395,7 +396,7 @@ def self_test():
     check("token weights are equal within a class", np.allclose(per_answer[y == 0], per_answer[y == 0][0]),
           "spread %.2e" % np.ptp(per_answer[y == 0]))
 
-    # M0: scaler + basis + projection on a fake (total_T, P, D) store, through 28's real scaler.
+    # per-token compression: scaler + basis + projection on a fake (total_T, P, D) store, through 28's real scaler.
     s28 = _load("s28", "28_eval_band.py")
     D, P = 48, 3
     U = np.linalg.qr(rng.normal(size=(D, 4)))[0]
