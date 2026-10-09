@@ -10,7 +10,7 @@
 # ../data-ragtruth/<generator>/; reads the RAGTruth release and the model weights.
 #
 # usage (via submit_ragtruth.sh, not directly):
-#   sbatch slurm/ragtruth_extract.slurm <generator folder>
+#   sbatch slurm/ragtruth_extract.slurm <generator folder> [extra 74 arguments, e.g. --diagnose-template]
 #
 # Preamble copied from tokenstates_extract.slurm, for the same reasons:
 #   * inherited CONDA_* variables are stripped before `module load`, or Lmod loops on
@@ -63,6 +63,6 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader >&2
 echo "  repo HEAD   : $(git -C "$REPO" log --oneline -1 2>/dev/null)" >&2
 set +x
 
-python 74_extract_ragtruth.py --generator "$GEN" || exit 1
+python 74_extract_ragtruth.py --generator "$GEN" "${@:2}" || exit 1
 
 echo "$(date +%F_%T): done. Output under ../data-ragtruth/${GEN}/" >&2

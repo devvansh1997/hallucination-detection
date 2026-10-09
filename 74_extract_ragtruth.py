@@ -186,6 +186,73 @@ def template_check(model, tok, recs, layer_idx, device, n):
     return float(np.mean(a)), float(np.mean(b))
 
 
+LLAMA2_DEFAULT_SYSTEM = (
+    "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being "
+    "safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal "
+    "content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question "
+    "does not make any sense, or is not factually coherent, explain why instead of answering something not "
+    "correct. If you don't know the answer to a question, please don't share false information.")
+
+TEMPLATE_VARIANTS = {
+    "inst":                lambda p: "[INST] %s [/INST]" % p,
+    "plain":               lambda p: p,
+    "inst_no_spaces":      lambda p: "[INST]%s[/INST]" % p,
+    "inst_default_system": lambda p: "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]" % (LLAMA2_DEFAULT_SYSTEM, p),
+}
+
+
+def response_token_nll(model, tok, head, response, device, extra_space=False):
+    """Per-token negative log-likelihood of the response after `head` (BOS added to the head)."""
+    import torch
+    p = tok(head, add_special_tokens=True)["input_ids"]
+    r = tok((" " + response) if extra_space else response, add_special_tokens=False)["input_ids"]
+    x = torch.tensor([list(p) + list(r)], device=device)
+    with torch.no_grad():
+        logits = model(input_ids=x).logits[0, len(p) - 1:-1, :].float()
+        nll = torch.nn.functional.cross_entropy(logits, x[0, len(p):], reduction="none")
+    return nll.cpu().numpy()
+
+
+def diagnose_template(generator, device, n, n_show=4):
+    """Which way of presenting the prompt makes the generator's own responses most likely, and where in the
+    response any difference comes from: the first token, tokens 2-5, or the rest. Writes nothing."""
+    import collections
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    c = ragtruth_cfg()
+    g = next(x for x in c["generators"] if x["folder"] == generator)
+    recs, _ = load_records(resolve(c["raw_dir"]), g["ragtruth_name"])
+    print("  [%s] temperature values in the release: %s" % (
+        generator, dict(collections.Counter(str(r["temperature"]) for r in recs))), flush=True)
+    starts = collections.Counter(" ".join(r["response"].split()[:2]) for r in recs)
+    print("  most common first two words of responses: %s" % starts.most_common(8), flush=True)
+    tok = AutoTokenizer.from_pretrained(g["id"])
+    model = AutoModelForCausalLM.from_pretrained(g["id"], dtype=torch.bfloat16).to(device)
+    model.eval()
+    rng = np.random.default_rng(0)
+    pick = [recs[i] for i in rng.choice(len(recs), size=min(n, len(recs)), replace=False)]
+
+    variants = [(name, fn, False) for name, fn in TEMPLATE_VARIANTS.items()]
+    variants.append(("inst_extra_space", TEMPLATE_VARIANTS["inst"], True))
+    print("  NLL of the response tokens, mean over %d responses (lower = more likely):" % len(pick))
+    print("    %-22s %8s %8s %8s %8s" % ("presentation", "all", "token 1", "2-5", "6+"))
+    for name, fn, extra in variants:
+        rows = [response_token_nll(model, tok, fn(r["prompt"]), r["response"], device, extra) for r in pick]
+        print("    %-22s %8.3f %8.3f %8.3f %8.3f" % (
+            name, np.mean([v.mean() for v in rows]), np.mean([v[0] for v in rows]),
+            np.mean([v[1:5].mean() for v in rows if len(v) > 1]),
+            np.mean([v[5:].mean() for v in rows if len(v) > 5])), flush=True)
+
+    print("  what the model writes first, greedy, against what the release has:")
+    for r in pick[:n_show]:
+        for name in ("inst", "inst_default_system"):
+            ids = tok(TEMPLATE_VARIANTS[name](r["prompt"]), add_special_tokens=True, return_tensors="pt")["input_ids"].to(device)
+            with torch.no_grad():
+                gen = model.generate(ids, max_new_tokens=16, do_sample=False)
+            print("    %-20s %r" % (name, tok.decode(gen[0, ids.shape[1]:], skip_special_tokens=True)[:80]))
+        print("    %-20s %r" % ("release", r["response"][:80]), flush=True)
+
+
 def git_head():
     try:
         return subprocess.run(["git", "-C", HERE, "log", "--oneline", "-1"], capture_output=True,
@@ -463,6 +530,9 @@ def main():
     ap.add_argument("--max-len", type=int, default=4096, help="prompt + response tokens (Llama-2 context)")
     ap.add_argument("--n-fit", type=int, default=N_FIT)
     ap.add_argument("--skip-template-check", action="store_true")
+    ap.add_argument("--diagnose-template", action="store_true",
+                    help="compare ways of presenting the prompt on --n-diagnose responses; writes nothing")
+    ap.add_argument("--n-diagnose", type=int, default=64)
     a = ap.parse_args()
     if a.self_test:
         print("  self-test")
@@ -472,6 +542,9 @@ def main():
         return
     if not a.generator:
         raise SystemExit("--generator is required (or --self-test / --inspect)")
+    if a.diagnose_template:
+        diagnose_template(a.generator, a.device, a.n_diagnose)
+        return
     run(a.generator, a.device, a.seed, a.max_len, a.n_fit, a.skip_template_check)
 
 
