@@ -67,6 +67,7 @@ N_BOOT = 2000
 N_BOOT_TOKENS = 500
 N_BINS = 10
 TASK_NAMES = {0: "QA", 1: "Data2txt", 2: "Summary"}
+SHORT_LENGTHS = (17, 8)    # median short-QA answer lengths: Qwen TyDiQA-GP 17, LLaMA TyDiQA-GP 6-8
 
 
 def _load(name, filename):
@@ -123,6 +124,25 @@ def aligned_curve(s, offsets, idx, onset, window):
         sums[rel] += v[lo:hi]
         cnt[rel] += 1
     return sums / np.maximum(cnt, 1), cnt
+
+
+def chunk_spans(offsets, idx, chunk):
+    """Cut each response in idx into consecutive pieces of `chunk` tokens, dropping pieces under 2 tokens.
+    Returns (offsets-like array, piece ids) for 73.smoothness: piece i is Z[o[2i]:o[2i+1]].
+
+    WHY. The smoothness baseline shuffles tokens WITHIN a response, so in a short response a random pair is
+    itself only a few tokens apart and the baseline is high; in a long one it is low. Comparing short QA
+    answers with whole RAGTruth responses therefore mixes smoothness with length. Measuring RAGTruth cut to
+    the short answers' length puts both on the same baseline."""
+    flat = []
+    for n in idx:
+        a, b = int(offsets[n]), int(offsets[n + 1])
+        for s in range(a, b, chunk):
+            e = min(s + chunk, b)
+            if e - s >= 2:
+                flat += [s, e]
+    o = np.array(flat, dtype=np.int64)
+    return o, np.arange(0, len(o), 2)
 
 
 def aligned_matrix(s, offsets, idx, onset, window):
@@ -257,6 +277,11 @@ def run(generator, out_dir, seed, n_boot):
         "correct": s73.smoothness(Zm, offsets, allr[y == 0], MAX_LAG, seed),
         "hallucinated": s73.smoothness(Zm, offsets, allr[y == 1], MAX_LAG, seed)}
     out["token_smoothness"] = sm
+    out["token_smoothness_cut_to_short_length"] = {"block": blocks[mid]}
+    for chunk in SHORT_LENGTHS:
+        o, pieces = chunk_spans(offsets, allr, chunk)
+        r = s73.smoothness(Zm, o, pieces, min(8, chunk - 1), seed)
+        out["token_smoothness_cut_to_short_length"]["%d_tokens" % chunk] = dict(r, pieces=int(len(pieces)))
     print("    smoothness done (%.0fs)" % (time.time() - t0), flush=True)
 
     # where in the answer: probe on response labels
@@ -320,6 +345,10 @@ def run(generator, out_dir, seed, n_boot):
     print("\n  SUMMARY %s (RAGTruth test, 95%% intervals)" % generator)
     print("    smoothness, excess similarity at block %d, distance 1 2 4 8 16 32: %s" % (blocks[mid], " ".join(
         "%.3f" % sm[str(blocks[mid])]["excess_similarity"][k - 1] for k in (1, 2, 4, 8, 16, 32))))
+    for chunk in SHORT_LENGTHS:
+        c = out["token_smoothness_cut_to_short_length"]["%d_tokens" % chunk]
+        print("      cut into %2d-token pieces (same baseline as short answers), distance 1..%d: %s"
+              % (chunk, len(c["excess_similarity"]), " ".join("%.3f" % v for v in c["excess_similarity"])))
     for a in s73.AGGREGATES:
         print("    tokens used %-12s AUROC %s" % (a, fmt(out["auroc_by_tokens_used"][a])))
     for name, v in out["auroc_mean_by_task"].items():
@@ -403,6 +432,33 @@ def self_test():
           "first %.3f, later %.3f" % (fl["first_hallucinated_token"]["value"], fl["later_hallucinated_tokens"]["value"]))
     pse = pseudo_onsets(np.array([10, 50]), [0.5], np.random.default_rng(0))
     check("pseudo-onsets land inside the response", pse.tolist() == [5, 25], str(pse.tolist()))
+
+    # cutting long smooth answers into short pieces reproduces what genuinely short answers give, and the
+    # whole-length measurement reads higher -- the length effect the cut is there to remove
+    s73 = _load("s73", "73_token_structure.py")
+    r = 8
+
+    def ar_store(lens, rho):
+        off = np.zeros(len(lens) + 1, dtype=np.int64)
+        np.cumsum(lens, out=off[1:])
+        Z = np.empty((off[-1], r), dtype=np.float32)
+        for i in range(len(lens)):
+            base, e = rng.normal(size=r) * 2.0, rng.normal(size=r)
+            for t in range(lens[i]):
+                e = rho * e + np.sqrt(1 - rho ** 2) * rng.normal(size=r)
+                Z[off[i] + t] = base + e
+        return Z, off
+    Zl, offl = ar_store(rng.integers(120, 200, size=300), 0.7)
+    Zs, offs = ar_store(np.full(1500, 17), 0.7)
+    o, pieces = chunk_spans(offl, np.arange(300), 17)
+    cut = s73.smoothness(Zl, o, pieces, 4, 1)["excess_similarity"][0]
+    short_ = s73.smoothness(Zs, offs, np.arange(1500), 4, 1)["excess_similarity"][0]
+    whole = s73.smoothness(Zl, offl, np.arange(300), 4, 1)["excess_similarity"][0]
+    check("long answers cut to 17 tokens match genuinely 17-token answers", abs(cut - short_) < 0.04,
+          "cut %.3f, short %.3f" % (cut, short_))
+    check("whole-length measurement reads higher (the length effect)", whole > cut + 0.05,
+          "whole %.3f, cut %.3f" % (whole, cut))
+    check("pieces are 17 tokens or the response's tail", all(2 <= o[2 * i + 1] - o[2 * i] <= 17 for i in range(len(pieces))))
 
     # the band brackets the aligned mean, and the matrix agrees with aligned_curve where both are defined
     s = scores("event")
