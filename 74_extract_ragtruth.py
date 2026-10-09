@@ -140,14 +140,18 @@ def first_true(flags):
     return int(hit[0]) if len(hit) else -1
 
 
-def build_ids(tok, prompt, response, wrap=True):
+def build_ids(tok, prompt, response, wrap=True, lead=None):
     """Token ids of the wrapped prompt followed by the response, the prompt length, and the response's
-    character offsets. The response is tokenized on its own, so its first token carries the leading-space
-    marker a generator emits right after [/INST], and the prompt/response boundary is exact."""
+    character offsets. The response is tokenized on its own, so the prompt/response boundary is exact.
+    `lead`, if given, is a token id placed between the wrapper and the response and counted as prompt: the bare
+    space token Llama-2-chat writes before every reply, which RAGTruth's stored text leaves out (see
+    leading_token)."""
     head = "[INST] %s [/INST]" % prompt if wrap else prompt
-    p = tok(head, add_special_tokens=True)["input_ids"]
+    p = list(tok(head, add_special_tokens=True)["input_ids"])
+    if lead is not None:
+        p.append(int(lead))
     enc = tok(response, add_special_tokens=False, return_offsets_mapping=True)
-    return list(p) + list(enc["input_ids"]), len(p), [tuple(o) for o in enc["offset_mapping"]]
+    return p + list(enc["input_ids"]), len(p), [tuple(o) for o in enc["offset_mapping"]]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -175,15 +179,51 @@ def project_response(H, space, s28):
     return Z
 
 
-def template_check(model, tok, recs, layer_idx, device, n):
-    """Mean response NLL with and without the [INST] wrapper, on the first n records."""
+def token_nll(model, ids, n_prompt, device):
+    """Per-token negative log-likelihood of ids[n_prompt:] given everything before it."""
+    import torch
+    x = torch.tensor([ids], device=device)
+    with torch.no_grad():
+        logits = model(input_ids=x).logits[0, n_prompt - 1:-1, :].float()
+        nll = torch.nn.functional.cross_entropy(logits, x[0, n_prompt:], reduction="none")
+    return nll.cpu().numpy()
+
+
+def segments(rows):
+    """Mean NLL of token 1, tokens 2-5 and tokens 6+ over a list of per-token NLL arrays."""
+    return {"token_1": float(np.mean([v[0] for v in rows])),
+            "tokens_2_5": float(np.mean([v[1:5].mean() for v in rows if len(v) > 1])),
+            "tokens_6_on": float(np.mean([v[5:].mean() for v in rows if len(v) > 5]))}
+
+
+def leading_token(model, tok, recs, device, n=32, min_share=0.9):
+    """The token the model writes first after the wrapper, if it is the same blank token for at least min_share
+    of n prompts. Llama-2-chat opens every reply with a bare space token that RAGTruth's stored text drops;
+    reading the text without it puts a near-impossible token first (NLL ~22 nats on token 1, diagnosed
+    2026-10-08). Returns (token id or None, share of prompts, the top first token)."""
+    import collections
+    import torch
+    firsts = []
+    for r in recs[:n]:
+        ids = tok("[INST] %s [/INST]" % r["prompt"], add_special_tokens=True, return_tensors="pt")["input_ids"]
+        with torch.no_grad():
+            firsts.append(int(model(input_ids=ids.to(device)).logits[0, -1].argmax()))
+    tid, cnt = collections.Counter(firsts).most_common(1)[0]
+    share = cnt / len(firsts)
+    blank = tok.decode([tid]).strip() == ""
+    return (tid if (blank and share >= min_share) else None), share, tid
+
+
+def template_check(model, tok, recs, device, n, lead):
+    """Per-token response NLL with the wrapper (and the leading token, if any) and without the wrapper, on the
+    first n records. Returns (mean wrapped, mean plain, wrapped by segment, plain by segment)."""
     a, b = [], []
     for r in recs[:n]:
-        ids, npr, _ = build_ids(tok, r["prompt"], r["response"], wrap=True)
-        a.append(read_response(model, ids, npr, layer_idx[:1], device)[1])
+        ids, npr, _ = build_ids(tok, r["prompt"], r["response"], wrap=True, lead=lead)
+        a.append(token_nll(model, ids, npr, device))
         ids, npr, _ = build_ids(tok, r["prompt"], r["response"], wrap=False)
-        b.append(read_response(model, ids, npr, layer_idx[:1], device)[1])
-    return float(np.mean(a)), float(np.mean(b))
+        b.append(token_nll(model, ids, npr, device))
+    return (float(np.mean([v.mean() for v in a])), float(np.mean([v.mean() for v in b])), segments(a), segments(b))
 
 
 LLAMA2_DEFAULT_SYSTEM = (
@@ -201,16 +241,11 @@ TEMPLATE_VARIANTS = {
 }
 
 
-def response_token_nll(model, tok, head, response, device, extra_space=False):
-    """Per-token negative log-likelihood of the response after `head` (BOS added to the head)."""
-    import torch
-    p = tok(head, add_special_tokens=True)["input_ids"]
-    r = tok((" " + response) if extra_space else response, add_special_tokens=False)["input_ids"]
-    x = torch.tensor([list(p) + list(r)], device=device)
-    with torch.no_grad():
-        logits = model(input_ids=x).logits[0, len(p) - 1:-1, :].float()
-        nll = torch.nn.functional.cross_entropy(logits, x[0, len(p):], reduction="none")
-    return nll.cpu().numpy()
+def response_token_nll(model, tok, head, response, device, lead=None):
+    """Per-token negative log-likelihood of the response after `head` (BOS added; `lead` appended to the head)."""
+    p = list(tok(head, add_special_tokens=True)["input_ids"]) + ([int(lead)] if lead is not None else [])
+    r = list(tok(response, add_special_tokens=False)["input_ids"])
+    return token_nll(model, p + r, len(p), device)
 
 
 def diagnose_template(generator, device, n, n_show=4):
@@ -232,12 +267,15 @@ def diagnose_template(generator, device, n, n_show=4):
     rng = np.random.default_rng(0)
     pick = [recs[i] for i in rng.choice(len(recs), size=min(n, len(recs)), replace=False)]
 
-    variants = [(name, fn, False) for name, fn in TEMPLATE_VARIANTS.items()]
-    variants.append(("inst_extra_space", TEMPLATE_VARIANTS["inst"], True))
+    lead, share, top = leading_token(model, tok, pick, device)
+    print("  leading token: the model writes %r (id %d) first after the wrapper for %.0f%% of prompts%s"
+          % (tok.convert_ids_to_tokens(top), top, 100 * share, "" if lead is not None else " -- not inserted"))
+    variants = [(name, fn, None) for name, fn in TEMPLATE_VARIANTS.items()]
+    variants.append(("inst_with_lead_token", TEMPLATE_VARIANTS["inst"], top))
     print("  NLL of the response tokens, mean over %d responses (lower = more likely):" % len(pick))
     print("    %-22s %8s %8s %8s %8s" % ("presentation", "all", "token 1", "2-5", "6+"))
-    for name, fn, extra in variants:
-        rows = [response_token_nll(model, tok, fn(r["prompt"]), r["response"], device, extra) for r in pick]
+    for name, fn, lead_id in variants:
+        rows = [response_token_nll(model, tok, fn(r["prompt"]), r["response"], device, lead_id) for r in pick]
         print("    %-22s %8.3f %8.3f %8.3f %8.3f" % (
             name, np.mean([v.mean() for v in rows]), np.mean([v[0] for v in rows]),
             np.mean([v[1:5].mean() for v in rows if len(v) > 1]),
@@ -352,9 +390,23 @@ def run(generator, device, seed, max_len, n_fit, skip_template_check):
     kept = [recs[i] for i, _, _, _ in plan]
 
     t0 = time.time()
-    nll_wrapped, nll_plain = template_check(model, tok, kept, layer_idx, device, N_TEMPLATE_CHECK)
-    print("  template check: response NLL %.3f with the [INST] wrapper, %.3f without (%.0fs)"
+    lead, lead_share, lead_top = leading_token(model, tok, kept, device)
+    print("  leading token: the model writes %r (id %d) first after the wrapper for %.0f%% of prompts -> %s"
+          % (tok.convert_ids_to_tokens(lead_top), lead_top, 100 * lead_share,
+             "inserted before every response" if lead is not None else "nothing inserted"), flush=True)
+    if lead is not None:
+        plan = [(i, ids[:npr] + [lead] + ids[npr:], npr + 1, fl) for i, ids, npr, fl in plan]
+        too_long = sum(len(ids) > max_len for _, ids, _, _ in plan)
+        if too_long:
+            raise SystemExit("refusing: %d responses exceed --max-len once the leading token is added" % too_long)
+
+    nll_wrapped, nll_plain, seg_w, seg_p = template_check(model, tok, kept, device, N_TEMPLATE_CHECK, lead)
+    print("  template check: response NLL %.3f with the wrapper, %.3f without (%.0fs)"
           % (nll_wrapped, nll_plain, time.time() - t0), flush=True)
+    print("    by segment       token 1   tokens 2-5   tokens 6+")
+    print("    with wrapper   %8.3f   %10.3f   %9.3f" % (seg_w["token_1"], seg_w["tokens_2_5"], seg_w["tokens_6_on"]))
+    print("    without        %8.3f   %10.3f   %9.3f" % (seg_p["token_1"], seg_p["tokens_2_5"], seg_p["tokens_6_on"]),
+          flush=True)
     if not nll_wrapped < nll_plain and not skip_template_check:
         raise SystemExit("refusing: the wrapper does not make the responses more likely -- wrong model or "
                          "wrong template, so the text would be read as someone else's")
@@ -425,7 +477,11 @@ def run(generator, device, seed, max_len, n_fit, skip_template_check):
             "span_check": {"mismatched": len(bad), "total": total},
             "label_vs_token_flags_disagree": disagree,
             "template_check": {"nll_wrapped": nll_wrapped, "nll_plain": nll_plain, "n": N_TEMPLATE_CHECK,
+                               "wrapped_by_segment": seg_w, "plain_by_segment": seg_p,
                                "skipped": bool(skip_template_check)},
+            "leading_token": {"id": None if lead is None else int(lead),
+                              "token": None if lead is None else tok.convert_ids_to_tokens(int(lead)),
+                              "share_of_prompts": lead_share, "counted_as": "prompt"},
             "fit": {"responses": len(fit_len), "tokens_read": n_read, "tokens_fitted": used, "seed": seed,
                     "variance_kept_by_64_directions": share, "split_used": "RAGTruth train only"},
             "response_nll_mean": float(nll.mean()), "nonfinite_entries": nonfinite,
@@ -499,6 +555,12 @@ def self_test():
     check("response tokens follow the prompt", len(ids) == npr + 4 and om[3] == (13, 18), "%d ids, last offset %s" % (len(ids), om[3]))
     _, npr_plain, _ = build_ids(FakeTok(), "Summarize this", "x", wrap=False)
     check("unwrapped prompt is shorter", npr_plain == 1 + 2, "n_prompt %d" % npr_plain)
+    ids_l, npr_l, om_l = build_ids(FakeTok(), "Summarize this", "It opened in 2021.", lead=29871)
+    check("leading token sits between wrapper and response and counts as prompt",
+          npr_l == npr + 1 and ids_l[npr_l - 1] == 29871 and ids_l[npr_l:] == ids[npr:] and om_l == om,
+          "n_prompt %d, token before response %d" % (npr_l, ids_l[npr_l - 1]))
+    seg = segments([np.array([20.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.5]), np.array([10.0, 3.0])])
+    check("segment means", seg == {"token_1": 15.0, "tokens_2_5": 2.0, "tokens_6_on": 0.5}, str(seg))
 
     # the store pass projects each response exactly as 73.project_all projects the concatenation
     s28 = _load("s28", "28_eval_band.py")
