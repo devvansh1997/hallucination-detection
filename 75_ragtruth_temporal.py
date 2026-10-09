@@ -125,6 +125,28 @@ def aligned_curve(s, offsets, idx, onset, window):
     return sums / np.maximum(cnt, 1), cnt
 
 
+def aligned_matrix(s, offsets, idx, onset, window):
+    """(responses, 2 * window + 1) token scores around each response's aligned position; NaN where the
+    response does not reach."""
+    M = np.full((len(idx), 2 * window + 1), np.nan)
+    for k, n in enumerate(idx):
+        v = s[offsets[n]:offsets[n + 1]]
+        o = int(onset[k])
+        lo, hi = max(0, o - window), min(len(v), o + window + 1)
+        M[k, np.arange(lo, hi) - o + window] = v[lo:hi]
+    return M
+
+
+def curve_band(M, n_boot, seed):
+    """95% band of the per-position mean under resampling of responses (rows of M)."""
+    import warnings
+    rng = np.random.default_rng(seed)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        draws = np.array([np.nanmean(M[rng.integers(0, len(M), len(M))], axis=0) for _ in range(n_boot)])
+        return np.nanpercentile(draws, 2.5, axis=0), np.nanpercentile(draws, 97.5, axis=0)
+
+
 def window_mean(v, o, a, b):
     lo, hi = max(0, o + a), min(len(v), o + b + 1)
     return float(v[lo:hi].mean()) if hi > lo else np.nan
@@ -218,6 +240,8 @@ def run(generator, out_dir, seed, n_boot):
           "response tokens median %d" % (generator, len(y), len(tr), len(te), len(tokens), int(y[te].sum()),
                                         int((y[te] == 0).sum()), int(np.median(lengths))), flush=True)
     out = {"generator": generator, "model_id": meta["model_id"], "blocks": blocks, "store": meta,
+           "response_tokens": {"median": float(np.median(lengths)), "mean": float(lengths.mean()),
+                               "max": int(lengths.max())},
            "n_boot": n_boot, "seed": seed, "complete": False}
     os.makedirs(out_dir, exist_ok=True)
     dst = os.path.join(out_dir, "ragtruth_%s.json" % generator)
@@ -263,9 +287,13 @@ def run(generator, out_dir, seed, n_boot):
     corr_onset = pseudo_onsets(lengths[corr_te], fractions, rng)
     curve_h, n_h = aligned_curve(s_resp, offsets, hall_te, onset[hall_te], WINDOW)
     curve_c, n_c = aligned_curve(s_resp, offsets, corr_te, corr_onset, WINDOW)
+    lo_h, hi_h = curve_band(aligned_matrix(s_resp, offsets, hall_te, onset[hall_te], WINDOW), n_boot, seed)
+    lo_c, hi_c = curve_band(aligned_matrix(s_resp, offsets, corr_te, corr_onset, WINDOW), n_boot, seed + 1)
     out["onset"] = {"positions": list(range(-WINDOW, WINDOW + 1)),
                     "hallucinated_curve": curve_h.tolist(), "hallucinated_responses": n_h.tolist(),
+                    "hallucinated_band": [lo_h.tolist(), hi_h.tolist()],
                     "correct_pseudo_onset_curve": curve_c.tolist(), "correct_responses": n_c.tolist(),
+                    "correct_band": [lo_c.tolist(), hi_c.tolist()],
                     "onset_fraction_of_length": {"median": float(np.median(fractions)),
                                                  "p10": float(np.percentile(fractions, 10)),
                                                  "p90": float(np.percentile(fractions, 90))},
@@ -375,6 +403,16 @@ def self_test():
           "first %.3f, later %.3f" % (fl["first_hallucinated_token"]["value"], fl["later_hallucinated_tokens"]["value"]))
     pse = pseudo_onsets(np.array([10, 50]), [0.5], np.random.default_rng(0))
     check("pseudo-onsets land inside the response", pse.tolist() == [5, 25], str(pse.tolist()))
+
+    # the band brackets the aligned mean, and the matrix agrees with aligned_curve where both are defined
+    s = scores("event")
+    M = aligned_matrix(s, offsets, hall, onset[hall], 24)
+    curve, cnt = aligned_curve(s, offsets, hall, onset[hall], 24)
+    lo, hi = curve_band(M, 200, 5)
+    check("aligned matrix matches the aligned curve", np.allclose(np.nanmean(M, axis=0), curve) and
+          (np.isfinite(M).sum(axis=0) == cnt).all())
+    check("band brackets the mean and is narrow", bool((lo <= curve).all() and (curve <= hi).all())
+          and float(np.max(hi - lo)) < 0.6, "widest %.2f" % float(np.max(hi - lo)))
     return ok
 
 
