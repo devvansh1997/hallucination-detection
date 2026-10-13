@@ -97,6 +97,19 @@ def cut_at_stop(ids, stop_ids):
     return list(ids), False
 
 
+def stop_token_ids(tok):
+    """The tokenizer's own end-of-answer token plus any of STOP_TOKENS that it registers as a SPECIAL token.
+    The special check matters: a string like '</s>' can also be an ordinary text token in a BPE vocabulary
+    (id 128247 in Qwen2.5's), and the pilot of 2026-10-13 carried that id as a stop by mistake."""
+    special = set(int(i) for i in tok.all_special_ids) | set(int(i) for i in getattr(tok, "added_tokens_encoder", {}).values())
+    ids = {int(tok.eos_token_id)} if tok.eos_token_id is not None else set()
+    for s in STOP_TOKENS:
+        i = tok.convert_tokens_to_ids(s)
+        if isinstance(i, int) and i in special:
+            ids.add(i)
+    return ids
+
+
 def question_seed(global_seed, prompt_id):
     """39's scheme: sha256, so a pilot and the full run draw the same answers for the same question."""
     return int(hashlib.sha256(("%s:%s" % (global_seed, prompt_id)).encode()).hexdigest(), 16) % (2 ** 31)
@@ -178,11 +191,7 @@ def run(model_folder, dataset, limit, global_seed, device):
         raise SystemExit("%s has no chat template: a base model needs a few-shot prompt, which is not built yet" % model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16).to(device)
     model.eval()
-    stop_ids = {int(tok.eos_token_id)} if tok.eos_token_id is not None else set()
-    for s in STOP_TOKENS:
-        i = tok.convert_tokens_to_ids(s)
-        if isinstance(i, int) and i >= 0 and i != tok.unk_token_id:
-            stop_ids.add(i)
+    stop_ids = stop_token_ids(tok)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     print("  [%s/%s] %d questions x %d answers | stop tokens %s | temperature %s, top_p %s, top_k %s, max_new_tokens %d"
           % (model_folder, stem, len(questions), k, sorted(stop_ids), g["temperature"], g["top_p"], g["top_k"],
@@ -258,6 +267,33 @@ def run(model_folder, dataset, limit, global_seed, device):
 
 # ---------------------------------------------------------------------------------------------
 
+def inspect(model_folder, dataset, limit, n_show):
+    """How the final number was read against whether the answer was graded correct, and the endings of
+    answers read without the marker. No GPU."""
+    import torch
+    _, mc = math_cfg()
+    stem = "%s%s" % (dataset, "_pilot%d" % limit if limit else "")
+    path = os.path.join(os.path.normpath(os.path.join(HERE, mc["out_dir"], model_folder)), "%s_sequences_v1.pt" % stem)
+    d = torch.load(path, weights_only=False)
+    how = np.array(d["extract_method"])
+    wrong = np.array(d["all_hallucination_flag"]).astype(int)
+    trunc = np.array(d["truncated"]).astype(bool)
+    print("  %s" % path)
+    print("  %-12s %7s %9s %10s" % ("read by", "answers", "correct", "truncated"))
+    for m in ("marker", "last_number", "none"):
+        s = how == m
+        if s.any():
+            print("  %-12s %7d %8.1f%% %10d" % (m, s.sum(), 100 * (1 - wrong[s].mean()), trunc[s].sum()))
+    print("  truncated answers graded correct: %d of %d" % (int(((wrong == 0) & trunc).sum()), int(trunc.sum())))
+    for label, sel in (("read by last number, graded CORRECT", (how == "last_number") & (wrong == 0) & ~trunc),
+                       ("read by last number, graded WRONG", (how == "last_number") & (wrong == 1) & ~trunc)):
+        idx = np.flatnonzero(sel)
+        print("\n  %s: %d answers; endings of the first %d" % (label, len(idx), min(n_show, len(idx))))
+        for i in idx[:n_show]:
+            end = " ".join(d["decoded_text"][i][-170:].split())
+            print("    read %s, reference %s | ...%s" % (d["pred"][i], d["gold"][i], end))
+
+
 def self_test():
     ok = True
 
@@ -288,6 +324,15 @@ def self_test():
     check("question seed is stable and differs by question", question_seed(0, 3) == question_seed(0, 3)
           and question_seed(0, 3) != question_seed(0, 4))
 
+    class FakeTok:                      # '</s>' is an ordinary token here (id 7); only <|im_end|> is special
+        eos_token_id = 9
+        all_special_ids = [8, 9]
+        added_tokens_encoder = {"<|endoftext|>": 8, "<|im_end|>": 9}
+
+        def convert_tokens_to_ids(self, s):
+            return {"</s>": 7, "<|endoftext|>": 8, "<|im_end|>": 9}.get(s)
+    check("an ordinary text token is never a stop", stop_token_ids(FakeTok()) == {8, 9}, str(sorted(stop_token_ids(FakeTok()))))
+
     # 4 questions x 3 answers: all correct, all wrong, mixed (2 right), mixed (1 right)
     pid = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
     wrong = [0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0]
@@ -305,6 +350,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--prefetch", action="store_true", help="download the dataset into the cache and exit")
+    ap.add_argument("--inspect", action="store_true", help="how answers were read vs graded, with examples; no GPU")
+    ap.add_argument("--n-show", type=int, default=12)
     ap.add_argument("--model_folder")
     ap.add_argument("--dataset", default="gsm8k")
     ap.add_argument("--limit-questions", type=int, default=0, help="first N questions only (a pilot)")
@@ -321,6 +368,9 @@ def main():
         return
     if not a.model_folder:
         raise SystemExit("--model_folder is required (or --self-test / --prefetch)")
+    if a.inspect:
+        inspect(a.model_folder, a.dataset, a.limit_questions, a.n_show)
+        return
     run(a.model_folder, a.dataset, a.limit_questions, a.seed, a.device)
 
 
