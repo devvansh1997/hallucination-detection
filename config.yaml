@@ -85,3 +85,23 @@ ragtruth:
       id: "meta-llama/Llama-2-13b-chat-hf"
       ragtruth_name: "llama-2-13b-chat"
       first_block: 19          # blocks 19..27 of 40: the same relative depth
+
+# Math reasoning with sampled chain-of-thought answers (76_generate_math.py, T-025): long answers whose
+# label -- the final number is right or wrong -- needs no annotator, for any sample of any model. Kept apart
+# from `generation` above: plain temperature sampling, no beams, and the only stop is the model's own
+# end-of-answer token (the QA stop set ends an answer at its first sentence).
+math:
+  out_dir: "../data-math"
+  datasets:
+    - name: "gsm8k"
+      hf_path: "openai/gsm8k"
+      hf_config: "main"
+      split: "test"
+  instruction: "Solve the following problem. Reason step by step, then give the final answer on its own line in the form '#### <number>'."
+  generation:
+    num_return_sequences: 10
+    temperature: 0.7
+    top_p: 1.0
+    top_k: 0
+    repetition_penalty: 1.0
+    max_new_tokens: 512
