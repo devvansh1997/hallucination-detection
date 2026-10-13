@@ -52,7 +52,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STOP_TOKENS = ("<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end_of_text|>", "</s>")
 NUMBER = r"-?(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
 MARKED = re.compile(r"####\s*\$?\s*(" + NUMBER + r")")
+BOXED = re.compile(r"\\boxed\{\s*\\?\$?\s*(" + NUMBER + r")")
 ANY_NUMBER = re.compile(NUMBER)
+READ_BY = ("marker", "boxed", "last_number", "none")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -74,11 +76,20 @@ def reference_number(answer_field):
 
 
 def read_final_number(text):
-    """(number, how it was read): the last '#### <number>' if the answer has one ('marker'), else the last
-    number anywhere in the text ('last_number'), else (None, 'none')."""
-    m = MARKED.findall(text)
-    if m:
-        return to_number(m[-1]), "marker"
+    """(number, how it was read). An explicit final answer wins: whichever comes LATER in the text of the
+    last '#### <number>' ('marker') and the last '\\boxed{<number>}' ('boxed'). With neither, the last number
+    anywhere ('last_number'); with no number, (None, 'none').
+
+    'boxed' was added on 2026-10-13: Qwen often boxes its answer instead of using the marker, and the
+    last-number fallback then read whatever followed the box ("\\boxed{45} miles ... those 4 hours" -> 4),
+    grading correct answers as wrong."""
+    best = None
+    for rx, how in ((MARKED, "marker"), (BOXED, "boxed")):
+        ms = list(rx.finditer(text))
+        if ms and to_number(ms[-1].group(1)) is not None and (best is None or ms[-1].start() > best[0]):
+            best = (ms[-1].start(), to_number(ms[-1].group(1)), how)
+    if best is not None:
+        return best[1], best[2]
     nums = [n for n in ANY_NUMBER.findall(text) if to_number(n) is not None]
     if nums:
         return to_number(nums[-1]), "last_number"
@@ -129,7 +140,7 @@ def summarize(prompt_id, wrong, truncated, methods, lengths, k):
         "wrong_answers_in_mixed_questions": int(sum(k - c for c in n_correct if 0 < c < k)),
         "correct_per_question_histogram": np.bincount(n_correct, minlength=k + 1).tolist(),
         "truncated_answers": int(np.sum(truncated)),
-        "read_by": {m: int(sum(x == m for x in methods)) for m in ("marker", "last_number", "none")},
+        "read_by": {m: int(sum(x == m for x in methods)) for m in READ_BY},
         "answer_tokens": {"mean": float(lengths.mean()), "median": float(np.median(lengths)),
                           "p90": float(np.percentile(lengths, 90)), "max": int(lengths.max())},
     }
@@ -280,7 +291,7 @@ def inspect(model_folder, dataset, limit, n_show):
     trunc = np.array(d["truncated"]).astype(bool)
     print("  %s" % path)
     print("  %-12s %7s %9s %10s" % ("read by", "answers", "correct", "truncated"))
-    for m in ("marker", "last_number", "none"):
+    for m in READ_BY:
         s = how == m
         if s.any():
             print("  %-12s %7d %8.1f%% %10d" % (m, s.sum(), 100 * (1 - wrong[s].mean()), trunc[s].sum()))
@@ -292,6 +303,58 @@ def inspect(model_folder, dataset, limit, n_show):
         for i in idx[:n_show]:
             end = " ".join(d["decoded_text"][i][-170:].split())
             print("    read %s, reference %s | ...%s" % (d["pred"][i], d["gold"][i], end))
+
+
+def regrade(model_folder, dataset, limit):
+    """Read every stored answer's final number again with the current rules and update the labels in the
+    sequences file. Nothing is regenerated. The file as it was is kept beside it, once, as
+    *_sequences_v1.before_regrade.pt."""
+    import shutil
+    import torch
+    _, mc = math_cfg()
+    out_dir = os.path.normpath(os.path.join(HERE, mc["out_dir"], model_folder))
+    stem = "%s%s" % (dataset, "_pilot%d" % limit if limit else "")
+    path = os.path.join(out_dir, "%s_sequences_v1.pt" % stem)
+    d = torch.load(path, weights_only=False)
+    old = np.array(d["all_hallucination_flag"]).astype(int)
+    k = int(d["decoding_config"]["num_return_sequences"])
+    lengths = [len(ids) - int(pl) for ids, pl in zip(d["input_ids"], d["prompt_len"])]
+    before = summarize(d["prompt_id"], old, d["truncated"], d["extract_method"], lengths, k)
+
+    preds, hows, wrong = [], [], []
+    for text, gold in zip(d["decoded_text"], d["gold"]):
+        p, h = read_final_number(text)
+        preds.append(p)
+        hows.append(h)
+        wrong.append(not same_number(p, gold))
+    new = np.array(wrong).astype(int)
+    pid = np.asarray(d["prompt_id"])
+    to_correct, to_wrong = int(((old == 1) & (new == 0)).sum()), int(((old == 0) & (new == 1)).sum())
+    after = summarize(pid, new, d["truncated"], hows, lengths, k)
+
+    backup = path.replace("_sequences_v1.pt", "_sequences_v1.before_regrade.pt")
+    if not os.path.exists(backup):
+        shutil.copy2(path, backup)
+    d["pred"], d["extract_method"], d["all_hallucination_flag"] = preds, hows, [bool(w) for w in new]
+    d["all_is_known"] = [bool((new[pid == q] == 0).any()) for q in np.unique(pid)]
+    d["regraded"] = {"when": time.strftime("%Y-%m-%d %H:%M:%S"), "wrong_to_correct": to_correct,
+                     "correct_to_wrong": to_wrong, "git_commit": git_head()}
+    torch.save(d, path)
+    with open(os.path.join(out_dir, "%s_summary.json" % stem), "w") as f:
+        json.dump(dict(after, model_folder=model_folder, dataset=dataset, decoding_config=d["decoding_config"],
+                       regraded=d["regraded"]), f, indent=1)
+
+    print("  %s" % path)
+    print("  answers regraded wrong -> correct: %d   correct -> wrong: %d" % (to_correct, to_wrong))
+    print("  %-34s %10s %10s" % ("", "before", "after"))
+    print("  %-34s %9.1f%% %9.1f%%" % ("answers correct", 100 * before["answer_accuracy"], 100 * after["answer_accuracy"]))
+    for key, name in (("questions_mixed", "mixed questions"), ("questions_all_correct", "all-correct questions"),
+                      ("questions_all_wrong", "all-wrong questions"),
+                      ("wrong_answers_in_mixed_questions", "wrong answers in mixed questions")):
+        print("  %-34s %10d %10d" % (name, before[key], after[key]))
+    print("  final number read from: %s" % after["read_by"])
+    print("  correct answers per question, 0..%d: %s" % (k, after["correct_per_question_histogram"]))
+    print("  previous file kept as %s" % os.path.basename(backup))
 
 
 def self_test():
@@ -314,6 +377,16 @@ def self_test():
     check("no number at all", (n, how) == (None, "none"), str((n, how)))
     n, how = read_final_number("The answer is -3.5.\n#### -3.5")
     check("negative decimal", n == -3.5, str(n))
+    n, how = read_final_number("Therefore, John is \\(\\boxed{45}\\) miles from home at the end of those 4 hours.")
+    check("boxed answer beats a number that follows it", (n, how) == (45.0, "boxed"), str((n, how)))
+    n, how = read_final_number("needs to order \\boxed{1,400} bananas to last for 2 months.")
+    check("boxed answer with a thousands comma", (n, how) == (1400.0, "boxed"), str((n, how)))
+    n, how = read_final_number("The total is $\\boxed{\\$18}$.")
+    check("boxed answer with a dollar sign", (n, how) == (18.0, "boxed"), str((n, how)))
+    n, how = read_final_number("So \\boxed{12}.\n#### 15")
+    check("marker after a box: the later one wins", (n, how) == (15.0, "marker"), str((n, how)))
+    n, how = read_final_number("#### 15\nCorrection: \\boxed{12} for the 3 days.")
+    check("box after a marker: the later one wins", (n, how) == (12.0, "boxed"), str((n, how)))
     check("18.0 equals 18", same_number(18.0, 18) and not same_number(18.5, 18) and not same_number(None, 18))
     check("a trailing period is not part of the number", to_number("42.") == 42.0)
 
@@ -352,6 +425,8 @@ def main():
     ap.add_argument("--prefetch", action="store_true", help="download the dataset into the cache and exit")
     ap.add_argument("--inspect", action="store_true", help="how answers were read vs graded, with examples; no GPU")
     ap.add_argument("--n-show", type=int, default=12)
+    ap.add_argument("--regrade", action="store_true",
+                    help="re-read every stored answer's final number and update the labels; no GPU, no regeneration")
     ap.add_argument("--model_folder")
     ap.add_argument("--dataset", default="gsm8k")
     ap.add_argument("--limit-questions", type=int, default=0, help="first N questions only (a pilot)")
@@ -368,6 +443,9 @@ def main():
         return
     if not a.model_folder:
         raise SystemExit("--model_folder is required (or --self-test / --prefetch)")
+    if a.regrade:
+        regrade(a.model_folder, a.dataset, a.limit_questions)
+        return
     if a.inspect:
         inspect(a.model_folder, a.dataset, a.limit_questions, a.n_show)
         return
