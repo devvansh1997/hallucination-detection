@@ -174,6 +174,10 @@ def run(model_folder, dataset, out_dir, seed, n_boot):
     X = tokens.reshape(len(tokens), -1)
     fold, _ = s78.question_folds(pid[keep], y[keep], s78.N_FOLDS, seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # `module load cuda/cuda-12.6.0` puts cuDNN 9.7.1 on LD_LIBRARY_PATH, but torch is built against
+    # its own bundled 9.10.2, so the first GRU on the GPU dies at cuDNN init (job 980245, 2026-10-21).
+    # Without cuDNN the GRU runs on torch's own CUDA kernels: same model, somewhat slower.
+    torch.backends.cudnn.enabled = False
     print("  [%s/%s] %d answers evaluated, %d coordinates per token, device %s | GRU hidden %d, %d epochs"
           % (model_folder, dataset, len(keep), X.shape[1], device, HIDDEN, EPOCHS), flush=True)
 
