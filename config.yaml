@@ -105,3 +105,13 @@ math:
     top_k: 0
     repetition_penalty: 1.0
     max_new_tokens: 1024
+
+# ProcessBench (Zheng et al., 2024): math solutions written by 12 open models, cut into steps, with the first
+# wrong step marked by human experts (label = its 0-based index, -1 if every step is correct). Read by one
+# model, which here acts as a reader of other models' text, not as the writer (83_processbench_steps.py, T-026).
+processbench:
+  hf_path: "Qwen/ProcessBench"
+  splits: ["gsm8k", "math", "olympiadbench", "omnimath"]
+  reader: "qwen-2.5-7b-instruct"     # a folder from `models`
+  first_block: 15                    # blocks 15..23, the window of the main experiments
+  out_dir: "../data-processbench"
