@@ -5,7 +5,9 @@
 #   bash submit_temporal_batch.sh             # queue all four
 #   ONLY="81 84" bash submit_temporal_batch.sh
 #
-# RUN FROM A NEWTON TERMINAL with hal-det active (the ProcessBench download runs here, on the login node).
+# RUN FROM A PLAIN LOGIN-NODE SHELL: no conda env active, not inside srun/salloc. Jobs submitted from an active
+# env or from a compute node inherit that state and crash (2026-10-26: 83 and 84 died in 2 s). This script runs
+# no Python; each job activates hal-det itself, and 83's job fetches ProcessBench (or reads it from the HF cache).
 #
 #   81  do hallucinated sentences cluster?           RAGTruth labels, all generators   CPU, minutes
 #   82  does order help find where a span is?        RAGTruth Llama-2-7B token store   GPU, ~1 h
@@ -16,6 +18,13 @@
 # ../data-math/qwen-2.5-7b-instruct/gsm8k_token_nll.npy (~14 MB). Results go to results/token_structure/.
 
 set -euo pipefail
+
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    echo "refusing: this shell is inside Slurm job $SLURM_JOB_ID (srun/salloc). Exit it and submit from the login node."; exit 1
+fi
+if [ -n "${CONDA_DEFAULT_ENV:-}" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
+    echo "refusing: conda env '$CONDA_DEFAULT_ENV' is active. Run 'conda deactivate' and submit from a plain shell."; exit 1
+fi
 
 HD_REPO="${HD_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$HD_REPO"
@@ -58,11 +67,6 @@ if wants 82; then
     queue t82-loc 1 64G 04:00:00 82_ragtruth_localise.py --generator "$RT_GEN"
 fi
 if wants 83; then
-    if [ ! -f "$PARENT/data-processbench/$MATH_MODEL/meta.json" ] && [ "${DRY:-0}" != "1" ]; then
-        echo "  prefetching ProcessBench on the login node ..."
-        python 83_processbench_steps.py --prefetch || {
-            echo "prefetch failed: activate hal-det here (module load anaconda/anaconda-2024.10; conda activate hal-det) and rerun"; exit 1; }
-    fi
     queue t83-pb 1 64G 05:00:00 83_processbench_steps.py
 fi
 if wants 84; then

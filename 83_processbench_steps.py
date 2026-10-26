@@ -27,7 +27,7 @@ READING. Real order above shuffled: the order of the earlier steps helps spot th
 state and the set of steps before it are all the readers use.
 
   python 83_processbench_steps.py --self-test
-  python 83_processbench_steps.py --prefetch          # dataset into the HF cache; no GPU (login node)
+  python 83_processbench_steps.py --prefetch          # optional: dataset into the HF cache; the job also fetches it
   python 83_processbench_steps.py                     # read the solutions once (GPU), then the check
 """
 
