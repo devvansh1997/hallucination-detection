@@ -29,6 +29,7 @@
 #         avit410    56  fgja W2: ACT-ViT with fewer layers (L4 N10)               4 GPU  30-60 min
 #         xfer       66  pjMe W2: transfer with Falcon-H1 as a third model         8 CPU  30-60 min
 #         avitf      56  ACT-ViT on Falcon-H1                                      2 GPU  30-45 min
+#         pool       89  zjPm W2: both poolings timed on the GPU                   2 GPU  ~15 min
 # Times assume jobs start promptly; a busy cluster can double them (TICKETS: contention).
 #
 # DISK (new files): wave 2 writes ~15 GB + ~61 GB for TriviaQA N=5 + ~10 GB of Falcon reads + ~12 GB
@@ -207,6 +208,12 @@ fi
 
 # ================================================================================================
 if [ "$WAVE" = 3 ]; then
+    echo "[pool] 89: both poolings timed on the GPU as well (wave 1 timed NumPy on the CPU)   (~15 min)"
+    for M in $MODELS; do
+        queue "rb-cost-pool-$(short $M)" 1 80G 02:00:00 hal-det \
+            "json:$RB/cost_extract_gpu_${M}_truthfulqa.json" "" \
+            89_cost_profile.py --dataset truthfulqa --model_folder "$M" --stages extract_gpu
+    done
     echo "[avit410] 56: ACT-ViT with 4 layer x 10 token slots   (~30-60 min)"
     for M in $MODELS; do for D in $SMALL; do
         queue "rb-avit410-$(short $M)-$(short $D)" 1 64G 08:00:00 hal-det \

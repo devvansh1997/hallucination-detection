@@ -45,7 +45,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 DEFAULT_OUT = os.path.join(HERE, "results", "rebuttal")
 CONDITION = "triple_concat"
-STAGES = ("extract", "fit_lotus", "fit_flatpca", "act_vit", "mapping")
+STAGES = ("extract", "extract_gpu", "fit_lotus", "fit_flatpca", "act_vit", "mapping")
 WINDOW = list(range(16, 25))          # hidden-state indices of blocks 15..23 (65.WINDOW)
 SEED = 42
 
@@ -190,7 +190,32 @@ def stage_fit(kind, dataset, model_folder, data_dir):
 # GPU: extraction and ACT-ViT
 # ---------------------------------------------------------------------------------------------
 
-def stage_extract(dataset, model_folder, data_dir, device, questions):
+def lotus_pool_torch(h, q_hi=0.95, q_lo=0.05):
+    """57.pool_answer on a torch tensor h (L1, T, D), for timing the pooling on the GPU. Same maths:
+    max over tokens, the 0.95 / 0.05 token quantiles (linear interpolation, numpy's default), and the
+    same quantiles of the layer-to-layer update h[i+1] - h[i]."""
+    import torch
+    q = torch.tensor([q_hi, q_lo], dtype=h.dtype, device=h.device)
+    qs = torch.quantile(h, q, dim=1)
+    d = h[1:] - h[:-1]
+    qd = torch.quantile(d, q, dim=1)
+    return {"core": h.amax(dim=1), "q95": qs[0], "q05": qs[1], "v95": qd[0], "v05": qd[1]}
+
+
+def act_pool_torch(A, l_pool=8, n_pool=20, n_max=100):
+    """59.act_pool on a torch tensor A (L, N, D): zero-pad to (L_for_pad, N_for_pad), then max over
+    non-overlapping blocks. The replicate pad in their code never fires at these settings (asserted)."""
+    import torch
+    L, N, D = A.shape
+    l_for_pad = (int(L / l_pool) + 1) * l_pool
+    n_for_pad = n_max if (n_max % n_pool) == 0 else (int(n_max / n_pool) + 1) * n_pool
+    P = torch.zeros((l_for_pad, n_for_pad, D), dtype=A.dtype, device=A.device)
+    P[:min(L, l_for_pad), :min(N, n_for_pad)] = A[:min(L, l_for_pad), :min(N, n_for_pad)]
+    assert l_for_pad % l_pool == 0 and n_for_pad % n_pool == 0
+    return P.reshape(l_pool, l_for_pad // l_pool, n_pool, n_for_pad // n_pool, D).amax(dim=(1, 3))
+
+
+def stage_extract(dataset, model_folder, data_dir, device, questions, gpu_pool=False):
     import torch
     import yaml
     from transformers import AutoModelForCausalLM
@@ -214,6 +239,7 @@ def stage_extract(dataset, model_folder, data_dir, device, questions):
     ck = Clock(sync=torch.cuda.synchronize)
     torch.cuda.reset_peak_memory_stats()
     n_answers = n_tokens = 0
+    diffs = {"lotus": 0.0, "act_vit": 0.0}          # max |GPU - CPU| over the answers checked
     for idx in groups:
         batch = [input_ids[i] for i in idx]
         pls = [int(prompt_lens[i]) for i in idx]
@@ -237,14 +263,30 @@ def stage_extract(dataset, model_folder, data_dir, device, questions):
             n_tokens += e - s
             with ck("lotus_pooling"):
                 h = np.stack([out.hidden_states[i][j, s:e].float().cpu().numpy() for i in WINDOW])
-                s57.pool_answer(h, ("core", "static", "velocity"))
+                p_cpu = s57.pool_answer(h, ("core", "static", "velocity"))
             with ck("act_vit_pooling"):
                 layers = [out.hidden_states[li][j, s:e].float().cpu().numpy() for li in range(L1)]
-                s59.act_pool(np.stack(layers, axis=0), 8, 20)
+                a_cpu = s59.act_pool(np.stack(layers, axis=0), 8, 20)
+            if gpu_pool:
+                # The same two poolings on the GPU, where the hidden states already are. Only the
+                # pooled result crosses to the host, as a production extractor would do it.
+                with ck("lotus_pooling_gpu"):
+                    hg = torch.stack([out.hidden_states[i][j, s:e] for i in WINDOW]).float()
+                    p_gpu = {k: v.cpu().numpy() for k, v in lotus_pool_torch(hg).items()}
+                with ck("act_vit_pooling_gpu"):
+                    ag = torch.stack([out.hidden_states[li][j, s:e] for li in range(L1)]).float()
+                    a_gpu = act_pool_torch(ag, 8, 20).cpu().numpy()
+                if n_answers <= 50:
+                    diffs["lotus"] = max(diffs["lotus"], max(float(np.abs(p_gpu[k] - p_cpu[k]).max())
+                                                             for k in p_gpu))
+                    diffs["act_vit"] = max(diffs["act_vit"], float(np.abs(a_gpu - a_cpu).max()))
         del out
     per = {k: round(1000.0 * v / max(1, n_answers), 3) for k, v in ck.t.items()}
     floats = stored_floats_per_answer(D)
-    return {"model_id": model_id, "questions": len(groups), "answers": n_answers,
+    extra = {}
+    if gpu_pool:
+        extra["max_abs_diff_gpu_vs_cpu_first_50"] = {k: round(v, 6) for k, v in diffs.items()}
+    return {**extra, "model_id": model_id, "questions": len(groups), "answers": n_answers,
             "mean_answer_tokens": round(n_tokens / max(1, n_answers), 1),
             "model_load_seconds": round(load_s, 1), "per_answer_ms": per,
             "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1024 ** 3, 3),
@@ -358,6 +400,8 @@ def stage_mapping(dataset, source, target, data_dir, cross_dir):
 def run_stage(stage, a, data_dir):
     if stage == "extract":
         return stage_extract(a.dataset, a.model_folder, data_dir, a.device, a.questions)
+    if stage == "extract_gpu":
+        return stage_extract(a.dataset, a.model_folder, data_dir, a.device, a.questions, gpu_pool=True)
     if stage == "fit_lotus":
         return stage_fit("lotus", a.dataset, a.model_folder, data_dir)
     if stage == "fit_flatpca":
@@ -414,6 +458,25 @@ def self_test():
     assert f["lotus"] == 43 * 3584 and abs(f["act_vit_L8_N5"] / f["lotus"] - 40 / 43) < 1e-12
     assert peak_rss_gb() is None or peak_rss_gb() > 0
     print("  [PASS] stored-size arithmetic (ACT-ViT L8 N5 = 0.93x LOTUS) and the peak-memory probe")
+
+    # The GPU poolings timed by extract_gpu must compute what the CPU poolings compute (run here on
+    # CPU tensors; the operations are the same on the GPU).
+    import torch
+    s57 = _load("s57", "57_extract_all_layers.py")
+    s59 = _load("s59", "59_extract_act_tensors.py")
+    worst_l = worst_a = 0.0
+    for L1 in (29, 33, 45):
+        for T in (1, 2, 7, 17, 64):
+            a = rng.standard_normal((L1, T, 24)).astype(np.float32)
+            ref_l = s57.pool_answer(a[WINDOW], ("core", "static", "velocity"))
+            got_l = {k: v.numpy() for k, v in lotus_pool_torch(torch.from_numpy(a[WINDOW])).items()}
+            worst_l = max(worst_l, max(float(np.abs(got_l[k] - ref_l[k]).max()) for k in ref_l))
+            got_a = act_pool_torch(torch.from_numpy(a), 8, 20).numpy()
+            worst_a = max(worst_a, float(np.abs(got_a - s59.act_pool(a, 8, 20)).max()))
+    assert worst_l < 1e-5, worst_l
+    assert worst_a == 0.0, worst_a
+    print("  [PASS] torch poolings equal 57.pool_answer (max diff %.1e) and 59.act_pool (exact) for 29/33/45 "
+          "layers and 1-64 tokens" % worst_l)
 
     print("\n  ALL PASS")
     return True

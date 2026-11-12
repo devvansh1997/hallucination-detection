@@ -168,7 +168,7 @@ def cost_table(root, out):
             "tensor_load_seconds", "stored_gb_loaded", "peak_rss_gb_process", "peak_rss_gb_after_load",
             "offline_ridge_fit_with_cv_seconds", "source_reading_ms_per_answer",
             "projections_seconds_both_models", "map_parameters", "stored_kb_per_answer_float16",
-            "test_pooled_auroc")
+            "max_abs_diff_gpu_vs_cpu_first_50", "test_pooled_auroc")
     for p in files:
         r = _j(p) or {}
         out.append("  %s" % os.path.basename(p))
