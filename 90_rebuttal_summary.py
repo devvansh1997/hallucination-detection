@@ -157,6 +157,43 @@ def falcon_tables(root, out):
                    % (d, "missing" if not v else "%s +- %s" % (pct(v[0]), pct(v[1]))))
 
 
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def exact_table(root, out):
+    """The values the appendix and the responses quote, at full precision: two-decimal standard
+    deviations, within-question AUROC and per-run AUROC for every rebuttal ACT-ViT run, and every arm of
+    the Falcon transfer. The per-run values show whether a large spread is one failed run or many."""
+    out.append("\n== Exact values for the paper (pooled AUROC %, mean +- std over seeds, within-question in []) ==")
+    out.append("  ACT-ViT (56); per-seed pooled AUROC in ()")
+    for m in MODELS + (FALCON,):
+        for d in SMALL + ("triviaqa",):
+            for tag in ("", "_L8N5", "_L4N10"):
+                r = _j(os.path.join(root, "results", "methods", "act_vit_%s_%s%s.json" % (m, d, tag)))
+                q = (r or {}).get("protocols", {}).get("question")
+                if not q:
+                    continue
+                ps = q.get("per_seed", [])
+                seeds = " ".join("%s:%s" % (p.get("seed"), pct(p.get("pooled_auroc"))) for p in ps)
+                out.append("    %-36s %s +- %s [%s]  (%s)"
+                           % ("%s/%s%s" % (m[:12], d, tag or "_L8N20"), pct(q.get("pooled_auroc_mean")),
+                              pct(q.get("pooled_auroc_std")), pct(_mean([p.get("within_prompt_auroc") for p in ps])),
+                              seeds or "no per-seed values"))
+    out.append("  Transfer with Falcon-H1 (66), every arm")
+    for p in sorted(glob.glob(os.path.join(root, "results", "cross_model", "cross_*%s*_RF.json" % FALCON))):
+        r = _j(p)
+        if not r or "summary" not in r:
+            continue
+        arms = []
+        for a in ("in_model", "aligned", "naive", "proxy"):
+            e = r["summary"].get(a) or {}
+            arms.append("%s %s+-%s [%s]" % (a, pct(e.get("pooled_mean")), pct(e.get("pooled_std")),
+                                            pct(e.get("within_mean"))))
+        out.append("    %s -> %s %s: %s" % (r["source"][:12], r["target"][:12], r["dataset"], " | ".join(arms)))
+
+
 def cost_table(root, out):
     out.append("\n== Cost profile (89) ==")
     files = sorted(glob.glob(os.path.join(root, "results", "rebuttal", "cost_*.json")))
@@ -179,7 +216,8 @@ def cost_table(root, out):
 
 def build(root):
     out = ["REBUTTAL RESULTS under %s" % root]
-    for fn in (kept_table, responses_table, fewer_labels_table, storage_table, falcon_tables, cost_table):
+    for fn in (kept_table, responses_table, fewer_labels_table, storage_table, falcon_tables, cost_table,
+               exact_table):
         try:
             fn(root, out)
         except Exception as e:                      # a malformed file must not hide the other tables
@@ -202,7 +240,11 @@ def self_test():
                                                                "kept_plus_discarded")}}, f)
         with open(os.path.join(root, "results", "methods",
                                "act_vit_llama-3.1-8b_truthfulqa_L8N5.json"), "w") as f:
-            json.dump({"protocols": {"question": {"pooled_auroc_mean": 0.8812, "pooled_auroc_std": 0.012}}}, f)
+            json.dump({"protocols": {"question": {"pooled_auroc_mean": 0.8812, "pooled_auroc_std": 0.012,
+                                                  "per_seed": [{"seed": 42, "pooled_auroc": 0.87,
+                                                                "within_prompt_auroc": 0.80},
+                                                               {"seed": 0, "pooled_auroc": 0.8924,
+                                                                "within_prompt_auroc": 0.82}]}}}, f)
         with open(os.path.join(root, "results", "cross_model",
                                "cross_%s_to_llama-3.1-8b_truthfulqa_RF.json" % FALCON), "w") as f:
             json.dump({"source": FALCON, "target": "llama-3.1-8b", "dataset": "truthfulqa",
@@ -215,6 +257,8 @@ def self_test():
     assert "87.76+-0.9 [82.0]" in txt, txt
     assert "88.12+-1.2" in txt and "aligned 85.00" in txt and "(partial)" in txt
     assert "missing" in txt and "none yet" in txt
+    assert "llama-3.1-8b/truthfulqa_L8N5" in txt and "88.12 +- 1.20 [81.00]  (42:87.00 0:89.24)" in txt, txt
+    assert "in_model 85.00+-  --   [80.00]" in txt, txt
     print(txt)
     print("\n  [PASS] tables render from partial results; missing and malformed files are reported, not fatal")
     return True
