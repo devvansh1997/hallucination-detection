@@ -155,8 +155,12 @@ def self_test():
                 got = shrink_tokens(p20[None], n_to)[0]
                 assert np.array_equal(got, want), (L1, T, n_to)
                 n_checked += 1
-    print("  [PASS] re-pooled N=20 equals act_pool at N=10 and N=5 exactly (%d cases, 1-64 tokens, "
-          "29 and 33 layers)" % n_checked)
+            # 59's default extraction is N=100 (one token per slot); its re-pool to 20 must be exact too.
+            p100 = s59.act_pool(A, 8, 100)
+            assert np.array_equal(shrink_tokens(p100[None], 20)[0], p20), (L1, T, "100->20")
+            n_checked += 1
+    print("  [PASS] re-pooled N=20 equals act_pool at N=10 and N=5, and N=100 re-pooled equals N=20, "
+          "exactly (%d cases, 1-64 tokens, 29 and 33 layers)" % n_checked)
 
     # 2. Non-nested sizes are refused rather than approximated.
     for bad in ((20, 3), (20, 8), (30, 5)):

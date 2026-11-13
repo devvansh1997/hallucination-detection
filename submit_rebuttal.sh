@@ -24,7 +24,10 @@
 #         shrink     88  ACT-ViT tensors re-pooled to N=5 (exact, CPU)             6 CPU  5 min (TriviaQA 20-40 min)
 #         ext410     59  ACT-ViT tensors at 4 layers x 10 tokens                   4 GPU  ~15 min
 #         xread      65  Falcon-H1 <-> Qwen / LLaMA reading each other's answers   8 GPU  10-20 min
-#         extf       59  ACT-ViT tensors for Falcon-H1                             2 GPU  ~15 min
+#         extf       59  ACT-ViT tensors for Falcon-H1 (or 88 re-pool from N100)   2 GPU  ~15 min (re-pool: 2 CPU, ~5 min)
+#
+# A NODE WITH A BROKEN GPU STACK ("Error 802: system not yet initialized") kills a job before our code
+# runs. Rerun the wave with that node excluded as well, e.g.  EXCLUDE=evc103,evc101 bash submit_rebuttal.sh 2
 # WAVE 3  avit5      56  fgja W2: ACT-ViT at LOTUS's storage (L8 N5)               6 GPU  30-60 min (TriviaQA 4-8 h)
 #         avit410    56  fgja W2: ACT-ViT with fewer layers (L4 N10)               4 GPU  30-60 min
 #         xfer       66  pjMe W2: transfer with Falcon-H1 as a third model         8 CPU  30-60 min
@@ -198,11 +201,19 @@ if [ "$WAVE" = 2 ]; then
             "file:$XR/${M}_reads_${FALCON}/${D}_window.json" "" \
             65_extract_cross_read.py --reader "$M" --generator "$FALCON" --dataset "$D"
     done; done
-    echo "[extf] 59: ACT-ViT tensors for Falcon-H1   (~15 min)"
+    echo "[extf] ACT-ViT tensors for Falcon-H1 at L8 N20   (re-pool from an N100 file: ~5 min CPU; else extraction ~15 min GPU)"
     for D in $SMALL; do
-        queue "rb-extf-$(short $D)" 1 80G 03:00:00 hal-det-h1 \
-            "file:$AT/$FALCON/${D}_at_L8_N20.json" "" \
-            59_extract_act_tensors.py --dataset "$D" --model_folder "$FALCON"
+        # 2026-11-12: the first extraction ran without --n-pool and wrote N=100 (59's default). Re-pooling
+        # that file to N=20 is exact (88), so it is used whenever it exists instead of a new GPU run.
+        if [ -e "$AT/$FALCON/${D}_at_L8_N100.npz" ]; then
+            queue "rb-shrinkf-$(short $D)" 0 32G 02:00:00 hal-det \
+                "file:$AT/$FALCON/${D}_at_L8_N20.json" "" \
+                88_shrink_act_tensors.py --dataset "$D" --model_folder "$FALCON" --n-from 100 --n-to 20
+        else
+            queue "rb-extf-$(short $D)" 1 80G 03:00:00 hal-det-h1 \
+                "file:$AT/$FALCON/${D}_at_L8_N20.json" "" \
+                59_extract_act_tensors.py --dataset "$D" --model_folder "$FALCON" --n-pool 20
+        fi
     done
 fi
 
