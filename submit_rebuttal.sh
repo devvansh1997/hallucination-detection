@@ -83,6 +83,8 @@ N=0; MISSING=0; NOT_READY=0
 # queue <name> <gpu 0|1> <mem> <time> <env> <done-test> <input|""> <script> [args...]
 #   done-test  "json:<path>"  finished when that JSON contains "complete": true
 #              "file:<path>"  finished when that path exists (written only at the very end)
+#              "auc:<path>"   finished when that 56 result holds a numeric pooled AUROC; a result
+#                             whose every score was non-finite has none, and is queued again
 #   input      a file an EARLIER wave writes LAST (a .json written after its .npz, or 88s atomic
 #              .npz); if absent the job is NOT queued
 queue() {
@@ -90,6 +92,7 @@ queue() {
     if [ "${FORCE:-0}" != "1" ]; then
         local kind="${done_test%%:*}" path="${done_test#*:}"
         if { [ "$kind" = json ] && [ -f "$path" ] && grep -q '"complete": true' "$path"; } || \
+           { [ "$kind" = auc ] && [ -f "$path" ] && grep -q '"pooled_auroc_mean": [0-9]' "$path"; } || \
            { [ "$kind" = file ] && [ -e "$path" ]; }; then
             printf "  %-26s SKIP (done)\n" "$name"; return 0
         fi
@@ -228,7 +231,7 @@ if [ "$WAVE" = 3 ]; then
     echo "[avit410] 56: ACT-ViT with 4 layer x 10 token slots   (~30-60 min)"
     for M in $MODELS; do for D in $SMALL; do
         queue "rb-avit410-$(short $M)-$(short $D)" 1 64G 08:00:00 hal-det \
-            "file:$MR/act_vit_${M}_${D}_L4N10.json" "$AT/$M/${D}_at_L4_N10.json" \
+            "auc:$MR/act_vit_${M}_${D}_L4N10.json" "$AT/$M/${D}_at_L4_N10.json" \
             56_run_method.py --method act_vit --dataset "$D" --model_folder "$M" --m-l-eff 4 --m-n-eff 10 --tag L4N10
     done; done
     echo "[xfer] 66: transfer with Falcon-H1 as a third model   (~30-60 min)"
@@ -243,7 +246,7 @@ if [ "$WAVE" = 3 ]; then
     echo "[avitf] 56: ACT-ViT on Falcon-H1   (~30-45 min)"
     for D in $SMALL; do
         queue "rb-avitf-$(short $D)" 1 64G 08:00:00 hal-det \
-            "file:$MR/act_vit_${FALCON}_${D}.json" "$AT/$FALCON/${D}_at_L8_N20.json" \
+            "auc:$MR/act_vit_${FALCON}_${D}.json" "$AT/$FALCON/${D}_at_L8_N20.json" \
             56_run_method.py --method act_vit --dataset "$D" --model_folder "$FALCON"
     done
     echo "[avit5] 56: ACT-ViT at LOTUS's storage, L8 N5   (~30-60 min; TriviaQA last, 4-8 h, 100 GB RAM)"
@@ -252,7 +255,7 @@ if [ "$WAVE" = 3 ]; then
     for D in $STORAGE_DS; do for M in $MODELS; do
         if [ "$D" = triviaqa ]; then mem=100G; tim=20:00:00; else mem=64G; tim=08:00:00; fi
         queue "rb-avit5-$(short $M)-$(short $D)" 1 "$mem" "$tim" hal-det \
-            "file:$MR/act_vit_${M}_${D}_L8N5.json" "$AT/$M/${D}_at_L8_N5.npz" \
+            "auc:$MR/act_vit_${M}_${D}_L8N5.json" "$AT/$M/${D}_at_L8_N5.npz" \
             56_run_method.py --method act_vit --dataset "$D" --model_folder "$M" --m-l-eff 8 --m-n-eff 5 --tag L8N5
     done; done
 fi

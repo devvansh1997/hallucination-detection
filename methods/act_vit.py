@@ -133,6 +133,26 @@ def pad_features(batch, target=FEATURE_DIM_MAX):
     return torch.nn.functional.pad(batch, (0, target - d))
 
 
+def zero_empty_rows(at, chunk=256):
+    """59 leaves an EMPTY completion (no answer tokens) as an all-NaN row, and 88 keeps it so.
+    ACT-ViT's own preprocessing zero-pads the token axis before max-pooling, so there an empty
+    completion is all zeros; this does the same, in place. A NaN row would otherwise reach BCELoss and
+    stop training (or turn every weight into NaN). A NaN inside an otherwise finite row is corruption,
+    not an empty completion, and stops the run. Returns the number of rows set to zero."""
+    n = 0
+    for a in range(0, len(at), chunk):
+        blk = at[a:a + chunk]
+        nan = np.isnan(blk).reshape(len(blk), -1)
+        full, part = nan.all(axis=1), nan.any(axis=1)
+        if (part & ~full).any():
+            raise SystemExit("rows %s hold NaN among finite values: a corrupt extraction, not an empty "
+                             "completion" % (a + np.flatnonzero(part & ~full)[:5]).tolist())
+        if full.any():
+            blk[full] = 0
+            n += int(full.sum())
+    return n
+
+
 def grouped_val_split(prompt_id, train_idx, seed, frac=VAL_FRACTION):
     """Carve a validation set out of TRAINING rows, whole questions at a time.
 
@@ -279,6 +299,10 @@ class ActViT(Method):
                              "stale, re-run 59" % path)
         if not np.array_equal(z["prompt_id"][order], data.prompt_id):
             raise SystemExit("prompt_id in %s disagrees with the pinned generations" % path)
+        n_empty = zero_empty_rows(at)
+        if n_empty:
+            print("    [act_vit] %d empty completions (all-NaN rows) set to zero, as ACT-ViT's "
+                  "zero-padding makes them" % n_empty, flush=True)
 
         # The array stays in EXTRACTION order and `order` is applied per batch inside
         # train_and_score. Reordering here would copy: 43.6 GB becomes 87 GB at N_eff=100 on
@@ -287,7 +311,8 @@ class ActViT(Method):
         self._diag = {"at_path": path, "l_eff": int(at.shape[1]), "n_eff": int(at.shape[2]),
                       "hidden": int(at.shape[3]), "gb": round(at.nbytes / 1024 ** 3, 2),
                       "llm_adapter_index": LLM_INDEX.get(data.model_folder, 0),
-                      "median_completion_tokens": int(np.median(z["token_len"]))}
+                      "median_completion_tokens": int(np.median(z["token_len"])),
+                      "empty_completions_zeroed": int(n_empty)}
         print("    [act_vit] %s  %s  %.1f GB  adapter index %d"
               % (os.path.basename(path), at.shape, at.nbytes / 1024 ** 3,
                  LLM_INDEX.get(data.model_folder, 0)), flush=True)
@@ -331,6 +356,23 @@ class ActViT(Method):
         finally:
             os.path.isdir, _GET_MODEL = real, saved
         print("    [PASS] repo check retries a transient miss, and is skipped once imported")
+
+        # Empty completions arrive as all-NaN rows and must become zeros, in place, leaving every
+        # other row untouched; a single stray NaN in a real row must stop the run instead.
+        at = np.ones((5, 2, 3, 4), dtype=np.float16)
+        at[1] = np.nan
+        at[3] = np.nan
+        assert zero_empty_rows(at, chunk=2) == 2
+        assert (at[[1, 3]] == 0).all() and (at[[0, 2, 4]] == 1).all()
+        assert zero_empty_rows(at) == 0
+        bad = np.ones((3, 2, 3, 4), dtype=np.float16)
+        bad[2, 0, 0, 1] = np.nan
+        try:
+            zero_empty_rows(bad)
+            raise AssertionError("a NaN inside a finite row must stop the run")
+        except SystemExit:
+            pass
+        print("    [PASS] empty completions (all-NaN rows) become zeros; a stray NaN stops the run")
 
         import torch
 

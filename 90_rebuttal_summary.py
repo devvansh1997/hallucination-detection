@@ -192,6 +192,26 @@ def exact_table(root, out):
             arms.append("%s %s+-%s [%s]" % (a, pct(e.get("pooled_mean")), pct(e.get("pooled_std")),
                                             pct(e.get("within_mean"))))
         out.append("    %s -> %s %s: %s" % (r["source"][:12], r["target"][:12], r["dataset"], " | ".join(arms)))
+    # Falcon-H1 is a base model and sometimes stops at once (an empty answer, labelled hallucinated).
+    # The Falcon pre-registration promised this rate; token_len is read from the ACT-ViT tensors,
+    # whose small members load without touching the large one.
+    out.append("  Falcon-H1 answer lengths (59/88 tensors; answer tokens per response)")
+    for d in SMALL:
+        p = os.path.join(os.path.dirname(root), "data-acttensors", FALCON, "%s_at_L8_N20.npz" % d)
+        try:
+            import numpy as np
+            with np.load(p) as z:
+                tl, y = np.asarray(z["token_len"]), np.asarray(z["label"])
+        except Exception as e:
+            out.append("    %-11s unreadable (%s)" % (d, type(e).__name__))
+            continue
+        out.append("    %-11s %d answers, hallucination rate %.1f%%, median %d tokens"
+                   % (d, len(tl), 100.0 * y.mean(), int(np.median(tl))))
+        for k in (0, 1):
+            m = tl == k
+            out.append("    %-11s %5d have %d tokens (%.1f%%), of which %s labelled hallucinated"
+                       % ("", int(m.sum()), k, 100.0 * m.mean(),
+                          "%.1f%%" % (100.0 * y[m].mean()) if m.any() else "none"))
 
 
 def cost_table(root, out):
@@ -253,12 +273,21 @@ def self_test():
                                        alignment_test_r2_mean=0.6)}, f)
         with open(os.path.join(root, "results", "cross_model", "cross_x_to_%s_tydiqa_gp_RF.json" % FALCON), "w") as f:
             f.write("{not json")
+        import numpy as np
+        os.makedirs(os.path.join(td, "data-acttensors", FALCON))
+        np.savez(os.path.join(td, "data-acttensors", FALCON, "truthfulqa_at_L8_N20.npz"),
+                 at=np.zeros((5, 1, 1, 1), dtype=np.float16), token_len=np.array([0, 0, 3, 5, 1]),
+                 label=np.array([1, 1, 0, 1, 0]))
         txt = build(root)
     assert "87.76+-0.9 [82.0]" in txt, txt
     assert "88.12+-1.2" in txt and "aligned 85.00" in txt and "(partial)" in txt
     assert "missing" in txt and "none yet" in txt
     assert "llama-3.1-8b/truthfulqa_L8N5" in txt and "88.12 +- 1.20 [81.00]  (42:87.00 0:89.24)" in txt, txt
     assert "in_model 85.00+-  --   [80.00]" in txt, txt
+    assert "5 answers, hallucination rate 60.0%, median 1 tokens" in txt, txt
+    assert "2 have 0 tokens (40.0%), of which 100.0% labelled" in txt, txt
+    assert "1 have 1 tokens (20.0%), of which 0.0% labelled" in txt, txt
+    assert "tydiqa_gp   unreadable (FileNotFoundError)" in txt, txt
     print(txt)
     print("\n  [PASS] tables render from partial results; missing and malformed files are reported, not fatal")
     return True
